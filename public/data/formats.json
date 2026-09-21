@@ -1,0 +1,77 @@
+{
+  "generated": "2026-09-21T11:37:13.908Z",
+  "formats": [
+    {
+      "id": "gen9championsvgc2026regmb",
+      "name": "Champions VGC 2026 Reg M-B",
+      "gen": 0,
+      "gameType": "doubles",
+      "level": 50,
+      "itemClause": true,
+      "bring": 4,
+      "month": "2026-08",
+      "cutoff": 1760,
+      "battles": 1269250
+    },
+    {
+      "id": "gen9championsvgc2026regmbbo3",
+      "name": "Champions VGC 2026 Reg M-B (Bo3)",
+      "gen": 0,
+      "gameType": "doubles",
+      "level": 50,
+      "itemClause": true,
+      "bring": 4,
+      "month": "2026-08",
+      "cutoff": 1760,
+      "battles": 179434
+    },
+    {
+      "id": "gen9championsbssregmb",
+      "name": "Champions BSS Reg M-B",
+      "gen": 0,
+      "gameType": "singles",
+      "level": 50,
+      "itemClause": true,
+      "bring": 3,
+      "month": "2026-08",
+      "cutoff": 1760,
+      "battles": 66884
+    },
+    {
+      "id": "gen9championsou",
+      "name": "Champions OU",
+      "gen": 0,
+      "gameType": "singles",
+      "level": 50,
+      "itemClause": false,
+      "bring": 6,
+      "month": "2026-08",
+      "cutoff": 1760,
+      "battles": 94600
+    },
+    {
+      "id": "gen9ou",
+      "name": "SV OU",
+      "gen": 9,
+      "gameType": "singles",
+      "level": 100,
+      "itemClause": false,
+      "bring": 6,
+      "month": "2026-08",
+      "cutoff": 1695,
+      "battles": 730502
+    },
+    {
+      "id": "gen9doublesou",
+      "name": "SV Doubles OU",
+      "gen": 9,
+      "gameType": "doubles",
+      "level": 100,
+      "itemClause": false,
+      "bring": 4,
+      "month": "2026-08",
+      "cutoff": 1695,
+      "battles": 203650
+    }
+  ]
+}
