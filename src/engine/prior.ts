@@ -11,6 +11,7 @@ import {
   computeStats, evBudget, evCap, isStatusMove, species as dexSpecies, toID, usesStatPoints, type Gen,
 } from '../data/dex';
 import type {FormatData, SpeciesStats} from '../data/format';
+import LEGAL_ABILITIES from '../data/abilities.gen.json';
 import {buildMoveModel, fitToItems, type MoveModel} from './moveset';
 import {hashString, mulberry32, sampleIndex} from './rng';
 
@@ -27,12 +28,12 @@ export interface FormeSpace {
   species: string;
   /** Species before Mega Evolution, if this is a Mega forme. */
   preMega?: string;
-  preMegaAbility?: string;
-  /** Abilities the pre-Mega forme might show before evolving. */
-  preMegaAbilities?: string[];
+  /** A Mega's own ability (there is exactly one per Mega), in effect once it evolves. */
+  megaAbility?: string;
   prior: number;
   items: string[];
   itemP: number[];
+  /** The ability it enters battle with: for a Mega forme, the pre-Mega one (the uncertain part). */
   abilities: string[];
   abilityP: number[];
   spreads: Spread[];
@@ -67,7 +68,7 @@ export interface SpaceExtras {
   moves: string[];
 }
 
-const TAIL_SAMPLES = 48;
+const TAIL_SAMPLES = 96;
 const GENERIC_MASS = 0.02;
 const MIN_TAIL_MASS = 0.04;
 const MAX_ITEMS = 24;
@@ -116,13 +117,17 @@ function normalized(list: [string, number][]): [string[], number[]] {
   return [list.map(([n]) => n), list.map(([, p]) => p / total)];
 }
 
+/** Makes each of `extras` possible, with at least `extraMass` (before normalizing). */
 function withExtras(list: [string, number][], extras: string[], extraMass: number): [string, number][] {
-  const out = list.slice();
-  const known = new Set(out.map(([n]) => toID(n)));
+  const out = list.map(([n, p]) => [n, p] as [string, number]);
+  const at = new Map(out.map(([n], i) => [toID(n), i]));
   for (const e of extras) {
-    if (!known.has(toID(e))) {
+    const i = at.get(toID(e));
+    if (i === undefined) {
+      at.set(toID(e), out.length);
       out.push([e, extraMass]);
-      known.add(toID(e));
+    } else if (out[i][1] < extraMass) {
+      out[i][1] = extraMass;
     }
   }
   return out;
@@ -141,7 +146,16 @@ function sampleTail(gen: Gen, sd: SpeciesStats, seed: string, count: number): Sp
     if (!natT || statT.some(t => !t)) break;
     const nature = sd.natures[sampleIndex(natW, natT, rng())][0];
     const evs = sd.statMarginals.map((m, i) => Math.min(cap, m[sampleIndex(statW[i], statT[i], rng())][0]));
-    if (evs.reduce((a, b) => a + b, 0) > budget) continue;
+    let left = budget - evs.reduce((a, b) => a + b, 0);
+    if (left < 0) continue;
+    // Real spreads spend the whole budget: leftover goes to HP, then to what's already invested.
+    const order = [0, 1, 2, 3, 4, 5].sort((a, b) => (a === 0 ? -1 : b === 0 ? 1 : evs[b] - evs[a]));
+    for (const i of order) {
+      if (left <= 0) break;
+      const add = Math.min(cap - evs[i], left);
+      evs[i] += add;
+      left -= add;
+    }
     out.push({nature, evs});
   }
   return out;
@@ -184,7 +198,8 @@ function buildSpreads(gen: Gen, sd: SpeciesStats | undefined, seed: string) {
 
 function formePriors(fmt: FormatData, formes: string[], teammates: string[]): number[] {
   const logp = formes.map(f => Math.log(fmt.species[f]?.weight ?? 1));
-  if (formes.length > 1) {
+  // Naive-Bayes on teammates only when every forme has teammate data to compare.
+  if (formes.length > 1 && formes.every(f => fmt.species[f]?.teammates.length)) {
     formes.forEach((f, idx) => {
       const tm = new Map(fmt.species[f]?.teammates ?? []);
       for (const t of teammates) {
@@ -209,7 +224,7 @@ export function buildMonSpace(
   teammates: string[],
   extras: SpaceExtras,
 ): MonSpace {
-  const key = JSON.stringify([fmt.id, fmt.month, preview, [...teammates].sort(), extras]);
+  const key = JSON.stringify([fmt.id, fmt.sources.official?.date, fmt.sources.structure.month, preview, [...teammates].sort(), extras]);
   const hit = spaceCache.get(key);
   if (hit) return hit;
 
@@ -233,26 +248,24 @@ export function buildMonSpace(
     }
     const [items, itemP] = normalized(itemList);
 
-    const dexAbilities = Object.values(dex.abilities ?? {}) as string[];
-    let abilityList: [string, number][] = sd?.abilities.length
-      ? sd.abilities.slice()
-      : dexAbilities.map(a => [a, 1] as [string, number]);
-    if (!isMega) abilityList = withExtras(abilityList, extras.abilities, 0.01);
+    // The uncertain ability is the one it enters with (pre-Mega for a Mega forme); a Mega's
+    // own ability is fixed. Every legal entry ability stays possible at a small floor, so a
+    // surprise ability banner is evidence rather than a contradiction.
+    const megaAbility = isMega ? (Object.values(dex.abilities ?? {})[0] as string | undefined) : undefined;
+    const entrySpecies = preMega ?? dex.name;
+    const legal = (LEGAL_ABILITIES as Record<string, string[]>)[toID(entrySpecies)]
+      ?? (Object.values(dexSpecies(gen, entrySpecies)?.abilities ?? {}) as string[]);
+    const isLegal = (a: string) => !legal.length || legal.includes(a);
+    let abilityList: [string, number][] = (sd?.abilities ?? []).filter(([a]) => a !== megaAbility && isLegal(a));
+    if (!abilityList.length && preMega) abilityList = (fmt.species[preMega]?.abilities ?? []).filter(([a]) => isLegal(a));
+    if (!abilityList.length) abilityList = legal.map(a => [a, 1] as [string, number]);
+    abilityList = withExtras(abilityList, extras.abilities.filter(a => a !== megaAbility && isLegal(a)), 0.01);
+    abilityList = withExtras(abilityList, legal, 0.003);
     const [abilities, abilityP] = normalized(abilityList);
 
     const {spreads, probs, kinds} = buildSpreads(gen, sd, `${fmt.id}:${name}`);
     const stats = spreads.map(s => computeStats(gen, dex.name, s.nature, s.evs, fmt.level));
     const preStats = preMega ? spreads.map(s => computeStats(gen, preMega, s.nature, s.evs, fmt.level)) : undefined;
-
-    let preMegaAbilities: string[] | undefined;
-    if (preMega) {
-      const baseStats = fmt.species[preMega];
-      const baseDex = dexSpecies(gen, preMega);
-      preMegaAbilities = [
-        ...(baseStats?.abilities.map(([a]) => a) ?? []),
-        ...(Object.values(baseDex?.abilities ?? {}) as string[]),
-      ].filter((a, i, arr) => arr.indexOf(a) === i);
-    }
 
     const moves = buildMoveModel(sd?.moves ?? [], m => isStatusMove(gen, m), extras.moves);
     fitToItems(moves, items, itemP);
@@ -260,8 +273,7 @@ export function buildMonSpace(
     formes.push({
       species: dex.name,
       preMega,
-      preMegaAbility: preMegaAbilities?.[0],
-      preMegaAbilities,
+      megaAbility,
       prior: priors[idx],
       items, itemP,
       abilities, abilityP,

@@ -4,7 +4,7 @@ import type {FormatData} from '../data/format';
 import type {PokemonSet} from '../data/paste';
 import {makePokemon} from './calc';
 import {mySpec, defaultCondition} from './likelihood';
-import {monKey, type ActionEvent, type Battle, type FieldCondition, type SideCondition, type Snapshot} from './types';
+import type {Battle, FieldCondition, SideCondition, Snapshot} from './types';
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
@@ -44,22 +44,9 @@ export function createBattle(fmt: FormatData, myTeam: PokemonSet[], oppPreview: 
     events: [],
     live: initialSnapshot(fmt, myTeam, oppPreview.length),
     turn: 1,
-    settings: {hpMode: 'showdown', tolerance: 3},
+    settings: {hpMode: 'game', tolerance: 4},
   };
 }
 
 export const cloneSnapshot = (s: Snapshot): Snapshot => structuredClone(s);
 
-/** After logging an action, carry its HP results into the live state. */
-export function applyAction(live: Snapshot, ev: ActionEvent): Snapshot {
-  const next = cloneSnapshot(live);
-  for (const hit of ev.hits) {
-    const c = next.mons[monKey(hit.target)];
-    if (!c) continue;
-    c.hp = hit.fainted ? 0 : hit.hpAfter;
-    if (hit.triggers.some(t => t === 'berry' || t === 'sash' || t === 'sitrus' || t === 'wp')) c.itemGone = true;
-    // Sitrus heals a quarter; for my side the user corrects the exact number.
-    if (hit.target.side === 'opp' && hit.triggers.includes('sitrus')) c.hp = Math.min(100, c.hp + 25);
-  }
-  return next;
-}

@@ -154,3 +154,25 @@ export function movePriority(gen: Gen, moveName: string, ability: string | undef
   if (m.id === 'grassyglide' && field.terrain === 'Grassy') p += 1;
   return p;
 }
+
+/** The chance Quick Draw / Quick Claw lets this move go first in its bracket (Quick Draw rolls first). */
+export function quickChances(gen: Gen, moveName: string, ability: string | undefined, item: string | undefined): {draw: number; claw: number} {
+  const m = dexMove(gen, moveName);
+  const status = !m || m.category === 'Status' || (!m.category && !m.basePower);
+  const draw = ability === 'Quick Draw' && !status ? 0.3 : 0;
+  const claw = item === 'Quick Claw' && !(status && ability === 'Mycelium Might') ? (1 - draw) * 0.2 : 0;
+  return {draw, claw};
+}
+
+/**
+ * Order inside a priority bracket, as a fraction of a priority step: first when Quick Claw
+ * or Quick Draw fired (the game says so), always last with Stall or Lagging Tail. Unlike
+ * Speed, these aren't reversed by Trick Room.
+ */
+export function fractionalPriority(gen: Gen, moveName: string, ability: string | undefined, item: string | undefined, quick: boolean) {
+  if (quick) return 0.1;
+  const m = dexMove(gen, moveName);
+  const status = !!m && (m.category === 'Status' || (!m.category && !m.basePower));
+  if (ability === 'Stall' || item === 'Lagging Tail' || item === 'Full Incense' || (ability === 'Mycelium Might' && status)) return -0.1;
+  return 0;
+}

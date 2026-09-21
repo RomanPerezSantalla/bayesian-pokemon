@@ -1,0 +1,16 @@
+{
+  "name": "Bayesian Battle Analyzer",
+  "short_name": "Battle Analyzer",
+  "description": "Track a Pokémon Champions ranked battle and infer the opponent's sets as it happens.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1216",
+  "theme_color": "#0f1216",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

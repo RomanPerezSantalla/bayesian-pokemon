@@ -1,80 +1,141 @@
 # Bayesian Battle Analyzer
 
-A battle companion that starts from Smogon usage statistics and updates its beliefs about
-every opponent Pokémon (forme, item, ability, moves, stat spread, Tera) as you log what
-happens, turn by turn.
+A phone-first companion for **Pokémon Champions ranked battles** (Singles and Doubles) on the
+Switch. You tap in what happens on screen; it keeps the battle state and infers each opponent's
+forme, item, ability, moves and stat spread as the battle goes.
 
-Everything runs in the browser. Teams and battles are stored in `localStorage`, like
-Showdown's teambuilder: no accounts, no server. Pokepaste links import directly.
+- Priors come from the **official in-game ranked Battle Data**, refreshed daily.
+- Hard logic where the game is deterministic: outspeeding a 189-Speed Sneasler with no speed
+  modifiers on the field *is* Choice Scarf, 100%. Mega Evolving *is* the stone. Getting poisoned
+  by Close Combat *is* Poison Touch.
+- No accounts: teams and battles live in your browser (localStorage), like Showdown. Pokepaste
+  links import directly.
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173
-npm test           # engine tests against real usage data
-npm run build      # static site in dist/ (deploy anywhere, e.g. GitHub Pages)
-npm run data       # re-download the latest Smogon stats (monthly)
+npm run dev          # http://localhost:5173  (add `-- --host` to open it from your phone on the same Wi-Fi)
+npm test
+npm run build        # static site in dist/
+npm run data         # refresh the Showdown structure data + move/ability tables (monthly)
+npm run data:tables  # just the move/ability tables (no download)
 ```
 
-## How it works
+## On your phone
 
-For each opponent Pokémon the engine enumerates hypotheses
+The app is an installable PWA and works offline once loaded. Easiest: push to GitHub and let
+`.github/workflows/deploy.yml` publish it to GitHub Pages (Settings → Pages → Source: *GitHub
+Actions*, one time). Then open the URL on your phone and "Add to Home Screen".
 
-    h = (forme, stat spread, item, ability)
+## Logging a turn fast
 
-and keeps `posterior(h) ∝ prior(h) · Π P(observation | h)`, recomputed from scratch whenever
-the log changes (so deleting or editing an old event just works; per-event likelihoods are cached).
+1. **Tap who acted, in the order they act on screen** (the tiles mirror the Switch: them on top, you
+   below). The order you log is the move order the Speed inference reads.
+2. **Tap the move.** Theirs are sorted by how likely they are to have it; revealed ones first.
+   Self/field moves (Protect, Tailwind, Trick Room, Swords Dance…) are logged on that tap.
+3. **Type the HP left** on the keypad (your exact HP; their % exactly as shown). Spread moves get one row per target;
+   `next ▸` moves between them. `KO`, `✦ Crit`, `No effect`, `Missed / protected` are one tap.
+4. `✓ Log`. Tapping someone who already moved this turn, or who came in this turn, starts the next
+   turn for you. *End turn* pulses once everyone on the field has moved (a Fake Out flinch counts).
 
-**Priors** (`src/engine/prior.ts`) come from Smogon's monthly "chaos" stats:
+**Turn order.** Tiles show 1st / 2nd / 3rd… as Pokémon move, and the log numbers each move within
+its turn. Tap a logged move to fix it: *It went earlier / later* swaps it with its neighbour (the
+swapped moves are re-run, so the snapshots and undo stay exact), and *Order unsure* keeps it out of
+the Speed inference. Every pair of moves in a turn is compared, by priority bracket first (Protect,
+Fake Out, Prankster, Gale Wings, Grassy Glide in Grassy Terrain…), then Speed on the field as it was
+at the earlier move (Trick Room, Tailwind, paralysis, Icy Wind mid-turn). A Mega Evolution counts from
+the start of its turn, whenever you log it. When the game says Quick Claw or Quick Draw let a Pokémon
+move first, tick that chip before its move: it pins the item or ability and puts the move first in
+its bracket. Stall always moves last in its bracket, even under Trick Room.
 
-- *Formes.* Team preview shows the base species, so a "Charizard" is really a mixture over
-  Mega Y / Mega X / base, weighted by usage and (naive-Bayes) by its previewed teammates.
-- *Spreads.* The ~160 most common spreads, plus spreads sampled from per-stat marginals for
-  the long tail, plus a few generic templates, so an unusual spread is never impossible.
-- *Moves.* A 4-move set is modelled as a conditional-Poisson sample whose weights reproduce
-  the usage percentages. Seeing moves is a proper likelihood `P(seen ⊆ set)` and the unseen
-  slots get honest predictions. Items reweight moves (Assault Vest can't run Protect; Choice
-  items almost never do but love Trick), so **revealing a move shifts item beliefs**.
-- *Item Clause* (VGC/BSS): items are coupled across the whole team with an exact
-  constrained computation. Reveal Incineroar's Sitrus and nobody else can have one.
+Only relevant chips show up: *Life Orb recoil* only while Life Orb is still possible, *Berry weakened
+it* only when a resist berry is, statuses only if the move or a possible ability can inflict them.
+A chip left off means that message didn't appear, which is evidence too.
 
-**Likelihoods** (`src/engine/likelihood.ts`), all using `@smogon/calc` for the mechanics:
+**Abilities before the turn starts.** When Pokémon come in, a *What did the game show?* row asks about
+abilities that announce themselves (Intimidate, Drought/Drizzle/sand/snow, terrain setters, Pressure,
+Unnerve, Air Balloon…). One tap applies the effect and pins the ability; *nothing* rules all of those out.
+Nothing is assumed from usage odds: a Rillaboom that's Grassy Surge >99% of the time still gets asked,
+and only an ability already known for certain is applied without a tap. Opponents hit by your Intimidate get
+the same row for reactions (Defiant, Competitive, Clear Body, Clear Amulet, White Herb…), and moves with
+guaranteed stat drops (Icy Wind, Snarl…) show those chips on the target.
 
-| You log | What it tells the engine |
+**Megas** have two abilities in play: the one they enter with (uncertain, e.g. Intimidate vs Moxie) and
+their Mega's own (fixed). They're tracked separately, so an Intimidate before Mega Evolving never
+contradicts Aerilate after.
+
+**At a glance:** the move order of everyone on the field (by Speed, flipped under Trick Room, with odds
+where it's close). Per opponent, damage comes first as one card per Pokémon of yours on the field: what
+it *takes* from the opponent's likeliest moves and what it *deals* back, each a 95% range of max HP (over
+damage rolls and its possible sets) with an HP bar (solid = surely left, striped = depends on the roll
+and their set). The badge gives the KO chance from its HP now, or else how many hits it takes (2HKO,
+2–3HKO…); rows needing four hits or more fade out, and a card's edge turns orange/red when a likely
+move could KO it. The card header says who moves first. The top three each way show by default (*All
+moves* for the rest), then Speed for your other Pokémon, then item, ability and moves.
+
+The header has a light/dark toggle (it starts from the system setting and remembers your choice) and
+a Buy me a coffee link.
+
+**After the battle:** the collapsed details hold 95% ranges for every stat and its stat points, drawn
+inside the prior range, plus the likeliest spreads and the evidence behind them, for reverse-engineering
+a team. Spreads are modelled jointly, so the 66-point budget ties the stats together: learning it maxed
+SpA and Speed leaves almost nothing for the rest.
+
+Handled automatically: stat drops/boosts from moves (Icy Wind, Snarl, Close Combat, Parting Shot…),
+statuses, Tailwind / Trick Room / weather / terrain / screens with turn counters, Intimidate and
+weather/terrain abilities once the game shows them (a Mega's own on evolving), Sitrus/Focus Sash on your side, Life Orb
+recoil on yours, Helping Hand from a partner, end-of-turn Leftovers / burn / poison / sand / Grassy
+Terrain. Everything is undoable (`↶`), exactly.
+
+## How the inference works
+
+For every opponent Pokémon the engine enumerates hypotheses *h = (forme, stat spread, item, ability)*
+and keeps `posterior(h) ∝ prior(h) · Π P(observation | h)`, recomputed in a Web Worker on every
+change so the screen never waits.
+
+**Priors** (`src/data/fuse.ts`, `src/engine/prior.ts`)
+
+- *Official ladder* ([championsbattledata.com](https://championsbattledata.com), a fan mirror of the
+  in-game Battle Data): top moves, items, abilities, stat alignments, stat-point spreads and teammates
+  per Pokémon, separately for Singles and Doubles. Fetched from the browser and cached for offline use.
+- *Showdown* (Smogon's usage stats for the newest Champions regulation, compiled at build time): the
+  structure the in-game lists lack. How Mega X and Mega Y users differ, which alignment goes with
+  which spread, and the long tail of spreads.
+- Formes follow the Mega Stones held (Charizardite Y 94% → Mega Y 94%). Every legal ability stays
+  possible (a share listed as 0.0% was still seen, just rarely), and spread tails and templates keep
+  unusual builds possible too.
+- Move sets are modelled as 4-move samples that reproduce the usage percentages, with item rules
+  (Choice Scarf users don't run Protect), so seeing a move moves the item beliefs.
+- Item Clause couples everyone's items exactly.
+
+**Observations** (`src/engine/likelihood.ts`) are exact:
+
+| You log | What it pins down |
 | --- | --- |
-| Opponent hits you | Your HP is exact, so the 16 damage rolls pin down its Atk/SpA, item and ability. |
-| You hit the opponent | HP% before/after (Showdown's exact rounding, or ±tolerance for an eyeballed bar) constrains HP × Def/SpD, Assault Vest, resist berries… |
-| Turn order | Faster/slower than your known Speed (priority, Prankster, Trick Room, Tailwind, Scarf, paralysis). Opponent-vs-opponent order uses a mean-field approximation. |
-| Item messages | Life Orb recoil, resist berry, Sitrus, Weakness Policy, Focus Sash, Rocky Helmet. A message that *should* have appeared but didn't is evidence too. |
-| Two different moves without switching | Not a Choice item. |
-| Acting without Mega Evolving | Weak evidence against a Mega forme. |
-| Reveals / rule-outs | Items, abilities, moves, formes, Tera types, directly. |
+| Their attack on you | your exact HP loss → their Atk/SpA, item, ability, Mega forme |
+| Your attack on them | their HP% as the game shows it (rounded down, never 0% while alive, 100% only at full) → HP × Def/SpD, berries, Sash |
+| Turn order | faster/slower than your known Speed, or than their partner |
+| Item and ability messages | Life Orb, resist berries, Sitrus, Sash, Weakness Policy, Rocky Helmet, banners |
+| Statuses | Poison Touch, Flame Body, Static, Poison Point, Effect Spore… |
+| Two moves without switching | not Choice Scarf |
 
-Every observation has a small error floor, so one mis-entered number degrades beliefs
-instead of zeroing out the truth. The log flags observations that almost nothing explains
-("double-check crit, boosts, field or Helping Hand").
+If something you log is impossible given everything else (a typo, a forgotten Helping Hand, a
+mechanic we don't model) it is **set aside and flagged in red** rather than wiping the beliefs.
 
-The right-hand panel also shows **posterior-predictive matchups**: the chance it outspeeds
-each of your Pokémon, and damage ranges and KO chances in both directions, integrated over
-both the damage rolls and what it might be running.
+## Data
 
-## Formats
+- `public/data/formats.json`, `structure-*.json`: from `npm run data` (Smogon stats, latest month).
+  Showdown publishes the previous month's stats in early month, so the Reg M-C structure arrives in
+  October; until then it's Reg M-B's.
+- `src/data/moves.gen.json`, `abilities.gen.json`: from `@pkmn/dex` and `@smogon/calc`.
+- Official ladder data: live, not stored in this repo.
 
-`scripts/build-data.mjs` compiles these (edit the list to add more):
+## Known limitations
 
-- Champions VGC 2026 Reg M-B (and Bo3), Champions BSS Reg M-B, Champions OU (Stat Points, level 50)
-- SV OU, SV Doubles OU (EVs, level 100, Tera)
+- Damage uses `@smogon/calc`'s Champions mechanics; unlogged modifiers (a partner's Friend Guard,
+  Ruin abilities from partners) show up as flagged conflicts.
+- Your HP after drain/recoil moves you used isn't computed (the damage you did is only known in %);
+  tap the "before" number when logging the next hit on you to correct it.
+- Quick Claw-style random ordering, Illusion and Transform aren't modelled.
 
-Smogon's stats server has no CORS headers, which is why the stats are pre-compiled into
-`public/data/` rather than fetched live.
-
-## Known limitations / next steps
-
-- **Priors only condition on teammates for the forme choice.** Usage stats are per-Pokémon
-  marginals, so "items given teammates" or "spread given item" aren't in the data. The fix is
-  a joint corpus: Showdown's Bo3 VGC formats force open team sheets, so their replays contain
-  full sets plus teammates, and a scraper could turn those into exemplar teams for the prior.
-- HP of an opponent across several hits is treated per hit (uniform within the displayed %),
-  not tracked exactly per hypothesis.
-- Not modelled yet: Quick Claw and similar random ordering (covered only by the error floor),
-  Illusion, Transform, Ruin abilities from partners, opponent's moves hitting its own partner.
-- Deleting a log entry doesn't roll back HP/boosts in the live state; edit the card instead.
+Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or
+The Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites.

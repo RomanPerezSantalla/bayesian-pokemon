@@ -157,7 +157,8 @@ export const isChoiceItem = (item: string) => CHOICE.has(item);
 
 /** How much more (or less) likely a move is to be in the set given the item. */
 export function moveItemFactor(item: string, moveId: string, isStatus: boolean): number {
-  if (item === 'Assault Vest') return isStatus ? 0.002 : 1;
+  // Assault Vest can't select status moves at all.
+  if (item === 'Assault Vest') return isStatus ? 0 : 1;
   if (CHOICE.has(item)) {
     if (CHOICE_FRIENDLY_STATUS.has(moveId)) return 4;
     if (!isStatus) return 1;
@@ -195,7 +196,7 @@ export function movesLogLik(
   let num = rest[k - revealed.length];
   for (const m of revealed) num *= w[m];
   if (absent.some(m => inR.has(m))) return Math.log(1e-9);
-  return Math.log(Math.max(num / full[k], 1e-12));
+  return num > 0 ? Math.log(num / full[k]) : -Infinity;
 }
 
 /** P(move m is in the set | revealed ⊆ set, absent ∩ set = ∅). Revealed moves get 1. */

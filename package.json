@@ -1,7 +1,7 @@
 {
   "name": "bayesian-pokemon",
   "version": "1.0.0",
-  "description": "Bayesian battle analyzer: infers opponent items, abilities, moves and stat spreads turn by turn from usage-stat priors.",
+  "description": "Pokémon Champions battle companion: infers opponent sets turn by turn from the official ladder data.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -9,7 +9,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "data": "node scripts/build-data.mjs",
-    "typecheck": "tsc --noEmit"
+    "data:tables": "node scripts/build-data.mjs --tables",
+    "typecheck": "tsc --noEmit",
+    "icons": "node scripts/make-icons.mjs"
   },
   "license": "MIT",
   "type": "module",
@@ -20,6 +22,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@pkmn/dex": "^0.10.11",
     "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

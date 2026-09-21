@@ -1,23 +1,26 @@
 /**
  * Likelihoods P(observation | hypothesis) for everything the user logs.
  *
- * Each function returns *raw* likelihoods in [0, 1] per hypothesis. The caller
- * adds a small floor before taking logs, so a single mis-entered observation
- * (or a mechanic we don't model) degrades beliefs instead of zeroing them.
+ * These are exact: a hypothesis that cannot produce an observation gets 0, so when
+ * the logic is airtight the posterior is too (outsped a 189 Sneasler with no speed
+ * modifiers on the field → Choice Scarf, 100%). A mis-entered observation that
+ * contradicts everything is caught upstream (posterior.ts) and set aside instead of
+ * wiping out the beliefs.
  */
 import {toID, isDamagingMove, move as dexMove, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import type {PokemonSet} from '../data/paste';
 import {
-  finalSpeed, makeField, makeMove, makePokemon, movePriority, runCalc, type DamageOutcome, type MonSpec,
+  finalSpeed, fractionalPriority, makeField, makeMove, makePokemon, movePriority, quickChances, runCalc,
+  type DamageOutcome, type MonSpec,
 } from './calc';
+import {DROP_REACT, DROP_REACT_ITEMS, announceLikelihood} from './abilities';
+import {CONTACT_PUNISH, attackerAbilityStatusChance, moveFx, moveStatusChance} from './moves';
 import {NO_ITEM, type FormeSpace, type MonSpace} from './prior';
 import {
   monKey, sameMon, type ActionEvent, type Battle, type BattleSettings, type HitResult, type MonCondition,
   type MonRef, type SideID, type Snapshot,
 } from './types';
-
-export const EPS_TRIGGER = 0.03;
 
 export interface Ctx {
   fmt: FormatData;
@@ -30,7 +33,7 @@ export interface SlotLikelihood {
   slot: number;
   raw: Float64Array;
   /** What kind of evidence, for diagnostics. */
-  kind: 'damage-taken' | 'damage-dealt' | 'speed' | 'trigger';
+  kind: 'damage-taken' | 'damage-dealt' | 'speed' | 'trigger' | 'status';
   note: string;
 }
 
@@ -38,7 +41,7 @@ export const defaultCondition = (hp: number): MonCondition => ({
   hp, boosts: {}, status: '', mega: false, abilityOn: false, itemGone: false,
 });
 
-function condOf(snap: Snapshot, ref: MonRef, fallbackHp: number) {
+export function condOf(snap: Snapshot, ref: MonRef, fallbackHp: number) {
   return snap.mons[monKey(ref)] ?? defaultCondition(fallbackHp);
 }
 
@@ -48,19 +51,21 @@ function faintedCount(snap: Snapshot, side: SideID) {
   return n;
 }
 
+/** The Mega forme a set's stone turns it into, if any. */
+export function megaFormeOf(gen: Gen, set: PokemonSet): string | undefined {
+  if (!set.item) return undefined;
+  const megas = gen.items.get(toID(set.item))?.megaStone as Record<string, string> | undefined;
+  if (!megas) return undefined;
+  const base = gen.species.get(toID(set.species));
+  return megas[set.species] ?? (base?.baseSpecies ? megas[base.baseSpecies] : undefined) ?? Object.values(megas)[0];
+}
+
 /** My Pokémon as a calc spec, honouring Mega Evolution. */
 export function mySpec(gen: Gen, fmt: FormatData, set: PokemonSet, cond?: MonCondition): MonSpec {
-  let species = set.species;
-  if (cond?.mega && set.item) {
-    const stone = gen.items.get(toID(set.item));
-    const megas = stone?.megaStone as Record<string, string> | undefined;
-    const base = gen.species.get(toID(set.species));
-    const target = megas && (megas[set.species] ?? (base?.baseSpecies ? megas[base.baseSpecies] : undefined) ?? Object.values(megas)[0]);
-    if (target) species = target;
-  }
-  const megaDex = species !== set.species ? gen.species.get(toID(species)) : undefined;
+  const mega = cond?.mega ? megaFormeOf(gen, set) : undefined;
+  const megaDex = mega ? gen.species.get(toID(mega)) : undefined;
   return {
-    species,
+    species: megaDex?.name ?? set.species,
     level: set.level ?? fmt.level,
     nature: set.nature,
     evs: set.evs,
@@ -86,7 +91,8 @@ export function hypView(fmt: FormatData, space: MonSpace, h: number, cond: MonCo
   const pre = !!forme.preMega && !cond.mega;
   const spread = forme.spreads[s];
   const item = forme.items[space.i[h]];
-  const ability = pre ? (forme.preMegaAbility ?? forme.abilities[space.a[h]]) : forme.abilities[space.a[h]];
+  // Before evolving it has its entry ability; afterwards the Mega's own.
+  const ability = pre ? forme.abilities[space.a[h]] : forme.megaAbility ?? forme.abilities[space.a[h]];
   return {
     forme,
     pre,
@@ -97,7 +103,9 @@ export function hypView(fmt: FormatData, space: MonSpace, h: number, cond: MonCo
   };
 }
 
-const curHPFromPct = (maxHP: number, pct: number) => Math.max(1, Math.round((maxHP * pct) / 100));
+/** A representative true HP for a displayed %, for calcs that look at current HP (Multiscale, Eruption…). */
+const curHPFromPct = (maxHP: number, pct: number) =>
+  (pct >= 100 ? maxHP : Math.max(1, Math.min(maxHP - 1, Math.floor((maxHP * (pct + 0.5)) / 100))));
 
 const QP = new Set(['Protosynthesis', 'Quark Drive']);
 
@@ -126,9 +134,7 @@ function auras(ctx: Ctx, snap: Snapshot) {
     const space = ctx.spaces[slot];
     const cond = snap.mons[`opp${slot}`];
     if (!space || !cond?.mega) continue;
-    for (const f of space.formes) {
-      if (f.preMega && f.abilityP[0] > 0.9) found.add(f.abilities[0]);
-    }
+    for (const f of space.formes) if (f.megaAbility) found.add(f.megaAbility);
   }
   return {fairyAura: found.has('Fairy Aura'), darkAura: found.has('Dark Aura')};
 }
@@ -144,9 +150,8 @@ function itemClasses(
 ): Map<string, string> {
   const out = new Map<string, string>();
   space.formes.forEach((forme, fi) => {
-    const base = run(fi, NO_ITEM);
     const sig = (o: DamageOutcome) => [...o.dist.entries()].map(e => e.join(':')).join(',');
-    const baseSig = sig(base);
+    const baseSig = sig(run(fi, NO_ITEM));
     for (const item of forme.items) {
       const key = `${fi}|${item}`;
       if (item === NO_ITEM || (!sticky(item) && sig(run(fi, item)) === baseSig)) out.set(key, 'n');
@@ -158,56 +163,72 @@ function itemClasses(
 
 // --- Observation models -----------------------------------------------------
 
-/** Showdown's HP% rounding for opponents (gen 7+): ceil, never 100 unless full. */
+/**
+ * How Pokémon Champions shows HP%: rounded down, but never 0 while it's alive.
+ * So 1 HP reads 1%, and only full HP reads 100% (one HP missing is 99%).
+ * Showdown implements the same rule for its Champions formats (getHealth in sim/pokemon.ts).
+ */
 export function displayPct(hp: number, max: number) {
   if (hp <= 0) return 0;
-  if (hp >= max) return 100;
-  return Math.min(99, Math.ceil((100 * hp) / max));
+  return Math.max(1, Math.floor((100 * hp) / max));
 }
 
-function hpCandidates(pct: number, max: number, settings: BattleSettings): number[] {
-  if (pct >= 100) return [max];
+/** Could a Pokémon at `hp`/`max` be displayed as `shown`%? */
+export function pctConsistent(hp: number, max: number, shown: number, settings: BattleSettings) {
+  if (settings.hpMode === 'bar') return Math.abs((100 * hp) / max - shown) <= settings.tolerance;
+  return displayPct(hp, max) === shown;
+}
+
+/** Every true HP that could be on screen as `pct`. */
+export function hpCandidates(pct: number, max: number, settings: BattleSettings, approx = false): number[] {
+  // An estimated "before" (after recoil, Leftovers…) gets a few extra points either way.
+  const eff: BattleSettings = approx ? {hpMode: 'bar', tolerance: (settings.hpMode === 'bar' ? settings.tolerance : 1) + 3} : settings;
+  const slack = eff.hpMode === 'bar' ? eff.tolerance + 1 : 2;
+  const lo = Math.max(1, Math.floor((max * (pct - slack)) / 100));
+  const hi = Math.min(max, Math.ceil((max * (pct + slack)) / 100));
   const out: number[] = [];
-  if (settings.hpMode === 'showdown') {
-    for (let hp = Math.max(1, Math.floor((max * (pct - 1)) / 100)); hp <= Math.min(max - 1, Math.ceil((max * pct) / 100) + 1); hp++) {
-      if (displayPct(hp, max) === pct) out.push(hp);
-    }
-  } else {
-    const t = settings.tolerance;
-    const lo = Math.max(1, Math.floor((max * (pct - t)) / 100));
-    const hi = Math.min(max, Math.ceil((max * (pct + t)) / 100));
-    for (let hp = lo; hp <= hi; hp++) out.push(hp);
-  }
+  for (let hp = lo; hp <= hi; hp++) if (pctConsistent(hp, max, pct, eff)) out.push(hp);
   if (!out.length) out.push(Math.min(max, Math.max(1, Math.round((max * pct) / 100))));
   return out;
 }
 
-/** P(observed % change on an opponent | damage distribution, its max HP). */
+/**
+ * P(observed % change on an opponent | damage distribution, its max HP).
+ * `sitrus`: the hypothesis holds an unused Sitrus Berry, which must have fired
+ * exactly when the true HP dropped to half or less.
+ */
 export function oppHitLikelihood(
-  dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, settings: BattleSettings,
+  dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, settings: BattleSettings, sitrus = false,
 ) {
-  const before = hpCandidates(hit.hpBefore, max, settings);
+  if (hit.noEffect) return dist.get(0) ?? 0;
+  const before = hpCandidates(hit.hpBefore, max, settings, hit.beforeApprox);
+  const sawSitrus = hit.triggers.includes('sitrus');
   let total = 0;
   for (const hb of before) {
     for (const [roll, p] of dist) {
+      if (roll === 0) continue;
       let ha = hb - roll;
       if (ha <= 0 && survives && hb === max) ha = 1;
       let ok: boolean;
       if (hit.fainted) ok = ha <= 0;
       else if (ha <= 0) ok = false;
-      else if (settings.hpMode === 'showdown') ok = displayPct(ha, max) === hit.hpAfter;
-      else ok = Math.abs((100 * ha) / max - hit.hpAfter) <= settings.tolerance;
+      else {
+        ok = pctConsistent(ha, max, hit.hpAfter, settings);
+        if (ok && sitrus) ok = (ha <= Math.floor(max / 2)) === sawSitrus;
+      }
       if (ok) total += p;
     }
   }
   return total / before.length;
 }
 
-/** P(observed exact HP change on my Pokémon | damage distribution). */
+/** P(observed exact HP change on my Pokémon | damage distribution). Off-by-one readings allowed, weakly. */
 export function myHitLikelihood(dist: Map<number, number>, hit: HitResult, max: number, survives: boolean) {
+  if (hit.noEffect) return dist.get(0) ?? 0;
   const b = hit.hpBefore;
   let total = 0;
   for (const [roll, p] of dist) {
+    if (roll === 0) continue;
     let after = b - roll;
     if (after <= 0 && survives && b === max) after = 1;
     if (hit.fainted) {
@@ -216,7 +237,7 @@ export function myHitLikelihood(dist: Map<number, number>, hit: HitResult, max: 
     }
     if (after <= 0) continue;
     const diff = Math.abs(after - hit.hpAfter);
-    total += p * (diff === 0 ? 0.9 : diff === 1 ? 0.04 : diff === 2 ? 0.01 : 0);
+    total += p * (diff === 0 ? 1 : diff === 1 ? 0.2 : 0);
   }
   return total;
 }
@@ -231,7 +252,7 @@ const RESIST_BERRIES: Record<string, string> = {
   'Roseli Berry': 'Fairy', 'Chilan Berry': 'Normal',
 };
 
-function berryApplies(item: string, moveType: string, eff: number) {
+export function berryApplies(item: string, moveType: string, eff: number) {
   const t = RESIST_BERRIES[item];
   if (!t || t !== moveType) return false;
   return t === 'Normal' ? eff > 0 : eff > 1;
@@ -246,6 +267,8 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
   const aura = auras(ctx, snap);
   const damaging = isDamagingMove(gen, ev.move);
   const moveData = dexMove(gen, ev.move);
+  const fx = moveFx(ev.move);
+  const contact = !!moveData?.flags?.contact || !!fx.ct;
 
   if (ev.actor.side === 'opp') {
     const slot = ev.actor.slot;
@@ -253,6 +276,17 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     if (!space) return out;
     const oppCond = condOf(snap, ev.actor, 100);
     const field = makeField(fmt.gameType, snap.field, 'opp', {helpingHand: ev.helpingHand, ...aura});
+
+    // Quick Claw / Quick Draw name themselves when they fire; asked and not shown is evidence too.
+    if (ev.quick !== undefined) {
+      const raw = new Float64Array(space.n);
+      for (let h = 0; h < space.n; h++) {
+        const v = hypView(fmt, space, h, oppCond);
+        const {draw, claw} = quickChances(gen, ev.move, v.ability, oppCond.itemGone ? undefined : v.item);
+        raw[h] = ev.quick === 'Quick Draw' ? draw : ev.quick === 'Quick Claw' ? claw : 1 - draw - claw;
+      }
+      out.push({slot, raw, kind: 'trigger', note: ev.quick ? `${ev.quick} let it move first` : 'no Quick Claw / Quick Draw'});
+    }
 
     for (const hit of ev.hits) {
       if (hit.target.side !== 'me' || !damaging) continue;
@@ -272,7 +306,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         const spread = forme.spreads[0];
         const a = makePokemon(gen, {
           species: pre ? forme.preMega! : forme.species, level: fmt.level, nature: spread.nature, evs: spread.evs, item,
-          ability: pre ? forme.preMegaAbility : forme.abilities[0],
+          ability: pre ? forme.abilities[0] : forme.megaAbility ?? forme.abilities[0],
         }, oppCond, faintedCount(snap, 'opp'));
         return runCalc(gen, a, defender, mv, field);
       };
@@ -296,10 +330,23 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         raw[h] = lik;
       }
       out.push({slot, raw, kind: 'damage-dealt', note: `${ev.move} → ${set.species}`});
+
+      // A status the move can't cause on its own points at the attacker's ability.
+      if (hit.status && !hit.noEffect) {
+        const st = hit.status;
+        const sraw = new Float64Array(space.n);
+        for (let h = 0; h < space.n; h++) {
+          const a = hypView(fmt, space, h, oppCond).ability;
+          const pm = moveStatusChance(ev.move, st, a === 'Serene Grace');
+          const pa = attackerAbilityStatusChance(a, st, contact);
+          sraw[h] = 1 - (1 - pm) * (1 - pa);
+        }
+        out.push({slot, raw: sraw, kind: 'status', note: `${set.species} got ${st} from ${ev.move}`});
+      }
     }
 
     // Life Orb announces itself after every damaging hit.
-    const dealt = ev.hits.some(x => x.target.side === 'me' && (x.fainted || x.hpAfter < x.hpBefore));
+    const dealt = ev.hits.some(x => x.target.side === 'me' && !x.noEffect && (x.fainted || x.hpAfter < x.hpBefore));
     if (damaging && dealt) {
       const seen = ev.actorTriggers.includes('lifeorb');
       const raw = new Float64Array(space.n);
@@ -307,21 +354,19 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         const v = hypView(fmt, space, h, oppCond);
         const lo = v.item === 'Life Orb' && !oppCond.itemGone;
         const exempt = v.ability === 'Magic Guard' || (v.ability === 'Sheer Force' && !!moveData?.secondaries);
-        if (seen) raw[h] = lo ? 1 : 1e-4;
-        else raw[h] = lo && !exempt ? EPS_TRIGGER : 1;
+        raw[h] = seen ? (lo && !exempt ? 1 : 0) : (lo && !exempt ? 0 : 1);
       }
       out.push({slot, raw, kind: 'trigger', note: seen ? 'Life Orb recoil' : 'no Life Orb recoil'});
     }
     return out;
   }
 
-  // My attack on an opponent.
+  // My move on an opponent.
   const set = battle.myTeam[ev.actor.slot];
   if (!set || !damaging) return out;
   const myCond = condOf(snap, ev.actor, 1);
   const attacker = makePokemon(gen, mySpec(gen, fmt, set, myCond), myCond, faintedCount(snap, 'me'), myCond.hp || undefined);
   const field = makeField(fmt.gameType, snap.field, 'me', {helpingHand: ev.helpingHand, ...aura});
-  const contact = !!moveData?.flags?.contact;
   const oppHits = ev.hits.filter(x => x.target.side === 'opp');
 
   for (const hit of oppHits) {
@@ -338,12 +383,12 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       const stats = pre ? forme.preStats![0] : forme.stats[0];
       const d = makePokemon(gen, {
         species: pre ? forme.preMega! : forme.species, level: fmt.level, nature: spread.nature, evs: spread.evs, item,
-        ability: pre ? forme.preMegaAbility : forme.abilities[0],
+        ability: pre ? forme.abilities[0] : forme.megaAbility ?? forme.abilities[0],
       }, oppCond, faintedCount(snap, 'opp'), curHPFromPct(stats[0], hit.hpBefore));
       return runCalc(gen, attacker, d, mv, field);
     };
-    // Focus Sash changes survival, which the damage rolls alone don't show.
-    const classes = itemClasses(space, repr, item => item === 'Focus Sash');
+    // Focus Sash changes survival and Sitrus is tied to the HP threshold: neither shows in the rolls.
+    const classes = itemClasses(space, repr, item => item === 'Focus Sash' || item === 'Sitrus Berry');
 
     const raw = new Float64Array(space.n);
     const trig = new Float64Array(space.n);
@@ -358,9 +403,10 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         const spec = cls === 'n' ? {...v.spec, item: NO_ITEM} : v.spec;
         const defender = makePokemon(gen, spec, oppCond, faintedCount(snap, 'opp'), curHPFromPct(v.stats[0], hit.hpBefore));
         const res = runCalc(gen, attacker, defender, mv, field);
-        const survives = !multi && ((cls === 'Focus Sash' && !oppCond.itemGone) || v.ability === 'Sturdy');
+        const has = !oppCond.itemGone;
+        const survives = !multi && ((cls === 'Focus Sash' && has) || v.ability === 'Sturdy');
         m = {
-          lik: oppHitLikelihood(res.dist, hit, res.maxHP, survives, battle.settings),
+          lik: oppHitLikelihood(res.dist, hit, res.maxHP, survives, battle.settings, cls === 'Sitrus Berry' && has),
           type: res.moveType,
           eff: res.effectiveness,
         };
@@ -368,29 +414,31 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       }
       raw[h] = m.lik;
 
-      // Messages the defender's item would have produced.
+      // Messages the defender's item would have produced (their absence is evidence too).
       let t = 1;
       const has = !oppCond.itemGone;
       const tr = hit.triggers;
-      const berry = has && berryApplies(v.item, m.type, m.eff);
-      if (tr.includes('berry')) t *= berry ? 1 : 1e-4;
-      else if (berry) t *= EPS_TRIGGER;
-      const wp = has && v.item === 'Weakness Policy' && m.eff > 1 && !hit.fainted;
-      if (tr.includes('wp')) t *= wp ? 1 : 1e-4;
-      else if (wp) t *= EPS_TRIGGER;
-      const sitrus = has && v.item === 'Sitrus Berry' && !hit.fainted && hit.hpAfter <= 50;
-      if (tr.includes('sitrus')) t *= sitrus ? 1 : 1e-4;
-      else if (sitrus) t *= EPS_TRIGGER;
-      if (tr.includes('sash')) t *= (has && v.item === 'Focus Sash') || v.ability === 'Sturdy' ? 1 : 1e-4;
-      if (contact && oppHits.length === 1) {
+      const landed = !hit.noEffect;
+      const berry = has && landed && berryApplies(v.item, m.type, m.eff);
+      if (tr.includes('berry') !== berry) t = 0;
+      const wp = has && landed && v.item === 'Weakness Policy' && m.eff > 1 && !hit.fainted;
+      if (tr.includes('wp') !== wp) t = 0;
+      if (tr.includes('sitrus') && !(has && v.item === 'Sitrus Berry')) t = 0;
+      if (tr.includes('sash') && !((has && v.item === 'Focus Sash') || v.ability === 'Sturdy')) t = 0;
+      // A guaranteed stat drop the user was asked about (Defiant, Competitive, Clear Amulet…).
+      if (hit.reaction !== undefined && landed && !hit.fainted) {
+        t *= announceLikelihood(hit.reaction, v.ability, has ? v.item : '', DROP_REACT, DROP_REACT_ITEMS);
+      }
+      if (contact && landed && oppHits.length === 1) {
         const helmet = has && v.item === 'Rocky Helmet';
-        if (ev.actorTriggers.includes('helmet')) t *= helmet ? 1 : 1e-4;
-        else if (helmet) t *= EPS_TRIGGER;
+        if (ev.actorTriggers.includes('helmet') !== helmet) t = 0;
+        // Contact that left my attacker with a status: Flame Body, Static, Poison Point, Effect Spore.
+        if (ev.actorStatus) t *= CONTACT_PUNISH[v.ability]?.[ev.actorStatus] ?? 0;
       }
       trig[h] = t;
     }
     out.push({slot, raw, kind: 'damage-taken', note: `${set.species}'s ${ev.move}`});
-    if (trig.some(x => x !== 1)) out.push({slot, raw: trig, kind: 'trigger', note: 'item messages'});
+    if (trig.some(x => x !== 1)) out.push({slot, raw: trig, kind: 'trigger', note: 'item / ability messages'});
   }
   return out;
 }
@@ -400,11 +448,14 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
 export interface OppPair {
   first: ActionEvent;
   second: ActionEvent;
+  /** The field when the first of them moved (with this turn's Mega Evolutions in place). */
+  snap: Snapshot;
 }
 
 /** Speed/priority info for opponent hypothesis h acting with `moveName` under `snap`. */
 export function oppOrderKey(
   ctx: Ctx, space: MonSpace, h: number, ref: MonRef, moveName: string, snap: Snapshot, memo: Map<string, [number, number]>,
+  quick = false,
 ): [priority: number, speed: number] {
   const {gen, fmt} = ctx;
   const cond = condOf(snap, ref, 100);
@@ -412,17 +463,26 @@ export function oppOrderKey(
   const speedItem = v.item === 'Choice Scarf' || v.item === 'Iron Ball' || v.item === 'Lagging Tail' || v.item === 'Full Incense'
     || (QP.has(v.ability) && v.item === 'Booster Energy') ? v.item : 'n';
   const statKey = QP.has(v.ability) ? v.stats.join('/') : v.stats[5];
-  const key = `${space.f[h]}|${v.pre}|${statKey}|${speedItem}|${v.ability}`;
+  const key = `${space.f[h]}|${v.pre}|${statKey}|${speedItem}|${v.ability}|${moveName}|${quick}`;
   let r = memo.get(key);
   if (!r) {
     const mon = makePokemon(gen, speedItem === 'n' ? {...v.spec, item: NO_ITEM} : v.spec, cond, faintedCount(snap, 'opp'));
     const field = makeField(fmt.gameType, snap.field, 'opp');
-    let speed = finalSpeed(gen, mon, field);
-    if (speedItem === 'Lagging Tail' || speedItem === 'Full Incense') speed = -1;
-    r = [movePriority(gen, moveName, v.ability, cond.hp >= 100, snap.field), speed];
+    const bracket = movePriority(gen, moveName, v.ability, cond.hp >= 100, snap.field)
+      + fractionalPriority(gen, moveName, v.ability, cond.itemGone ? undefined : v.item, quick);
+    r = [bracket, finalSpeed(gen, mon, field)];
     memo.set(key, r);
   }
   return r;
+}
+
+/** Mega Evolution happens before anyone moves, whenever in the turn it was logged. */
+function withMegas(snap: Snapshot, megas: MonRef[]): Snapshot {
+  const missing = megas.filter(r => snap.mons[monKey(r)] && !snap.mons[monKey(r)].mega);
+  if (!missing.length) return snap;
+  const out = structuredClone(snap);
+  for (const r of missing) out.mons[monKey(r)].mega = true;
+  return out;
 }
 
 /** 1 if `first` acting before `second` is consistent, 0.5 on a speed tie, 0 otherwise. */
@@ -434,11 +494,12 @@ export function orderConsistency(first: [number, number], second: [number, numbe
 }
 
 /**
- * Speed evidence from the order of actions within one turn. Pairs between two
- * opponents are returned separately; they are applied later with a mean-field
- * approximation because both sides are uncertain.
+ * Speed evidence from the order of actions within one turn: every pair, compared on the
+ * field as it was when the earlier one moved (Speed changes apply mid-turn). `megas` are
+ * this turn's Mega Evolutions. Pairs between two opponents are returned separately; they
+ * are applied later with a mean-field approximation because both sides are uncertain.
  */
-export function turnOrderLikelihoods(ctx: Ctx, actions: ActionEvent[]): {mine: SlotLikelihood[]; oppPairs: OppPair[]} {
+export function turnOrderLikelihoods(ctx: Ctx, actions: ActionEvent[], megas: MonRef[] = []): {mine: SlotLikelihood[]; oppPairs: OppPair[]} {
   const {gen, fmt, battle} = ctx;
   const mine: SlotLikelihood[] = [];
   const oppPairs: OppPair[] = [];
@@ -448,11 +509,11 @@ export function turnOrderLikelihoods(ctx: Ctx, actions: ActionEvent[]): {mine: S
       const A = ordered[i];
       const B = ordered[j];
       if (sameMon(A.actor, B.actor) || (A.actor.side === 'me' && B.actor.side === 'me')) continue;
+      const snap = withMegas(A.before, megas);
       if (A.actor.side === 'opp' && B.actor.side === 'opp') {
-        oppPairs.push({first: A, second: B});
+        oppPairs.push({first: A, second: B, snap});
         continue;
       }
-      const snap = A.before;
       const opp = A.actor.side === 'opp' ? A : B;
       const me = opp === A ? B : A;
       const space = ctx.spaces[opp.actor.slot];
@@ -463,13 +524,14 @@ export function turnOrderLikelihoods(ctx: Ctx, actions: ActionEvent[]): {mine: S
       const myMon = makePokemon(gen, spec, myCond, faintedCount(snap, 'me'));
       const myMax = myMon.maxHP();
       const mineKey: [number, number] = [
-        movePriority(gen, me.move, spec.ability, myCond.hp >= myMax, snap.field),
+        movePriority(gen, me.move, spec.ability, myCond.hp >= myMax, snap.field)
+          + fractionalPriority(gen, me.move, spec.ability, myCond.itemGone ? undefined : set.item, !!me.quick),
         finalSpeed(gen, myMon, makeField(fmt.gameType, snap.field, 'me')),
       ];
       const raw = new Float64Array(space.n);
       const memo = new Map<string, [number, number]>();
       for (let h = 0; h < space.n; h++) {
-        const theirs = oppOrderKey(ctx, space, h, opp.actor, opp.move, snap, memo);
+        const theirs = oppOrderKey(ctx, space, h, opp.actor, opp.move, snap, memo, !!opp.quick);
         raw[h] = opp === A
           ? orderConsistency(theirs, mineKey, snap.field.trickRoom)
           : orderConsistency(mineKey, theirs, snap.field.trickRoom);

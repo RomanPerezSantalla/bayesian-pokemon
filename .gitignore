@@ -2,3 +2,6 @@ node_modules
 dist
 .cache
 *.log
+
+# Local tooling config (Claude Code launch settings etc.)
+.claude/

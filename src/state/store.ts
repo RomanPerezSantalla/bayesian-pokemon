@@ -35,7 +35,9 @@ interface State {
   deleteBattle(id: string): void;
 }
 
-const KEY = 'bayesian-battle:v1';
+const KEY = 'bayesian-battle:v2';
+/** v1 battles used Showdown-only formats; teams carry over unchanged. */
+const OLD_KEY = 'bayesian-battle:v1';
 
 function load(): Pick<State, 'teams' | 'battles'> {
   try {
@@ -44,6 +46,8 @@ function load(): Pick<State, 'teams' | 'battles'> {
       const parsed = JSON.parse(raw);
       return {teams: parsed.teams ?? [], battles: parsed.battles ?? []};
     }
+    const old = localStorage.getItem(OLD_KEY);
+    if (old) return {teams: JSON.parse(old).teams ?? [], battles: []};
   } catch {
     // Private mode, blocked storage or corrupt data: start empty.
   }

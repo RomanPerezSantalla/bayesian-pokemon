@@ -14,33 +14,39 @@ import {
 } from './likelihood';
 import {indexOfMove, isChoiceItem, isPseudoMove, itemFactors, movesLogLik, predictMoves} from './moveset';
 import {NO_ITEM, OTHER_ITEM, buildMonSpace, type MonSpace} from './prior';
-import type {ActionEvent, Battle, BattleEvent, RevealEvent} from './types';
+import {
+  DROP_REACT_ITEMS, ENTRY_ANNOUNCE, ENTRY_ITEMS, INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS, announceLikelihood,
+} from './abilities';
+import type {ActionEvent, Battle, BattleEvent, CheckEvent, MonRef, RevealEvent} from './types';
 
 
-/** Added to raw likelihoods: how much we trust any single observation. */
-const FLOOR = 1e-4;
-/** A direct reveal ("it has Leftovers") contradicted by a hypothesis. */
-const HARD = 1e-6;
-/** A Choice item that switched moves without switching out. */
-const CHOICE_BROKEN = 0.002;
-/** Each turn a Mega-capable Pokémon acted without Mega Evolving while it could. */
+/** Each turn a Mega-capable Pokémon acted without Mega Evolving while it could (a habit, not a rule). */
 const MEGA_SKIPPED = 0.35;
 
 export interface DistEntry {
   name: string;
   p: number;
   prior: number;
+  /** Logically certain: every alternative has been ruled out. */
+  certain?: boolean;
 }
 
-export interface StatBelief {
+export interface Interval {
+  mode: number;
+  /** 95% credible interval. */
+  lo: number;
+  hi: number;
+  /** The same interval under the usage prior alone, to show how far it has shrunk. */
+  priorLo: number;
+  priorHi: number;
+}
+
+export interface StatBelief extends Interval {
   stat: StatID;
   /** [value, probability], ascending by value. */
   values: [number, number][];
-  mode: number;
-  lo: number;
-  hi: number;
-  priorLo: number;
-  priorHi: number;
+  /** Stat points (or EVs) invested, same treatment. */
+  sp: Interval;
 }
 
 export interface SpreadBelief {
@@ -62,7 +68,7 @@ export interface MoveBelief {
 export interface EvidenceNote {
   eventId: string;
   slot: number;
-  kind: SlotLikelihood['kind'] | 'reveal' | 'moves' | 'choice' | 'mega';
+  kind: SlotLikelihood['kind'] | 'reveal' | 'moves' | 'choice' | 'mega' | 'conflict';
   note: string;
   /** Share of prior-to-event belief that could produce this observation at all. */
   consistent: number;
@@ -94,6 +100,8 @@ export interface MonBelief {
   spreads: SpreadBelief[];
   moves: MoveBelief[];
   choiceBroken: boolean;
+  /** Each Mega forme's own ability (fixed per forme). `abilities` is the one it enters with. */
+  megaAbilityOf: Record<string, string>;
 }
 
 export interface Beliefs {
@@ -140,6 +148,7 @@ function collectFacts(battle: Battle, slot: number): Facts {
   for (const ev of battle.events) {
     if (ev.kind === 'action' && ev.actor.side === 'opp' && ev.actor.slot === slot && toID(ev.move) !== 'struggle') {
       push(facts.moves, ev.move);
+      if (ev.quick) push(ev.quick === 'Quick Claw' ? facts.items : facts.abilities, ev.quick);
     } else if (ev.kind === 'reveal' && ev.mon.side === 'opp' && ev.mon.slot === slot) {
       const target = {
         item: [facts.items, facts.notItems],
@@ -150,9 +159,32 @@ function collectFacts(battle: Battle, slot: number): Facts {
       }[ev.what][ev.negate ? 1 : 0];
       if (ev.what === 'tera' && !ev.negate) facts.tera = ev.value;
       else if (!(ev.what === 'forme' && ev.negate)) push(target, ev.value);
+    } else if (ev.kind === 'check' && ev.mon.side === 'opp' && ev.mon.slot === slot && ev.seen) {
+      push(ev.seenKind === 'item' ? facts.items : facts.abilities, ev.seen);
+    } else if (ev.kind === 'action' && ev.actor.side === 'me') {
+      for (const hit of ev.hits) {
+        if (hit.target.side === 'opp' && hit.target.slot === slot && hit.reaction) {
+          push(DROP_REACT_ITEMS.has(hit.reaction) ? facts.items : facts.abilities, hit.reaction);
+        }
+      }
     }
   }
   return facts;
+}
+
+/** What an announcement moment (switch-in, Intimidate) showed, given each hypothesis. */
+function checkLikelihood(space: MonSpace, ev: CheckEvent): Float64Array {
+  const raw = new Float64Array(space.n);
+  const [abilities, items] = ev.context === 'entry'
+    ? [ENTRY_ANNOUNCE, ENTRY_ITEMS]
+    : [INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS];
+  for (let h = 0; h < space.n; h++) {
+    const forme = space.formes[space.f[h]];
+    const ability = ev.mega && forme.megaAbility ? forme.megaAbility : forme.abilities[space.a[h]];
+    const item = ev.itemGone ? '' : itemOf(space, h);
+    raw[h] = announceLikelihood(ev.seen, ability, item, abilities, items);
+  }
+  return raw;
 }
 
 function revealLikelihood(fmt: FormatData, space: MonSpace, ev: RevealEvent): Float64Array | null {
@@ -165,11 +197,10 @@ function revealLikelihood(fmt: FormatData, space: MonSpace, ev: RevealEvent): Fl
       case 'item':
         match = toID(itemOf(space, h)) === want;
         break;
-      case 'ability': {
-        const own = toID(forme.abilities[space.a[h]]) === want;
-        match = own || !!forme.preMegaAbilities?.some(a => toID(a) === want);
+      case 'ability':
+        // A banner shows either the ability it entered with or, once evolved, its Mega's.
+        match = toID(forme.abilities[space.a[h]]) === want || (!!forme.megaAbility && toID(forme.megaAbility) === want);
         break;
-      }
       case 'forme':
         match = toID(forme.species) === want;
         break;
@@ -177,7 +208,7 @@ function revealLikelihood(fmt: FormatData, space: MonSpace, ev: RevealEvent): Fl
         return null;
     }
     if (ev.negate) match = !match;
-    raw[h] = match ? 1 : HARD;
+    raw[h] = match ? 1 : 0;
   }
   void fmt;
   return raw;
@@ -205,8 +236,8 @@ const EXEMPT = new Set([OTHER_ITEM, NO_ITEM, '__rest']);
  * Item Clause: no two Pokémon on a team share an item. Exact constrained
  * marginals by enumeration over each Pokémon's plausible items.
  */
-function applyItemClause(mons: {space: MonSpace; post: Float64Array}[]) {
-  if (mons.length < 2) return;
+function applyItemClause(mons: {space: MonSpace; post: Float64Array}[]): boolean {
+  if (mons.length < 2) return true;
   const labels: string[][] = [];
   const probs: number[][] = [];
   const labelOfItem: Map<string, string>[] = [];
@@ -263,7 +294,7 @@ function applyItemClause(mons: {space: MonSpace; post: Float64Array}[]) {
     }
   };
   dfs(0, 1);
-  if (Z <= 0) return;
+  if (Z <= 0) return false;
 
   mons.forEach(({space, post}, j) => {
     const ratio = new Map<string, number>();
@@ -271,6 +302,7 @@ function applyItemClause(mons: {space: MonSpace; post: Float64Array}[]) {
     for (let h = 0; h < space.n; h++) post[h] *= ratio.get(labelOfItem[j].get(itemOf(space, h))!) ?? 1;
     normalizeInPlace(post);
   });
+  return true;
 }
 
 // --- summaries -------------------------------------------------------------------
@@ -284,7 +316,12 @@ function aggregate(space: MonSpace, post: Float64Array, prior: Float64Array, key
     cur[1] += prior[h];
     m.set(k, cur);
   }
-  return [...m.entries()].map(([name, [p, pr]]) => ({name, p, prior: pr})).sort((a, b) => b.p - a.p || b.prior - a.prior);
+  const out: DistEntry[] = [...m.entries()].map(([name, [p, pr]]) => ({name, p, prior: pr})).sort((a, b) => b.p - a.p || b.prior - a.prior);
+  if (out.length && out[0].p > 0 && out.slice(1).every(e => e.p === 0)) {
+    out[0].certain = true;
+    out[0].p = 1;
+  }
+  return out;
 }
 
 function quantile(values: [number, number][], q: number) {
@@ -296,27 +333,37 @@ function quantile(values: [number, number][], q: number) {
   return values.length ? values[values.length - 1][0] : 0;
 }
 
+function interval(space: MonSpace, post: Float64Array, prior: Float64Array, value: (h: number) => number) {
+  const m = new Map<number, [number, number]>();
+  for (let h = 0; h < space.n; h++) {
+    const v = value(h);
+    const cur = m.get(v) ?? [0, 0];
+    cur[0] += post[h];
+    cur[1] += prior[h];
+    m.set(v, cur);
+  }
+  const sorted = [...m.entries()].sort((a, b) => a[0] - b[0]);
+  const values = sorted.map(([v, [p]]) => [v, p] as [number, number]);
+  const priorValues = sorted.map(([v, [, p]]) => [v, p] as [number, number]);
+  let mode = values[0]?.[0] ?? 0;
+  let best = -1;
+  for (const [v, p] of values) if (p > best) [best, mode] = [p, v];
+  return {
+    values, mode,
+    lo: quantile(values, 0.025), hi: quantile(values, 0.975),
+    priorLo: quantile(priorValues, 0.025), priorHi: quantile(priorValues, 0.975),
+  };
+}
+
+/**
+ * Marginals of the joint spread posterior, so the stat-point budget is built in:
+ * pinning 32 SP in Atk and Spe leaves at most 2 for everything else.
+ */
 function statBeliefs(space: MonSpace, post: Float64Array, prior: Float64Array): StatBelief[] {
   return STAT_IDS.map((stat, k) => {
-    const m = new Map<number, [number, number]>();
-    for (let h = 0; h < space.n; h++) {
-      const v = space.formes[space.f[h]].stats[space.s[h]][k];
-      const cur = m.get(v) ?? [0, 0];
-      cur[0] += post[h];
-      cur[1] += prior[h];
-      m.set(v, cur);
-    }
-    const sorted = [...m.entries()].sort((a, b) => a[0] - b[0]);
-    const values = sorted.map(([v, [p]]) => [v, p] as [number, number]);
-    const priorValues = sorted.map(([v, [, p]]) => [v, p] as [number, number]);
-    let mode = values[0]?.[0] ?? 0;
-    let best = -1;
-    for (const [v, p] of values) if (p > best) [best, mode] = [p, v];
-    return {
-      stat, values, mode,
-      lo: quantile(values, 0.05), hi: quantile(values, 0.95),
-      priorLo: quantile(priorValues, 0.05), priorHi: quantile(priorValues, 0.95),
-    };
+    const v = interval(space, post, prior, h => space.formes[space.f[h]].stats[space.s[h]][k]);
+    const {values: _, ...sp} = interval(space, post, prior, h => space.formes[space.f[h]].spreads[space.s[h]].evs[k]);
+    return {stat, ...v, sp};
   });
 }
 
@@ -388,15 +435,20 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
   const logPost = spaces.map(s => (s ? Float64Array.from(s.logPrior) : null));
   const notes: EvidenceNote[] = [];
 
-  const apply = (eventId: string, slot: number, kind: EvidenceNote['kind'], note: string, raw: Float64Array, floor = FLOOR) => {
+  // Exact update. An observation nothing can explain (a typo, a forgotten Helping Hand,
+  // an unmodelled mechanic) would zero everything out, so it is set aside and flagged.
+  const apply = (eventId: string, slot: number, kind: EvidenceNote['kind'], note: string, raw: Float64Array) => {
     const lp = logPost[slot];
     if (!lp) return;
     const cur = normalizeLog(lp);
     let consistent = 0;
-    for (let h = 0; h < raw.length; h++) {
-      if (raw[h] > 1e-9) consistent += cur[h];
-      lp[h] += Math.log(raw[h] + floor);
+    for (let h = 0; h < raw.length; h++) if (raw[h] > 0) consistent += cur[h];
+    if (!(consistent > 1e-12)) {
+      const hint = kind === 'speed' ? ' (if the order is off, tap the move in the log to fix it)' : '';
+      notes.push({eventId, slot, kind: 'conflict', note: `${note}: impossible given everything else, so it was ignored${hint}`, consistent: 0});
+      return;
     }
+    for (let h = 0; h < raw.length; h++) lp[h] += Math.log(raw[h]);
     notes.push({eventId, slot, kind, note, consistent});
   };
 
@@ -405,8 +457,7 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
   for (const ev of battle.events as BattleEvent[]) {
     if (ev.kind === 'action') {
       const likes = cached(likCache, `${ctxKey}|${JSON.stringify(ev)}`, () => actionLikelihoods(ctx, ev));
-      // Item messages are as reliable as reveals; their raw values already encode the error rate.
-      for (const l of likes) apply(ev.id, l.slot, l.kind, l.note, l.raw, l.kind === 'trigger' ? 0 : FLOOR);
+      for (const l of likes) apply(ev.id, l.slot, l.kind, l.note, l.raw);
       const list = turns.get(ev.turn) ?? [];
       list.push(ev);
       turns.set(ev.turn, list);
@@ -414,22 +465,31 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
       const space = spaces[ev.mon.slot];
       if (!space) continue;
       const raw = revealLikelihood(fmt, space, ev);
-      if (raw) apply(ev.id, ev.mon.slot, 'reveal', `${ev.negate ? 'not ' : ''}${ev.value}`, raw, 0);
+      if (raw) apply(ev.id, ev.mon.slot, 'reveal', `${ev.negate ? 'not ' : ''}${ev.value}`, raw);
+    } else if (ev.kind === 'check' && ev.mon.side === 'opp' && !ev.skipped) {
+      const space = spaces[ev.mon.slot];
+      if (!space) continue;
+      const what = ev.context === 'entry' ? 'on entry' : 'when Intimidated';
+      apply(ev.id, ev.mon.slot, 'reveal', ev.seen ? `${ev.seen} ${what}` : `nothing shown ${what}`, checkLikelihood(space, ev));
     }
   }
   // Open team sheet entries act like reveals.
   battle.oppSheet?.forEach((set, j) => {
     const space = spaces[j];
     if (!set || !space) return;
-    if (set.item) apply(`sheet${j}`, j, 'reveal', set.item, revealLikelihood(fmt, space, {kind: 'reveal', id: '', turn: 0, mon: {side: 'opp', slot: j}, what: 'item', value: set.item, negate: false})!, 0);
-    if (set.ability) apply(`sheet${j}`, j, 'reveal', set.ability, revealLikelihood(fmt, space, {kind: 'reveal', id: '', turn: 0, mon: {side: 'opp', slot: j}, what: 'ability', value: set.ability, negate: false})!, 0);
+    if (set.item) apply(`sheet${j}`, j, 'reveal', set.item, revealLikelihood(fmt, space, {kind: 'reveal', id: '', turn: 0, mon: {side: 'opp', slot: j}, what: 'item', value: set.item, negate: false})!);
+    if (set.ability) apply(`sheet${j}`, j, 'reveal', set.ability, revealLikelihood(fmt, space, {kind: 'reveal', id: '', turn: 0, mon: {side: 'opp', slot: j}, what: 'ability', value: set.ability, negate: false})!);
   });
 
-  // Turn order against my Pokémon (known speeds).
+  // Turn order against my Pokémon (known speeds). Mega Evolutions count from the start of their turn.
+  const megasOf = (turn: number): MonRef[] => (battle.events as BattleEvent[])
+    .filter((e): e is RevealEvent => e.kind === 'reveal' && e.what === 'forme' && !e.negate && e.turn === turn)
+    .map(e => e.mon);
   const oppPairs: OppPair[] = [];
   for (const [turn, actions] of turns) {
-    const res = cached(orderCache, `${ctxKey}|${JSON.stringify(actions)}`, () => turnOrderLikelihoods(ctx, actions));
-    for (const l of res.mine) apply(`turn${turn}`, l.slot, l.kind, l.note, l.raw, 0.01);
+    const megas = megasOf(turn);
+    const res = cached(orderCache, `${ctxKey}|${JSON.stringify(megas)}|${JSON.stringify(actions)}`, () => turnOrderLikelihoods(ctx, actions, megas));
+    for (const l of res.mine) apply(`turn${turn}`, l.slot, l.kind, l.note, l.raw);
     oppPairs.push(...res.oppPairs);
   }
 
@@ -449,8 +509,8 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
       const raw = new Float64Array(space.n);
       let max = -Infinity;
       for (let h = 0; h < space.n; h++) max = Math.max(max, table[space.f[h]][space.i[h]]);
-      for (let h = 0; h < space.n; h++) raw[h] = Math.exp(table[space.f[h]][space.i[h]] - max);
-      apply(`moves${j}`, j, 'moves', `moves seen: ${f.moves.join(', ') || '—'}`, raw, 0);
+      if (max > -Infinity) for (let h = 0; h < space.n; h++) raw[h] = Math.exp(table[space.f[h]][space.i[h]] - max);
+      apply(`moves${j}`, j, 'moves', `moves seen: ${f.moves.join(', ') || '—'}`, raw);
     }
 
     // Choice lock: two different moves in one stint on the field.
@@ -467,8 +527,8 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
     }
     if (choiceBroken[j]) {
       const raw = new Float64Array(space.n);
-      for (let h = 0; h < space.n; h++) raw[h] = isChoiceItem(itemOf(space, h)) ? CHOICE_BROKEN : 1;
-      apply(`choice${j}`, j, 'choice', 'used different moves without switching', raw, 0);
+      for (let h = 0; h < space.n; h++) raw[h] = isChoiceItem(itemOf(space, h)) ? 0 : 1;
+      apply(`choice${j}`, j, 'choice', 'used different moves without switching', raw);
     }
 
     // Didn't Mega Evolve when it could have.
@@ -484,32 +544,33 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
       if (n) {
         const raw = new Float64Array(space.n);
         for (let h = 0; h < space.n; h++) raw[h] = space.formes[space.f[h]].preMega ? MEGA_SKIPPED ** n : 1;
-        apply(`mega${j}`, j, 'mega', `acted ${n} turn${n > 1 ? 's' : ''} without Mega Evolving`, raw, 0);
+        apply(`mega${j}`, j, 'mega', `acted ${n} turn${n > 1 ? 's' : ''} without Mega Evolving`, raw);
       }
     }
   });
 
   const post = logPost.map(lp => (lp ? normalizeLog(lp) : null));
   const active = spaces.map((space, j) => (space && post[j] ? {space, post: post[j]!} : null)).filter(x => x) as {space: MonSpace; post: Float64Array}[];
-  if (fmt.itemClause) applyItemClause(active);
+  if (fmt.itemClause && !applyItemClause(active)) {
+    notes.push({eventId: 'itemclause', slot: -1, kind: 'conflict', note: 'Two opponents revealed with the same item (Item Clause forbids it); check the reveals', consistent: 0});
+  }
 
   // Turn order between two opponents: mean-field against the other's posterior.
   if (oppPairs.length) {
     const firstPass = post.map(p => (p ? Float64Array.from(p) : null));
-    for (const {first, second} of oppPairs) {
+    for (const {first, second, snap} of oppPairs) {
       const a = first.actor.slot;
       const b = second.actor.slot;
       const sa = spaces[a];
       const sb = spaces[b];
       if (!sa || !sb || !firstPass[a] || !firstPass[b]) continue;
-      const snap = first.before;
       const memoA = new Map<string, [number, number]>();
       const memoB = new Map<string, [number, number]>();
-      const dist = (space: MonSpace, p: Float64Array, ref: typeof first.actor, mv: string, memo: Map<string, [number, number]>) => {
+      const dist = (space: MonSpace, p: Float64Array, ev: ActionEvent, memo: Map<string, [number, number]>) => {
         const d = new Map<string, [[number, number], number]>();
         for (let h = 0; h < space.n; h++) {
           if (p[h] < 1e-7) continue;
-          const k = oppOrderKey(ctx, space, h, ref, mv, snap, memo);
+          const k = oppOrderKey(ctx, space, h, ev.actor, ev.move, snap, memo, !!ev.quick);
           const id = k.join(',');
           const cur = d.get(id);
           if (cur) cur[1] += p[h];
@@ -517,26 +578,28 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
         }
         return [...d.values()];
       };
-      const dA = dist(sa, firstPass[a]!, first.actor, first.move, memoA);
-      const dB = dist(sb, firstPass[b]!, second.actor, second.move, memoB);
+      const dA = dist(sa, firstPass[a]!, first, memoA);
+      const dB = dist(sb, firstPass[b]!, second, memoB);
       const tr = snap.field.trickRoom;
       const rawA = new Float64Array(sa.n);
       for (let h = 0; h < sa.n; h++) {
-        const k = oppOrderKey(ctx, sa, h, first.actor, first.move, snap, memoA);
+        const k = oppOrderKey(ctx, sa, h, first.actor, first.move, snap, memoA, !!first.quick);
         rawA[h] = dB.reduce((s, [kb, w]) => s + w * orderConsistency(k, kb, tr), 0);
       }
       const rawB = new Float64Array(sb.n);
       for (let h = 0; h < sb.n; h++) {
-        const k = oppOrderKey(ctx, sb, h, second.actor, second.move, snap, memoB);
+        const k = oppOrderKey(ctx, sb, h, second.actor, second.move, snap, memoB, !!second.quick);
         rawB[h] = dA.reduce((s, [ka, w]) => s + w * orderConsistency(ka, k, tr), 0);
       }
       for (const [slot, raw, note] of [[a, rawA, `moved before opposing ${previews[b]}`], [b, rawB, `moved after opposing ${previews[a]}`]] as const) {
         const p = post[slot]!;
         let consistent = 0;
-        for (let h = 0; h < p.length; h++) {
-          if (raw[h] > 1e-9) consistent += p[h];
-          p[h] *= raw[h] + 0.01;
+        for (let h = 0; h < p.length; h++) if (raw[h] > 0) consistent += p[h];
+        if (!(consistent > 1e-12)) {
+          notes.push({eventId: `turn${first.turn}`, slot, kind: 'conflict', note: `${note}: impossible given everything else, so it was ignored (if the order is off, tap the move in the log to fix it)`, consistent: 0});
+          continue;
         }
+        for (let h = 0; h < p.length; h++) p[h] *= raw[h];
         normalizeInPlace(p);
         notes.push({eventId: `turn${first.turn}`, slot, kind: 'speed', note, consistent});
       }
@@ -585,6 +648,7 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
       spreads: spreadBeliefs(space, p, pr),
       moves: moveBeliefs(space, p, pr, f),
       choiceBroken: choiceBroken[j],
+      megaAbilityOf: Object.fromEntries(space.formes.filter(fm => fm.megaAbility).map(fm => [fm.species, fm.megaAbility!])),
     };
   });
   return {mons, notes, ms: performance.now() - t0};

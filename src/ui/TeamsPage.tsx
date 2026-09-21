@@ -195,7 +195,7 @@ export function TeamsPage({teamId}: {teamId?: string}) {
                 <div style={{fontWeight: 600}}>{t.name}</div>
                 <div className="row" style={{gap: 0}}>
                   {t.sets.map((s, i) => (
-                    <Sprite key={i} gen={gen} species={s.species} small />
+                    <Sprite key={i} gen={gen} species={s.species} />
                   ))}
                 </div>
                 <div className="row" style={{marginTop: 4}}>

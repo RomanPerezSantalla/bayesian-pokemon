@@ -28,6 +28,10 @@ export interface MonCondition {
   abilityOn: boolean;
   /** Item consumed, knocked off or otherwise gone. */
   itemGone: boolean;
+  /** Opponent HP% was computed (recoil, Leftovers…) rather than read off the screen. */
+  hpEstimated?: boolean;
+  /** Turns badly poisoned, for Toxic's growing damage. */
+  toxic?: number;
 }
 
 export type Weather = 'Sun' | 'Rain' | 'Sand' | 'Snow' | 'Harsh Sunshine' | 'Heavy Rain' | 'Strong Winds';
@@ -48,6 +52,8 @@ export interface FieldCondition {
   gravity: boolean;
   me: SideCondition;
   opp: SideCondition;
+  /** Turns left (counting the current one) for timed effects, e.g. "weather", "trickRoom", "opp.tailwind". */
+  turns?: Record<string, number>;
 }
 
 /** Everything the likelihood of an observation may depend on. */
@@ -66,6 +72,8 @@ export interface Snapshot {
  */
 export type Trigger = 'berry' | 'sash' | 'wp' | 'sitrus' | 'lifeorb' | 'helmet';
 
+export type BoostID5 = 'atk' | 'def' | 'spa' | 'spd' | 'spe';
+
 export interface HitResult {
   target: MonRef;
   /** Same units as MonCondition.hp for the target's side. */
@@ -75,6 +83,19 @@ export interface HitResult {
   fainted: boolean;
   crit: boolean;
   triggers: Trigger[];
+  /** Status the hit inflicted on the target. */
+  status?: Status;
+  /** Chance-based stat changes that happened to the target (guaranteed ones are automatic). */
+  boosts?: Boosts;
+  /** "It doesn't affect…": immune, so the calc must give 0 damage. */
+  noEffect?: boolean;
+  /** hpBefore was estimated, so allow a wider window for it. */
+  beforeApprox?: boolean;
+  /**
+   * Reaction to this move's stat drop (Defiant, Competitive, Clear Amulet, White Herb…).
+   * undefined: not asked. null: asked, nothing shown (evidence too).
+   */
+  reaction?: string | null;
 }
 
 export interface ActionEvent {
@@ -90,10 +111,21 @@ export interface ActionEvent {
   hitCount?: number;
   helpingHand: boolean;
   actorTriggers: Trigger[];
+  /** Status the actor picked up (e.g. burned by Flame Body after a contact move). */
+  actorStatus?: Status;
+  /** Targets of a non-damaging move (Spore, Parting Shot…). */
+  targetRefs?: MonRef[];
+  /** The move failed / was blocked (still counts for turn order and move reveal). */
+  failed?: boolean;
   /** State right before this action. */
   before: Snapshot;
-  /** Use this action's position in the turn for speed inference. */
+  /** Use this action's position in the turn for speed inference ("order unsure" turns it off). */
   ordered: boolean;
+  /**
+   * The game said Quick Claw / Quick Draw let it move first in its bracket.
+   * undefined: not asked. null: asked, nothing shown (evidence too).
+   */
+  quick?: 'Quick Claw' | 'Quick Draw' | null;
 }
 
 export interface RevealEvent {
@@ -117,12 +149,49 @@ export interface SwitchEvent {
   slotOut: number | null;
 }
 
-export type BattleEvent = ActionEvent | RevealEvent | SwitchEvent;
+export interface EndTurnEvent {
+  kind: 'endTurn';
+  id: string;
+  turn: number;
+}
+
+/**
+ * What the game showed at a moment when an ability or item would announce itself:
+ * a Pokémon coming in (Intimidate, Drought, Pressure, Air Balloon…) or being hit by an
+ * Intimidate (Defiant, Competitive, Clear Body, Clear Amulet, White Herb…).
+ */
+export interface CheckEvent {
+  kind: 'check';
+  id: string;
+  turn: number;
+  mon: MonRef;
+  context: 'entry' | 'intimidate';
+  /** The event that prompted it (a switch-in). */
+  about: string;
+  /** The ability or item named on screen; null when nothing was shown. */
+  seen: string | null;
+  seenKind?: 'ability' | 'item';
+  /** Not looked at: resolves the prompt without evidence. */
+  skipped?: boolean;
+  /** State of the Pokémon at that moment. */
+  mega: boolean;
+  itemGone: boolean;
+}
+
+export type BattleEvent = (ActionEvent | RevealEvent | SwitchEvent | EndTurnEvent | CheckEvent) & {
+  /** Live state right before this event, so it can be undone exactly. */
+  undo?: {live: Snapshot; turn: number};
+};
 
 export interface BattleSettings {
-  /** 'showdown': HP% shown exactly as Showdown rounds it. 'approx': eyeballed from an HP bar. */
-  hpMode: 'showdown' | 'approx';
-  /** ± percentage points when hpMode is 'approx'. */
+  /**
+   * How the opponent's HP is read:
+   * 'game' – the % the game shows, using its exact rule (floor, minimum 1% while alive),
+   * 'bar'  – eyeballed from a bar, within ±tolerance.
+   * Battles saved with older mode names are read as 'game'.
+   */
+  hpMode: 'game' | 'bar';
+  /** ± percentage points when hpMode is 'bar'. */
   tolerance: number;
 }
 
@@ -137,6 +206,8 @@ export interface Battle {
   oppPreview: string[];
   /** Optional open team sheet: known item/ability/moves per opponent slot. */
   oppSheet?: (PokemonSet | null)[];
+  /** My team slots brought to this battle (all six if unset). */
+  brought?: number[];
   events: BattleEvent[];
   live: Snapshot;
   turn: number;

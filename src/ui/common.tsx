@@ -2,11 +2,14 @@ import {useEffect, useState, type ReactNode} from 'react';
 import {getGen, spriteUrl, type Gen} from '../data/dex';
 import {loadFormat, loadFormatIndex, type FormatData, type FormatInfo} from '../data/format';
 import type {DistEntry} from '../engine/posterior';
+import {pct} from './format';
 
-export const pct = (p: number, digits = 0) => {
-  if (p >= 0.9995 && p < 1) return '>99%';
-  if (p > 0 && p < 0.005 && digits === 0) return '<1%';
-  return `${(p * 100).toFixed(digits)}%`;
+export {pct};
+
+export const TYPE_COLORS: Record<string, string> = {
+  Normal: '#9fa19f', Fire: '#e62829', Water: '#2980ef', Electric: '#fac000', Grass: '#3fa129', Ice: '#3dcef3',
+  Fighting: '#ff8000', Poison: '#9141cb', Ground: '#915121', Flying: '#81b9ef', Psychic: '#ef4179', Bug: '#91a119',
+  Rock: '#afa981', Ghost: '#704170', Dragon: '#5060e1', Dark: '#624d4e', Steel: '#60a1b8', Fairy: '#ef70ef', Stellar: '#40b5a5',
 };
 
 export function useFormatIndex() {
@@ -25,6 +28,7 @@ export function useFormat(id: string | undefined) {
     if (!id) return;
     let live = true;
     setFmt(null);
+    setError(null);
     loadFormat(id).then(f => live && setFmt(f), e => live && setError(String(e.message ?? e)));
     return () => {
       live = false;
@@ -34,53 +38,47 @@ export function useFormat(id: string | undefined) {
   return {fmt, gen, error};
 }
 
-export function Sprite({gen, species, small}: {gen: Gen; species: string; small?: boolean}) {
+export function Sprite({gen, species, large}: {gen: Gen; species: string; large?: boolean}) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [species]);
-  if (failed || !species) {
-    return <div className={`sprite-fallback${small ? ' sm' : ''}`} style={small ? {width: 32, height: 32} : undefined}>{species.slice(0, 2)}</div>;
-  }
-  return (
-    <img
-      className={`sprite${small ? ' sm' : ''}`}
-      src={spriteUrl(gen, species)}
-      alt=""
-      loading="lazy"
-      onError={() => setFailed(true)}
-    />
-  );
+  if (failed || !species) return <div className="sprite-fallback">{species.slice(0, 2)}</div>;
+  return <img className={`sprite${large ? ' lg' : ''}`} src={spriteUrl(gen, species)} alt="" loading="lazy" onError={() => setFailed(true)} />;
 }
 
-/** Posterior bars with a tick at the prior, so you can see what the evidence did. */
-export function DistBars({entries, max = 6, label}: {entries: DistEntry[]; max?: number; label?: (n: string) => ReactNode}) {
+/** Beliefs now vs. where the usage-stats prior started (thin tick). Ruled-out options are hidden. */
+export function DistBars({entries, max = 5, label}: {entries: DistEntry[]; max?: number; label?: (n: string) => ReactNode}) {
   const [open, setOpen] = useState(false);
-  const shown = open ? entries : entries.slice(0, max);
-  const rest = entries.length - max;
+  const live = entries.filter(e => e.p > 0);
+  const shown = open ? live : live.slice(0, max);
+  const ruledOut = entries.filter(e => e.p === 0 && e.prior > 0.01);
   return (
     <div>
       <div className="dist">
         {shown.map(e => (
-          <DistRow key={e.name} name={label ? label(e.name) : e.name} p={e.p} prior={e.prior} />
+          <DistRow key={e.name} name={label ? label(e.name) : e.name} p={e.p} prior={e.prior} certain={e.certain} />
         ))}
       </div>
-      {rest > 0 && (
-        <button className="btn ghost sm" onClick={() => setOpen(!open)}>
-          {open ? 'show less' : `+${rest} more`}
-        </button>
-      )}
+      <div className="row small">
+        {live.length > max && (
+          <button className="btn ghost sm" onClick={() => setOpen(!open)}>{open ? 'less' : `+${live.length - max} more`}</button>
+        )}
+        {ruledOut.length > 0 && (
+          <span className="muted">ruled out: {ruledOut.slice(0, 4).map(e => e.name).join(', ')}{ruledOut.length > 4 ? '…' : ''}</span>
+        )}
+      </div>
     </div>
   );
 }
 
-export function DistRow({name, p, prior}: {name: ReactNode; p: number; prior?: number}) {
+export function DistRow({name, p, prior, certain}: {name: ReactNode; p: number; prior?: number; certain?: boolean}) {
   return (
     <>
-      <div className="label" title={typeof name === 'string' ? name : undefined}>{name}</div>
-      <div className="bar-track" title={prior !== undefined ? `prior ${pct(prior, 1)} → now ${pct(p, 1)}` : pct(p, 1)}>
-        <div className="bar-fill" style={{width: `${Math.max(0, Math.min(1, p)) * 100}%`}} />
+      <div className="label">{name}</div>
+      <div className="bar-track" title={prior !== undefined ? `prior ${pct(prior)} → now ${pct(p)}` : pct(p)}>
+        <div className={`bar-fill${certain ? ' certain' : ''}`} style={{width: `${Math.max(0, Math.min(1, p)) * 100}%`}} />
         {prior !== undefined && <div className="bar-prior" style={{left: `calc(${Math.min(1, prior) * 100}% - 1px)`}} />}
       </div>
-      <div className="pct">{pct(p)}</div>
+      <div className={`pct${certain ? ' ok-badge' : ''}`}>{certain ? '✓' : pct(p)}</div>
     </>
   );
 }
@@ -97,9 +95,7 @@ export function HpBar({frac}: {frac: number}) {
 export function Datalist({id, options}: {id: string; options: string[]}) {
   return (
     <datalist id={id}>
-      {options.map(o => (
-        <option key={o} value={o} />
-      ))}
+      {options.map(o => <option key={o} value={o} />)}
     </datalist>
   );
 }

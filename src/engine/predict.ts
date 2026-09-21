@@ -2,7 +2,7 @@
 import {isDamagingMove, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import {finalSpeed, makeField, makeMove, makePokemon, runCalc} from './calc';
-import {defaultCondition, hypView, mySpec, oppOrderKey, type Ctx} from './likelihood';
+import {defaultCondition, hpCandidates, hypView, mySpec, oppOrderKey, type Ctx} from './likelihood';
 import type {MonBelief} from './posterior';
 import type {Battle, Snapshot} from './types';
 
@@ -16,17 +16,43 @@ export interface SpeedMatchup {
   pTie: number;
 }
 
-export function speedMatchups(fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, snap: Snapshot): SpeedMatchup[] {
+/** An opponent's effective Speed right now (boosts, Tailwind, Scarf, paralysis…): distribution and 95% range. */
+export interface SpeedProfile {
+  dist: [speed: number, p: number][];
+  lo: number;
+  hi: number;
+  mode: number;
+}
+
+export function speedProfile(fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, snap: Snapshot): SpeedProfile {
   const ctx: Ctx = {fmt, gen, battle, spaces: []};
   const {space, post} = belief;
   const ref = {side: 'opp' as const, slot: belief.slot};
   const memo = new Map<string, [number, number]>();
-  const dist = new Map<number, number>();
+  const m = new Map<number, number>();
+  let total = 0;
   for (let h = 0; h < space.n; h++) {
     if (post[h] < PRUNE) continue;
     const [, s] = oppOrderKey(ctx, space, h, ref, 'Tackle', snap, memo);
-    dist.set(s, (dist.get(s) ?? 0) + post[h]);
+    m.set(s, (m.get(s) ?? 0) + post[h]);
+    total += post[h];
   }
+  const dist = [...m.entries()].map(([v, p]) => [v, p / (total || 1)] as [number, number]).sort((x, y) => x[0] - y[0]);
+  const q = (x: number) => {
+    let c = 0;
+    for (const [v, p] of dist) if ((c += p) >= x) return v;
+    return dist[dist.length - 1]?.[0] ?? 0;
+  };
+  let mode = dist[0]?.[0] ?? 0;
+  let best = -1;
+  for (const [v, p] of dist) if (p > best) [best, mode] = [p, v];
+  return {dist, lo: q(0.025), hi: q(0.975), mode};
+}
+
+export function speedMatchups(
+  fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, snap: Snapshot, profile = speedProfile(fmt, gen, battle, belief, snap),
+): SpeedMatchup[] {
+  const dist = new Map(profile.dist);
   return battle.myTeam.map((set, mySlot) => {
     const cond = snap.mons[`me${mySlot}`];
     const mon = makePokemon(gen, mySpec(gen, fmt, set, cond), cond);
@@ -45,12 +71,14 @@ export function speedMatchups(fmt: FormatData, gen: Gen, battle: Battle, belief:
 
 export interface DamageMatchup {
   move: string;
-  /** Percent of the defender's max HP. */
+  /** Percent of the defender's max HP (95% range over rolls and its possible sets). */
   lo: number;
   mid: number;
   hi: number;
   /** Probability this hit KOs from the defender's current HP. */
   ko: number;
+  /** A would-be KO that Focus Sash stops. */
+  sash?: boolean;
 }
 
 function summarize(move: string, points: [pct: number, w: number][], ko: number, total: number): DamageMatchup {
@@ -63,7 +91,7 @@ function summarize(move: string, points: [pct: number, w: number][], ko: number,
     }
     return points.length ? points[points.length - 1][0] : 0;
   };
-  return {move, lo: q(0.05), mid: q(0.5), hi: q(0.95), ko: ko / (total || 1)};
+  return {move, lo: q(0.025), mid: q(0.5), hi: q(0.975), ko: ko / (total || 1)};
 }
 
 /** My move into this opponent, integrating over what it might be. */
@@ -88,14 +116,17 @@ export function myMoveInto(
     const key = `${space.f[h]}|${v.pre}|${v.stats.join('/')}|${v.item}|${v.ability}`;
     let m = memo.get(key);
     if (!m) {
-      const cur = Math.max(1, Math.round((v.stats[0] * oppCond.hp) / 100));
-      const d = makePokemon(gen, v.spec, oppCond, 0, cur);
+      // Every true HP that reads as the % on screen is equally possible.
+      const candidates = hpCandidates(oppCond.hp, v.stats[0], battle.settings, oppCond.hpEstimated);
+      const d = makePokemon(gen, v.spec, oppCond, 0, candidates[Math.floor(candidates.length / 2)]);
       const res = runCalc(gen, attacker, d, mv, field);
+      const sash = v.item === 'Focus Sash' && !oppCond.itemGone;
       let k = 0;
       const rolls: [number, number][] = [];
       for (const [roll, p] of res.dist) {
         rolls.push([(100 * roll) / res.maxHP, p]);
-        if (roll >= cur && !(v.item === 'Focus Sash' && cur === res.maxHP && !oppCond.itemGone)) k += p;
+        const kos = candidates.filter(hp => roll >= hp && !(sash && hp === res.maxHP)).length;
+        k += (p * kos) / candidates.length;
       }
       m = {rolls, ko: k};
       memo.set(key, m);
@@ -120,6 +151,7 @@ export function oppMoveInto(
   const myMax = defender.maxHP();
   const cur = myCond.hp || myMax;
   const sash = !myCond.itemGone && set.item === 'Focus Sash' && cur === myMax;
+  let sashSaves = false;
   const field = makeField(fmt.gameType, snap.field, 'opp');
   const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1});
   const {space, post} = belief;
@@ -140,6 +172,7 @@ export function oppMoveInto(
       for (const [roll, p] of res.dist) {
         rolls.push([(100 * roll) / myMax, p]);
         if (roll >= cur && !sash) k += p;
+        if (roll >= cur && sash) sashSaves = true;
       }
       m = {rolls, ko: k};
       memo.set(key, m);
@@ -148,5 +181,5 @@ export function oppMoveInto(
     ko += m.ko * post[h];
     total += post[h];
   }
-  return summarize(move, points, ko, total);
+  return {...summarize(move, points, ko, total), sash: sashSaves || undefined};
 }
