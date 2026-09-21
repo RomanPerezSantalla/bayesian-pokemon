@@ -12,6 +12,7 @@
 // Smogon's stats server has no CORS headers, which is why this runs at build time.
 import fs from 'node:fs';
 import path from 'node:path';
+import vm from 'node:vm';
 import zlib from 'node:zlib';
 import calc from '@smogon/calc';
 import {Dex} from '@pkmn/dex';
@@ -269,8 +270,63 @@ async function buildStructure(month, files, format) {
   return {smogonId, month, cutoff: CUTOFF, battles: out.battles};
 }
 
+/**
+ * Where each Champions item sits on Showdown's icon sheet (sprites/itemicons-sheet.png, rows of
+ * 16 icons of 24px). Only Showdown's client data has these numbers; @pkmn/dex drops them.
+ */
+async function buildItemIcons() {
+  const res = await fetch('https://play.pokemonshowdown.com/data/items.js');
+  if (!res.ok) throw new Error(`items.js: HTTP ${res.status}`);
+  const sandbox = {exports: {}};
+  vm.runInNewContext(await res.text(), sandbox);
+  const all = sandbox.exports.BattleItems;
+  const out = {};
+  for (const item of gen.items) {
+    const num = all[item.id]?.spritenum;
+    if (num) out[item.id] = num;
+  }
+  return out;
+}
+
+/**
+ * Type symbols in the style of the Switch games: partywhale's MIT-licensed recreation
+ * (github.com/partywhale/pokemon-type-icons), pinned. The circle each icon sits on becomes the
+ * tab's background colour; the symbol's shapes keep their own fills (some have details drawn
+ * in shades of the background).
+ */
+const TYPE_ICON_BASE = 'https://cdn.jsdelivr.net/gh/partywhale/pokemon-type-icons@fcbe6978c61c359680bc07636c3f9bdc0f346b43/icons';
+const TYPE_NAMES = ['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground', 'Flying',
+  'Psychic', 'Bug', 'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy'];
+const SVG_SHAPES = new Set(['path', 'polygon', 'polyline', 'circle', 'ellipse', 'rect']);
+const SVG_KEEP = new Set(['d', 'points', 'cx', 'cy', 'r', 'rx', 'ry', 'x', 'y', 'width', 'height', 'transform', 'fill-rule', 'clip-rule']);
+
+async function buildTypeIcons() {
+  const out = {};
+  for (const type of TYPE_NAMES) {
+    const res = await fetch(`${TYPE_ICON_BASE}/${type.toLowerCase()}.svg`);
+    if (!res.ok) throw new Error(`${type} icon: HTTP ${res.status}`);
+    const svg = await res.text();
+    const fills = Object.fromEntries([...svg.matchAll(/\.([\w-]+)\s*\{\s*fill:\s*(#[0-9a-fA-F]{3,8})/g)].map(m => [m[1], m[2]]));
+    let color = '';
+    const shapes = [];
+    for (const [, tag, attrText] of svg.matchAll(/<(\w+)\b([^>]*?)\/?>/g)) {
+      if (!SVG_SHAPES.has(tag)) continue;
+      const attrs = Object.fromEntries([...attrText.matchAll(/([\w-]+)="([^"]*)"/g)].map(m => [m[1], m[2]]));
+      const fill = fills[attrs.class] ?? attrs.fill ?? '#ffffff';
+      if (!color && tag === 'circle' && attrs.r === '128') {
+        color = fill;
+        continue;
+      }
+      shapes.push([tag, {...Object.fromEntries(Object.entries(attrs).filter(([k]) => SVG_KEEP.has(k))), fill}]);
+    }
+    if (!color || !shapes.length) throw new Error(`${type} icon: unexpected SVG`);
+    out[type] = {color, shapes};
+  }
+  return out;
+}
+
 async function main() {
-  // `--tables` rebuilds just the move/ability tables (no download, priors untouched).
+  // `--tables` rebuilds just the move/ability/item tables (no Smogon stats, priors untouched).
   const args = process.argv.slice(2);
   const tablesOnly = args.includes('--tables');
   fs.mkdirSync(OUT_DIR, {recursive: true});
@@ -280,6 +336,12 @@ async function main() {
   const abilities = buildAbilities();
   fs.writeFileSync(path.join(ROOT, 'src', 'data', 'abilities.gen.json'), JSON.stringify(abilities));
   console.log(`Legal abilities: ${Object.keys(abilities).length} species`);
+  const icons = await buildItemIcons();
+  fs.writeFileSync(path.join(ROOT, 'src', 'data', 'items.gen.json'), JSON.stringify(icons));
+  console.log(`Item icons: ${Object.keys(icons).length} items`);
+  const typeIcons = await buildTypeIcons();
+  fs.writeFileSync(path.join(ROOT, 'src', 'data', 'types.gen.json'), JSON.stringify(typeIcons));
+  console.log(`Type icons: ${Object.keys(typeIcons).length} types`);
   if (tablesOnly) return;
 
   const month = args.find(a => !a.startsWith('--')) || await latestMonth();

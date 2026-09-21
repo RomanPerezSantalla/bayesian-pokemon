@@ -289,7 +289,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     }
 
     for (const hit of ev.hits) {
-      if (hit.target.side !== 'me' || !damaging) continue;
+      if (hit.target.side !== 'me' || !damaging || hit.unread) continue;
       const set = battle.myTeam[hit.target.slot];
       if (!set) continue;
       const myCond = condOf(snap, hit.target, hit.hpBefore);
@@ -329,7 +329,8 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         }
         raw[h] = lik;
       }
-      out.push({slot, raw, kind: 'damage-dealt', note: `${ev.move} → ${set.species}`});
+      // With the HP before unknown, the reading only resyncs it: no damage evidence.
+      if (!hit.beforeUnknown) out.push({slot, raw, kind: 'damage-dealt', note: `${ev.move} → ${set.species}`});
 
       // A status the move can't cause on its own points at the attacker's ability.
       if (hit.status && !hit.noEffect) {
@@ -346,7 +347,8 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     }
 
     // Life Orb announces itself after every damaging hit.
-    const dealt = ev.hits.some(x => x.target.side === 'me' && !x.noEffect && (x.fainted || x.hpAfter < x.hpBefore));
+    const dealt = ev.hits.some(x => x.target.side === 'me' && !x.noEffect && !x.unread
+      && (x.beforeUnknown || x.fainted || x.hpAfter < x.hpBefore));
     if (damaging && dealt) {
       const seen = ev.actorTriggers.includes('lifeorb');
       const raw = new Float64Array(space.n);
@@ -372,7 +374,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
   for (const hit of oppHits) {
     const slot = hit.target.slot;
     const space = ctx.spaces[slot];
-    if (!space) continue;
+    if (!space || hit.unread) continue;
     const oppCond = condOf(snap, hit.target, hit.hpBefore);
     const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets});
     const multi = (ev.hitCount ?? 1) > 1;
@@ -437,7 +439,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       }
       trig[h] = t;
     }
-    out.push({slot, raw, kind: 'damage-taken', note: `${set.species}'s ${ev.move}`});
+    if (!hit.beforeUnknown) out.push({slot, raw, kind: 'damage-taken', note: `${set.species}'s ${ev.move}`});
     if (trig.some(x => x !== 1)) out.push({slot, raw: trig, kind: 'trigger', note: 'item / ability messages'});
   }
   return out;

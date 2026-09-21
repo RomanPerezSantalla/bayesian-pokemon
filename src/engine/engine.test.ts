@@ -12,12 +12,17 @@ import {damageDistribution, fractionalPriority, makeField, makeMove, makePokemon
 import {displayPct, mySpec, orderConsistency} from './likelihood';
 import {buildMoveModel, inclusion, itemFactors, movesLogLik} from './moveset';
 import {computeBeliefs, type DistEntry} from './posterior';
+import {predictionSnapshot} from './predict';
 import {applyAction, applyCheck, applyEndTurn, applySwitch, type StateCtx} from './state';
 import type {ActionEvent, Battle, CheckEvent, MonRef, RevealEvent} from './types';
 import {
-  canMoveAction, endTurn, everyoneMoved, logAction, logSwitch, moveAction, setOrdered, turnActions, undo, type ActionDraft,
+  canMoveAction, choiceLockedMove, endTurn, everyoneMoved, logAction, logSwitch, moveAction, setOrdered, stillToMove,
+  turnActions, undo, type ActionDraft,
 } from '../ui/battle/actions';
-import {dmgRange, hitVerdict, speedVerdict} from '../ui/battle/verdict';
+import {valueComplete} from '../ui/battle/Keypad';
+import {nextToMove} from '../ui/battle/order';
+import type {InferResult} from './worker';
+import {dmgRange, effText, hitVerdict, speedVerdict} from '../ui/battle/verdict';
 
 const data = (f: string) => JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../public/data', f), 'utf8'));
 const index = data('formats.json').formats as FormatInfo[];
@@ -458,6 +463,65 @@ describe('turn order', () => {
     expect(res.notes.some(n => n.kind === 'conflict')).toBe(false);
   });
 
+  it('knows who still has to move, likeliest next first', () => {
+    let b = battleVs(['Garchomp', 'Kingambit']);
+    // Speeds: my Sneasler 189, Garchomp ~150, my Incineroar 80, Kingambit ~50.
+    const result = {
+      matchups: {
+        0: {speed: [{mySlot: 0, mySpeed: 80, pFaster: 1, pTie: 0}, {mySlot: 1, mySpeed: 189, pFaster: 0, pTie: 0}], profile: {dist: [[150, 1]], lo: 150, hi: 150, mode: 150}},
+        1: {speed: [], profile: {dist: [[50, 1]], lo: 50, hi: 50, mode: 50}},
+      },
+    } as unknown as InferResult;
+    expect(nextToMove(b, result)).toEqual([me(1), opp(0), me(0), opp(1)]);
+    b = log(b, draft(me(1), 'Close Combat'));
+    expect(nextToMove(b, result)[0]).toEqual(opp(0));
+    b = log(b, draft(opp(0), 'Dragon Claw'));
+    b = log(b, draft(me(0), 'Fake Out', [hit(opp(1), 100, 92)]));
+    // Kingambit flinched: nobody is left.
+    expect(stillToMove(b)).toEqual([]);
+    expect(everyoneMoved(b)).toBe(true);
+  });
+
+  it('knows the move a Choice item locks it into, until it switches out', () => {
+    let b = battleVs(['Garchomp', 'Kingambit', 'Incineroar']);
+    expect(choiceLockedMove(b, opp(0), 'Choice Scarf')).toBeNull();
+    b = log(b, draft(opp(0), 'Earthquake'));
+    expect(choiceLockedMove(b, opp(0), 'Choice Scarf')).toBe('Earthquake');
+    expect(choiceLockedMove(b, opp(0), 'Life Orb')).toBeNull();
+    expect(choiceLockedMove(b, opp(0), undefined)).toBeNull();
+    b = logSwitch(ctxOf(b), b, 'opp', 0, 2);
+    b = logSwitch(ctxOf(b), b, 'opp', 0, 0);
+    expect(choiceLockedMove(b, opp(0), 'Choice Scarf')).toBeNull();
+  });
+
+  it('a skipped HP reading teaches nothing wrong, and the next reading only resyncs', () => {
+    let b = battleVs(['Garchomp', 'Incineroar']);
+    const skipped = {target: me(0), hpBefore: 202, hpAfter: 202, fainted: false, crit: false, triggers: [], unread: true};
+    b = log(b, draft(opp(0), 'Dragon Claw', [skipped]));
+    expect(b.live.mons.me0.hpUnknown).toBe(true);
+    const r1 = computeBeliefs(fmt, b);
+    expect(r1.notes.some(n => n.kind === 'damage-dealt' || n.kind === 'conflict')).toBe(false);
+    // (The same hit, read, is damage evidence.)
+    const read = log(battleVs(['Garchomp', 'Incineroar']), draft(opp(0), 'Dragon Claw', [hit(me(0), 202, 150)]));
+    expect(computeBeliefs(fmt, read).notes.some(n => n.kind === 'damage-dealt')).toBe(true);
+    // Next turn it's read again: 130 is right whatever the unread hit did, but the damage isn't known.
+    b = endTurn(ctxOf(b), b);
+    b = log(b, draft(opp(0), 'Dragon Claw', [{...hit(me(0), 202, 130), beforeUnknown: true}]));
+    expect(b.live.mons.me0.hp).toBe(130);
+    expect(b.live.mons.me0.hpUnknown).toBe(false);
+    const r2 = computeBeliefs(fmt, b);
+    expect(r2.notes.some(n => n.kind === 'damage-dealt' || n.kind === 'conflict')).toBe(false);
+  });
+
+  it('a typed HP that cannot take another digit is complete', () => {
+    expect(valueComplete('45', 100)).toBe(true);
+    expect(valueComplete('10', 100)).toBe(false);
+    expect(valueComplete('100', 100)).toBe(true);
+    expect(valueComplete('20', 202)).toBe(false);
+    expect(valueComplete('142', 202)).toBe(true);
+    expect(valueComplete('', 100)).toBe(false);
+  });
+
   it('Stall moves last in its bracket, even under Trick Room', () => {
     const stall: [number, number] = [fractionalPriority(gen, 'Foul Play', 'Stall', undefined, false), 200];
     const plain: [number, number] = [0, 50];
@@ -494,8 +558,43 @@ Adamant Nature
   });
 });
 
+describe('predictions', () => {
+  it('count a Mega as evolving this turn while its side still can', () => {
+    const b = battleVs(['Charizard', 'Garchomp']);
+    const c = computeBeliefs(fmt, b).mons[0]!;
+    const {snap, asMega} = predictionSnapshot(gen, b, b.live, c);
+    expect(asMega?.forme).toMatch(/^Charizard-Mega/);
+    expect(snap.mons.opp0.mega).toBe(true);
+    expect(b.live.mons.opp0.mega).toBe(false);
+    // One Mega per side: once another opponent has evolved, it can't.
+    b.live.mons.opp1.mega = true;
+    expect(predictionSnapshot(gen, b, b.live, c).asMega).toBeUndefined();
+  });
+
+  it('count my Mega too, weather and all, until I have used it', () => {
+    const team = parseTeam(`Charizard @ Charizardite Y
+Ability: Solar Power
+EVs: 2 HP / 32 SpA / 32 Spe
+Timid Nature
+- Heat Wave
+- Weather Ball
+- Solar Beam
+- Protect`);
+    const b = createBattle(fmt, [...team, ...MY_TEAM], ['Garchomp', 'Incineroar'], 'test');
+    b.live.active = {me: [0, 1], opp: [0, 1]};
+    const g = computeBeliefs(fmt, b).mons[0]!;
+    const pf = predictionSnapshot(gen, b, b.live, g);
+    expect(pf.myMegas).toEqual([0]);
+    expect(pf.snap.mons.me0.mega).toBe(true);
+    expect(pf.snap.field.weather).toBe('Sun');
+    expect(b.live.field.weather).toBeUndefined();
+    b.live.mons.me0.mega = true;
+    expect(predictionSnapshot(gen, b, b.live, g).myMegas).toEqual([]);
+  });
+});
+
 describe('damage and speed readings', () => {
-  const hitOf = (lo: number, hi: number, ko = 0, sash = false) => ({move: 'X', lo, mid: (lo + hi) / 2, hi, ko, sash});
+  const hitOf = (lo: number, hi: number, ko = 0, sash = false) => ({move: 'X', type: 'Normal', eff: 1, lo, mid: (lo + hi) / 2, hi, ko, sash});
 
   it('writes damage ranges the usual way', () => {
     expect(dmgRange(34.4, 51.6)).toBe('34–52%');
@@ -516,11 +615,17 @@ describe('damage and speed readings', () => {
     expect(hitVerdict(hitOf(0, 0), 100).text).toBe('immune');
   });
 
-  it('reads who moves first, flipped under Trick Room', () => {
+  it('says who moves first by name, flipped under Trick Room', () => {
     const s = {mySlot: 0, mySpeed: 100, pFaster: 1, pTie: 0};
-    expect(speedVerdict(s, false)?.text).toBe('it moves first');
-    expect(speedVerdict(s, true)?.text).toBe('you move first');
-    expect(speedVerdict({...s, pFaster: 0.3}, false)?.text).toBe('it first 30%');
+    const names = {mine: 'Charizard', opp: 'Salamence'};
+    expect(speedVerdict(s, false, names)?.text).toBe('Salamence moves first');
+    expect(speedVerdict(s, true, names)?.text).toBe('Charizard moves first');
+    expect(speedVerdict({...s, pFaster: 0.3}, false, names)?.text).toBe('Charizard first 70%');
+    expect(speedVerdict({...s, pFaster: 0.8}, false, names)?.text).toBe('Salamence first 80%');
+  });
+
+  it('writes type multipliers compactly', () => {
+    expect([4, 2, 1, 0.5, 0.25, 0].map(effText)).toEqual(['×4', '×2', '', '×½', '×¼', '×0']);
   });
 });
 

@@ -31,11 +31,21 @@ Actions*, one time). Then open the URL on your phone and "Add to Home Screen".
 1. **Tap who acted, in the order they act on screen** (the tiles mirror the Switch: them on top, you
    below). The order you log is the move order the Speed inference reads.
 2. **Tap the move.** Theirs are sorted by how likely they are to have it; revealed ones first.
-   Self/field moves (Protect, Tailwind, Trick Room, Swords Dance…) are logged on that tap.
+   Self/field moves (Protect, Tailwind, Trick Room, Swords Dance…) are logged on that tap. A Pokémon
+   that certainly holds a Choice item opens straight on the move it's locked into (`‹ back` for another).
 3. **Type the HP left** on the keypad (your exact HP; their % exactly as shown). Spread moves get one row per target;
-   `next ▸` moves between them. `KO`, `✦ Crit`, `No effect`, `Missed / protected` are one tap.
-4. `✓ Log`. Tapping someone who already moved this turn, or who came in this turn, starts the next
-   turn for you. *End turn* pulses once everyone on the field has moved (a Fake Out flinch counts).
+   a number that can't take another digit (their 45%, your 142 of 202) moves on to the next row by itself,
+   and `✓ Log` lights up when every row is filled. `KO`, `✦ Crit`, `No effect`, `Missed / protected` are one tap.
+   No time? **skip HP** logs the move and order without it: that Pokémon's HP shows `?` until the next
+   reading, which only resyncs it, so nothing wrong is learned.
+4. `✓ Log`. The sheet stays open on whoever should move next (predicted from Speed), with everyone still
+   to move one tap away; it closes when everyone has moved and *End turn* pulses (a Fake Out flinch counts).
+   Tapping someone who already moved this turn, or who came in this turn, starts the next turn for you.
+   A short vibration confirms each entry (Android).
+
+**On a PC, the keyboard does it all:** Q W open their Pokémon and A S yours (left to right), 1–9 pick a
+move or target, typing a letter searches every move, ← → switch Pokémon; then type the HP, Tab for the
+next target, K for KO, C crit, X missed, S skip HP, Enter logs, Esc closes. E ends the turn, Ctrl+Z undoes.
 
 **Turn order.** Tiles show 1st / 2nd / 3rd… as Pokémon move, and the log numbers each move within
 its turn. Tap a logged move to fix it: *It went earlier / later* swaps it with its neighbour (the
@@ -67,10 +77,13 @@ contradicts Aerilate after.
 where it's close). Per opponent, damage comes first as one card per Pokémon of yours on the field: what
 it *takes* from the opponent's likeliest moves and what it *deals* back, each a 95% range of max HP (over
 damage rolls and its possible sets) with an HP bar (solid = surely left, striped = depends on the roll
-and their set). The badge gives the KO chance from its HP now, or else how many hits it takes (2HKO,
-2–3HKO…); rows needing four hits or more fade out, and a card's edge turns orange/red when a likely
-move could KO it. The card header says who moves first. The top three each way show by default (*All
-moves* for the rest), then Speed for your other Pokémon, then item, ability and moves.
+and their set). Each move carries its type symbol, as the Switch games draw it, with the type
+multiplier beside it (the type as it lands: Aerilate's Flying Hyper Voice shows as Flying). The badge
+gives the KO chance from its HP now, or else how many hits it takes (2HKO, 2–3HKO…); rows needing four
+hits or more fade, and a card's edge turns orange/red when a likely move could KO it. Every attack it
+plausibly has is listed (3%+), since on turn one nothing is known. The card header names who moves
+first. Any Pokémon that can still Mega Evolve, yours or theirs, is counted as its Mega for damage and
+Speed (it evolves before anyone moves), weather included for Drought and co. Then Speed for your other Pokémon, and item (with icons), ability and moves.
 
 The header has a light/dark toggle (it starts from the system setting and remembers your choice) and
 a Buy me a coffee link.
@@ -138,4 +151,5 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
 - Quick Claw-style random ordering, Illusion and Transform aren't modelled.
 
 Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or
-The Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites.
+The Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites and item icons, type symbols
+recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT).

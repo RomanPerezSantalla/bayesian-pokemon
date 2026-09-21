@@ -30,6 +30,8 @@ export interface MonCondition {
   itemGone: boolean;
   /** Opponent HP% was computed (recoil, Leftovers…) rather than read off the screen. */
   hpEstimated?: boolean;
+  /** A hit on it went unread ("skip HP"): its HP is unknown until the next reading. */
+  hpUnknown?: boolean;
   /** Turns badly poisoned, for Toxic's growing damage. */
   toxic?: number;
 }
@@ -91,6 +93,10 @@ export interface HitResult {
   noEffect?: boolean;
   /** hpBefore was estimated, so allow a wider window for it. */
   beforeApprox?: boolean;
+  /** Logged without reading the HP ("skip HP"): no damage evidence, the target's HP becomes unknown. */
+  unread?: boolean;
+  /** Its HP before this hit was unknown (an earlier hit went unread): the reading after only resyncs the HP. */
+  beforeUnknown?: boolean;
   /**
    * Reaction to this move's stat drop (Defiant, Competitive, Clear Amulet, White Herb…).
    * undefined: not asked. null: asked, nothing shown (evidence too).

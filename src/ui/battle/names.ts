@@ -19,3 +19,9 @@ export function oppSpecies(battle: Battle, mons: (MonSummary | null)[] | undefin
   }
   return battle.oppPreview[slot];
 }
+
+/** "Mega Salamence", "Mega Charizard Y": how a Mega forme reads in a sentence. */
+export function spokenName(species: string) {
+  const m = /^(.*?)-Mega(?:-(w+))?$/.exec(species);
+  return m ? `Mega ${m[1]}${m[2] ? ` ${m[2]}` : ''}` : species;
+}

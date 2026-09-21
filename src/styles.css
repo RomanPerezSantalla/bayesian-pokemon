@@ -211,13 +211,26 @@ table.t th { color: var(--muted); font-weight: 500; }
 .log-tools { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; cursor: default; }
 .tag.ord { background: var(--accent); color: var(--on-color); font-weight: 700; }
 .tag.ord.unsure { background: transparent; color: var(--warn); box-shadow: inset 0 0 0 1px var(--warn); }
-.btn.ready { animation: ready-pulse 1.6s ease-out infinite; }
+.btn.ready, .keypad .ok.ready { animation: ready-pulse 1.6s ease-out infinite; }
+.keypad .skip { font-size: 13px; font-weight: 600; color: var(--muted); }
+.queue { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.qchip { border: 1px solid var(--border); background: var(--panel-2); border-radius: 999px; padding: 4px 10px; font-size: 12.5px; cursor: pointer; touch-action: manipulation; }
+.qchip.opp { border-color: color-mix(in srgb, var(--opp) 45%, var(--border)); }
+.qchip.me { border-color: color-mix(in srgb, var(--me) 45%, var(--border)); }
+.qchip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+/* Keyboard hints only where there's a keyboard and a mouse. */
+.kbd { display: none; font: 600 10.5px ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-right: 5px; background: var(--panel); vertical-align: 1px; }
+.kbd-hint { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .kbd { display: inline-block; }
+  .kbd-hint { display: block; }
+}
 @keyframes ready-pulse {
   0% { box-shadow: 0 0 0 0 var(--accent); }
   80%, 100% { box-shadow: 0 0 0 8px transparent; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .btn.ready { animation: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+  .btn.ready, .keypad .ok.ready { animation: none; box-shadow: 0 0 0 3px var(--accent-soft); }
 }
 .banner { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 10px; font-size: 13.5px; }
 .banner.warn { border-color: var(--warn); background: transparent; color: var(--warn); }
@@ -259,10 +272,25 @@ table.t th { color: var(--muted); font-weight: 500; }
 .mcard-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .mcard-head .verdict { font-size: 11.5px; padding: 2px 8px; flex-shrink: 0; }
 .mcard-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin-top: 2px; }
-.dmg-row { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(48px, 1fr) 56px 50px; gap: 6px; align-items: center; font-size: 13px; }
+.type-tab { display: inline-flex; align-items: center; justify-content: center; gap: 2px; height: 18px; min-width: 22px; padding: 0 3px; border-radius: 5px; color: #fff; flex-shrink: 0; }
+.type-tab.with-eff { width: 40px; }
+.type-tab b { font-size: 10.5px; font-weight: 800; line-height: 1; text-shadow: 0 0 2px rgb(0 0 0 / 45%); }
+.type-sym { width: 13px; height: 13px; flex-shrink: 0; }
+.item-icon { display: inline-block; width: 24px; height: 24px; flex-shrink: 0; background: url(https://play.pokemonshowdown.com/sprites/itemicons-sheet.png) no-repeat; image-rendering: pixelated; }
+.item-icon.none { background: none; }
+.with-icon { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
+.with-icon .nm, .dist .label .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.dmg-row { display: grid; grid-template-columns: 40px minmax(0, 1.35fr) minmax(36px, 1fr) 48px 46px; gap: 4px; align-items: center; font-size: 13px; }
 .dmg-row.weak { opacity: .6; }
+/* Phones: names first, the bar takes what is left. */
+@media (max-width: 420px) {
+  .dmg-row { grid-template-columns: 36px minmax(0, 1.9fr) minmax(32px, 1fr) 46px 44px; font-size: 12.5px; }
+  .type-tab.with-eff { width: 36px; }
+}
 .dmg-pct { font-size: 11.5px; text-align: right; white-space: nowrap; }
-.dmg-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dmg-label { display: flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }
+.dmg-label .nm { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dmg-label small { flex-shrink: 0; }
 .dmg { position: relative; height: 14px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
 .dmg > div { position: absolute; top: 0; bottom: 0; }
 .dmg-left { left: 0; }

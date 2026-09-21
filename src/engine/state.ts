@@ -32,7 +32,7 @@ const clamp6 = (v: number) => Math.max(-6, Math.min(6, v));
 const foe = (side: SideID): SideID => (side === 'me' ? 'opp' : 'me');
 
 const WEATHER: Record<string, Weather> = {sun: 'Sun', rain: 'Rain', sand: 'Sand', snow: 'Snow'};
-const WEATHER_ABILITY: Record<string, Weather> = {Drought: 'Sun', Drizzle: 'Rain', 'Sand Stream': 'Sand', 'Snow Warning': 'Snow'};
+export const WEATHER_ABILITY: Record<string, Weather> = {Drought: 'Sun', Drizzle: 'Rain', 'Sand Stream': 'Sand', 'Snow Warning': 'Snow'};
 const TERRAIN_ABILITY: Record<string, FieldCondition['terrain']> = {
   'Electric Surge': 'Electric', 'Grassy Surge': 'Grassy', 'Psychic Surge': 'Psychic', 'Misty Surge': 'Misty',
 };
@@ -172,16 +172,22 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
     const t = next.mons[key];
     if (!t || hit.noEffect) continue;
     const max = maxHPOf(ctx, next, hit.target);
-    t.hp = hit.fainted ? 0 : hit.hpAfter;
-    t.hpEstimated = false;
+    if (hit.unread) {
+      // Hit, but the HP wasn't read: unknown until the next reading. Guaranteed effects still happen.
+      t.hpUnknown = true;
+    } else {
+      t.hp = hit.fainted ? 0 : hit.hpAfter;
+      t.hpEstimated = false;
+      t.hpUnknown = false;
+    }
     if (hit.status && !t.status) t.status = hit.status;
     if (hit.triggers.some(x => x === 'berry' || x === 'sash' || x === 'wp' || x === 'sitrus')) t.itemGone = true;
     if (hit.triggers.includes('sitrus') && !hit.fainted) t.hp = Math.min(max, t.hp + Math.floor(max / 4));
     // My own Focus Sash saving me from full HP (which also turns on Unburden).
-    if (hit.target.side === 'me' && !hit.fainted && hit.hpAfter === 1 && hit.hpBefore === max
+    if (hit.target.side === 'me' && !hit.unread && !hit.fainted && hit.hpAfter === 1 && hit.hpBefore === max
       && knownItem(ctx, next, hit.target) === 'Focus Sash') t.itemGone = true;
     // My own Sitrus: I know I hold it, so no message needed.
-    if (hit.target.side === 'me' && !hit.fainted && !hit.triggers.includes('sitrus')) {
+    if (hit.target.side === 'me' && !hit.unread && !hit.fainted && !hit.triggers.includes('sitrus')) {
       if (knownItem(ctx, next, hit.target) === 'Sitrus Berry' && t.hp <= Math.floor(max / 2)) {
         t.hp = Math.min(max, t.hp + Math.floor(max / 4));
         t.itemGone = true;

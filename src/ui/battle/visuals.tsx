@@ -1,8 +1,9 @@
 import type {Gen} from '../../data/dex';
 import type {DamageMatchup, SpeedMatchup, SpeedProfile} from '../../engine/predict';
 import type {InferResult} from '../../engine/worker';
-import type {Battle, MonRef} from '../../engine/types';
-import {Sprite, pct} from '../common';
+import type {Battle} from '../../engine/types';
+import {pBefore, predictedOrder} from './order';
+import {Sprite, TypeTab, pct} from '../common';
 import {dmgRange, hitVerdict, speedVerdict} from './verdict';
 import {monLabel} from './names';
 
@@ -26,11 +27,16 @@ export function DamageBar({hp, lo, hi}: {hp: number; lo: number; hi: number}) {
   );
 }
 
-function DamageRow({label, sub, cur, r}: {label: string; sub?: string; cur: number; r: DamageMatchup}) {
+/** One hit: type and multiplier, move (and how likely it has it), then HP bar, range and verdict. */
+function DamageRow({r, cur, p}: {r: DamageMatchup; cur: number; p?: number}) {
   const verdict = hitVerdict(r, cur);
   return (
     <div className={`dmg-row${verdict.weak ? ' weak' : ''}`}>
-      <div className="dmg-label"><span>{label}</span>{sub && <small className="muted"> {sub}</small>}</div>
+      <TypeTab type={r.type} eff={r.eff} />
+      <div className="dmg-label">
+        <span className="nm">{r.move}</span>
+        {p !== undefined && <small className="muted">{p < 1 ? pct(p) : '✓'}</small>}
+      </div>
       <DamageBar hp={cur / 100} lo={r.lo / 100} hi={r.hi / 100} />
       <span className="dmg-pct mono">{dmgRange(r.lo, r.hi)}</span>
       <span className={`ko ko-${verdict.cls}`} title={verdict.title}>{verdict.text}</span>
@@ -45,70 +51,60 @@ export interface Card {
   /** Its HP now, % of max. */
   hp: number;
   hpText: string;
+  /** Counted as Mega Evolving this turn (it hasn't yet). */
+  asMega?: boolean;
   takes: DamageMatchup[];
   deals: DamageMatchup[];
 }
 
-const TOP = 3;
-
 /**
  * One card per Pokémon of yours on the field: what it takes from this opponent and what it
- * deals back, each as HP bars with the roll zone. The likeliest threats and your best hits
- * come first; `all` shows every move.
+ * deals back, every move a row with the HP bar and roll zone. Likeliest threats and best hits
+ * come first; hits needing four or more fade.
  */
-export function MatchupCards({gen, cards, oppHp, moveP, speed, trickRoom, all, onAll}: {
+export function MatchupCards({gen, cards, oppName, oppHp, moveP, speed, trickRoom}: {
   gen: Gen;
   cards: Card[];
+  oppName: string;
   oppHp: number;
   moveP(move: string): number;
   speed: SpeedMatchup[];
   trickRoom: boolean;
-  all: boolean;
-  onAll(all: boolean): void;
 }) {
   const threat = (r: DamageMatchup) => moveP(r.move) * (r.ko + r.hi / 1000);
-  const sorted = cards.map(c => ({
-    ...c,
-    takes: [...c.takes].sort((a, b) => threat(b) - threat(a)),
-    deals: [...c.deals].sort((a, b) => b.ko - a.ko || b.hi - a.hi),
-  }));
-  const hidden = sorted.reduce((n, c) => n + Math.max(0, c.takes.length - TOP) + Math.max(0, c.deals.length - TOP), 0);
-  const cut = <T,>(list: T[]) => (all ? list : list.slice(0, TOP));
   return (
     <div className="col">
-      {sorted.map(c => {
+      {cards.map(c => {
+        const takes = [...c.takes].sort((x, y) => threat(y) - threat(x));
+        const deals = [...c.deals].sort((x, y) => y.ko - x.ko || y.hi - x.hi);
         // How close a likely move comes to KOing it: colours the card's edge.
         const danger = Math.max(0, ...c.takes.map(r => r.ko * moveP(r.move)));
         const edge = danger >= 0.5 ? ' danger' : danger > 0.05 ? ' risk' : '';
-        const sv = speedVerdict(speed.find(s => s.mySlot === c.slot), trickRoom);
+        const sv = speedVerdict(speed.find(s => s.mySlot === c.slot), trickRoom, {mine: c.name, opp: oppName});
         return (
           <div key={c.slot} className={`mcard${edge}`}>
             <div className="mcard-head">
               <Sprite gen={gen} species={c.species} />
               <b className="mcard-name">{c.name}</b>
+              {c.asMega && <span className="tag" title="Counted as Mega Evolving this turn">as Mega</span>}
               <span className="muted small mono">{c.hpText}</span>
               <span className="spacer" />
               {sv && <span className={`verdict ${sv.cls}`}>{sv.text}</span>}
             </div>
-            {c.takes.length > 0 && <div className="mcard-label">takes</div>}
-            {cut(c.takes).map(r => (
-              <DamageRow key={`t${r.move}`} label={r.move} sub={moveP(r.move) < 1 ? pct(moveP(r.move)) : '✓'} cur={c.hp} r={r} />
-            ))}
-            {c.deals.length > 0 && <div className="mcard-label">deals</div>}
-            {cut(c.deals).map(r => <DamageRow key={`d${r.move}`} label={r.move} cur={oppHp} r={r} />)}
+            {c.takes.length > 0 && <div className="mcard-label">takes from {oppName}</div>}
+            {takes.map(r => <DamageRow key={`t${r.move}`} r={r} cur={c.hp} p={moveP(r.move)} />)}
+            {c.deals.length > 0 && <div className="mcard-label">deals to {oppName}</div>}
+            {deals.map(r => <DamageRow key={`d${r.move}`} r={r} cur={oppHp} />)}
           </div>
         );
       })}
-      {(hidden > 0 || all) && (
-        <button className="btn sm ghost" onClick={() => onAll(!all)}>{all ? 'Fewer moves' : `All moves (${hidden} more)`}</button>
-      )}
     </div>
   );
 }
 
-/** Its Speed now, and before/after for your Pokémon not shown in the cards (`skip`). */
-export function SpeedVerdicts({battle, speed, profile, trickRoom, skip = []}: {
-  battle: Battle; speed: SpeedMatchup[]; profile: SpeedProfile; trickRoom: boolean; skip?: number[];
+/** Its Speed now, and who moves first against your Pokémon not shown in the cards (`skip`). */
+export function SpeedVerdicts({battle, oppName, speed, profile, trickRoom, skip = []}: {
+  battle: Battle; oppName: string; speed: SpeedMatchup[]; profile: SpeedProfile; trickRoom: boolean; skip?: number[];
 }) {
   const pool = battle.brought ?? battle.myTeam.map((_, i) => i);
   const list = speed.filter(s => pool.includes(s.mySlot) && !skip.includes(s.mySlot)).sort((a, b) => b.mySpeed - a.mySpeed);
@@ -120,10 +116,11 @@ export function SpeedVerdicts({battle, speed, profile, trickRoom, skip = []}: {
       {list.length > 0 && (
         <div className="chips">
           {list.map(s => {
-            const sv = speedVerdict(s, trickRoom)!;
+            const mine = battle.myTeam[s.mySlot].nickname || battle.myTeam[s.mySlot].species;
+            const sv = speedVerdict(s, trickRoom, {mine, opp: oppName})!;
             return (
               <span key={s.mySlot} className={`verdict ${sv.cls}`}>
-                <b>{battle.myTeam[s.mySlot].nickname || battle.myTeam[s.mySlot].species}</b> <span className="mono">{s.mySpeed}</span> · {sv.text}
+                {mine} <span className="mono">{s.mySpeed}</span> · <b>{sv.text}</b>
               </span>
             );
           })}
@@ -133,54 +130,11 @@ export function SpeedVerdicts({battle, speed, profile, trickRoom, skip = []}: {
   );
 }
 
-interface Runner {
-  ref: MonRef;
-  label: string;
-  dist: [number, number][];
-  lo: number;
-  hi: number;
-  mid: number;
-}
-
-/** P(a moves before b) for independent speed distributions. */
-function pBefore(a: Runner, b: Runner, trickRoom: boolean) {
-  let p = 0;
-  for (const [x, px] of a.dist) {
-    for (const [y, py] of b.dist) {
-      if (x === y) p += 0.5 * px * py;
-      else if (trickRoom ? x < y : x > y) p += px * py;
-    }
-  }
-  return p;
-}
-
 /** Who moves first among everyone on the field (same-priority moves), at a glance. */
 export function SpeedOrder({battle, result}: {battle: Battle; result: InferResult | null}) {
-  if (!result) return null;
+  const sorted = predictedOrder(battle, result);
+  if (sorted.length < 2) return null;
   const tr = battle.live.field.trickRoom;
-  const anyMatchup = Object.values(result.matchups)[0];
-  if (!anyMatchup) return null;
-  const runners: Runner[] = [];
-  for (const slot of battle.live.active.me) {
-    if (slot === null || (battle.live.mons[`me${slot}`]?.hp ?? 1) <= 0) continue;
-    const s = anyMatchup.speed.find(x => x.mySlot === slot);
-    if (!s) continue;
-    runners.push({ref: {side: 'me', slot}, label: monLabel(battle, result.mons, {side: 'me', slot}), dist: [[s.mySpeed, 1]], lo: s.mySpeed, hi: s.mySpeed, mid: s.mySpeed});
-  }
-  for (const slot of battle.live.active.opp) {
-    if (slot === null || (battle.live.mons[`opp${slot}`]?.hp ?? 1) <= 0) continue;
-    const prof = result.matchups[slot]?.profile;
-    if (!prof) continue;
-    runners.push({ref: {side: 'opp', slot}, label: monLabel(battle, result.mons, {side: 'opp', slot}), dist: prof.dist, lo: prof.lo, hi: prof.hi, mid: prof.mode});
-  }
-  if (runners.length < 2) return null;
-  // Order by who's more likely to move first, pair by pair (not by a single guess).
-  const sorted: Runner[] = [];
-  for (const r of runners) {
-    let i = 0;
-    while (i < sorted.length && pBefore(sorted[i], r, tr) >= 0.5) i++;
-    sorted.splice(i, 0, r);
-  }
   return (
     <div className="order">
       <span className="small muted">{tr ? 'Order (Trick Room)' : 'Order'}</span>
@@ -190,7 +144,7 @@ export function SpeedOrder({battle, result}: {battle: Battle; result: InferResul
         return (
           <span key={`${r.ref.side}${r.ref.slot}`} className="order-item">
             <span className={`order-mon ${r.ref.side}`}>
-              {r.label} <span className="mono">{r.lo === r.hi ? r.lo : `${r.lo}–${r.hi}`}</span>
+              {monLabel(battle, result?.mons, r.ref)} <span className="mono">{r.lo === r.hi ? r.lo : `${r.lo}–${r.hi}`}</span>
             </span>
             {next && <span className={`order-sep${p > 0.98 ? '' : ' unsure'}`}>{p > 0.98 ? '›' : `› ${pct(p)}`}</span>}
           </span>

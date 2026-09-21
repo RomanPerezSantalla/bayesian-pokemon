@@ -1,4 +1,4 @@
-import {useMemo, useState} from 'react';
+import {useEffect, useMemo, useRef, useState} from 'react';
 import {allItems, allAbilities, allMoves, isStatusMove, move as dexMove, STAT_LABELS, toID, type Gen} from '../../data/dex';
 import {DROP_REACT, DROP_REACT_ITEMS} from '../../engine/abilities';
 import {berryApplies, megaFormeOf} from '../../engine/likelihood';
@@ -7,11 +7,11 @@ import {OTHER_ITEM} from '../../engine/prior';
 import {canMega, maxHPOf, type StateCtx} from '../../engine/state';
 import type {MonSummary} from '../../engine/worker';
 import {
-  monKey, type Battle, type Boosts, type MonRef, type RevealEvent, type Status, type Trigger,
+  monKey, sameMon, type Battle, type Boosts, type HitResult, type MonRef, type RevealEvent, type Status, type Trigger,
 } from '../../engine/types';
 import {Datalist, TYPE_COLORS, pct} from '../common';
-import {helpedThisTurn, type ActionDraft} from './actions';
-import {Keypad} from './Keypad';
+import {choiceLockedMove, helpedThisTurn, type ActionDraft} from './actions';
+import {Keypad, valueComplete} from './Keypad';
 import {monLabel} from './names';
 
 interface Row {
@@ -38,12 +38,15 @@ const STATUS_LABEL: Record<string, string> = {brn: 'BRN', par: 'PAR', psn: 'PSN'
 const has = (m: MonSummary | null | undefined, list: 'items' | 'abilities', name: string) =>
   !!m?.[list].some(e => e.name === name && e.p > 0);
 
-export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, onReveal, onSwitch, onClose}: {
+export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, onCommit, onMega, onReveal, onSwitch, onClose}: {
   gen: Gen;
   battle: Battle;
   mons: (MonSummary | null)[] | undefined;
   ctx: StateCtx;
   actor: MonRef;
+  /** Who still has to move this turn, likeliest next first: one tap switches the sheet to them. */
+  queue: MonRef[];
+  onPickActor(r: MonRef): void;
   onCommit(d: ActionDraft): void;
   onMega(forme: string): void;
   onReveal(what: RevealEvent['what'], value: string, negate?: boolean): void;
@@ -93,9 +96,14 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
     const mv = over.move ?? move;
     if (!mv) return;
     const useRows = over.rows ?? rows;
-    const hits = useRows.filter(r => r.fainted || r.noEffect || r.value !== '').map(r => {
-      const before = r.before !== undefined && r.before !== '' ? Number(r.before) : hpBefore(r.ref);
+    const hits = useRows.map((r): HitResult => {
+      const typedBefore = r.before !== undefined && r.before !== '';
+      const before = typedBefore ? Number(r.before) : hpBefore(r.ref);
       const c = live.mons[monKey(r.ref)];
+      // Nothing typed: it was hit, the HP just wasn't read ("skip HP").
+      if (!(r.fainted || r.noEffect || r.value !== '')) {
+        return {target: r.ref, hpBefore: before, hpAfter: before, fainted: false, crit: r.crit, triggers: [], unread: true};
+      }
       return {
         target: r.ref,
         hpBefore: before,
@@ -106,7 +114,8 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
         status: r.status,
         boosts: r.boosts,
         noEffect: r.noEffect || undefined,
-        beforeApprox: r.ref.side === 'opp' && !!c?.hpEstimated && r.before === undefined ? true : undefined,
+        beforeApprox: r.ref.side === 'opp' && !!c?.hpEstimated && !typedBefore ? true : undefined,
+        beforeUnknown: c?.hpUnknown && !typedBefore ? true : undefined,
         // Asked about means an unticked chip is evidence ("nothing shown").
         reaction: reactionOptions(r).length ? r.reaction ?? null : undefined,
       };
@@ -129,6 +138,16 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
   };
 
   const newRow = (ref: MonRef): Row => ({ref, value: '', fainted: false, crit: false, noEffect: false, triggers: []});
+
+  // A certain Choice item locks it into the move it already used: start there ("‹ back" for another).
+  const lockItem = actor.side === 'me' ? battle.myTeam[actor.slot]?.item : summary?.items.find(e => e.certain)?.name;
+  const locked = choiceLockedMove(battle, actor, lockItem);
+  const openedLocked = useRef(false);
+  useEffect(() => {
+    if (openedLocked.current || !locked || stage !== 'move' || move || isStatusMove(gen, locked)) return;
+    openedLocked.current = true;
+    pickMove(locked);
+  });
 
   const pickMove = (name: string) => {
     const m = dexMove(gen, name);
@@ -173,7 +192,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
   const toggle = <T,>(list: T[], v: T) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
 
   const onKey = (k: string) => {
-    if (k === 'ok') return commit();
+    if (k === 'ok' || k === 'skip') return commit();
     const r = rows[focus];
     if (!r) return;
     if (k === 'next') {
@@ -189,7 +208,68 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
     if (next.length > 3) return;
     if (Number(next) > maxOf(r.ref)) return;
     patch(focus, {[field]: next, fainted: false, noEffect: false});
+    // A value that can't take another digit is complete: on to the HP after, or the next target.
+    if (valueComplete(next, maxOf(r.ref))) {
+      if (editBefore) setEditBefore(false);
+      else if (focus < rows.length - 1) setFocus(focus + 1);
+    }
   };
+
+  const dropRow = (i: number) => {
+    setRows(rows.filter((_, j) => j !== i));
+    setFocus(0);
+  };
+  const ready = rows.length > 0 && rows.every(r => r.fainted || r.noEffect || r.value !== '');
+
+  // Keyboard (PC): numbers pick moves and targets and type HP; Enter logs; see the hint line.
+  const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyRef.current = (e: KeyboardEvent) => {
+    const el = e.target as HTMLElement | null;
+    if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) {
+      if (e.key === 'Escape') onClose();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    const done = () => e.preventDefault();
+    if (k === 'Escape') return done(), onClose();
+    if (stage === 'move') {
+      if (/^[1-9]$/.test(k) && moveList[Number(k) - 1]) return done(), pickMove(moveList[Number(k) - 1].name);
+      if ((k === 'ArrowRight' || k === 'ArrowLeft') && queue.length > 1) {
+        const i = queue.findIndex(r => sameMon(r, actor));
+        return done(), onPickActor(queue[(i + (k === 'ArrowRight' ? 1 : queue.length - 1)) % queue.length]);
+      }
+      // Typing a letter searches every move.
+      if (/^[a-z]$/i.test(k)) {
+        done();
+        setQuery(k);
+        setStage('search');
+      }
+      return;
+    }
+    if (stage === 'target') {
+      const targets = [...foes, ...allies];
+      if (/^[1-9]$/.test(k) && targets[Number(k) - 1]) return done(), pickTarget(targets[Number(k) - 1]);
+      return;
+    }
+    if (stage !== 'result') return;
+    if (/^[0-9]$/.test(k)) return done(), onKey(k);
+    if (k === 'Backspace') return done(), onKey('del');
+    if (k === 'Enter') return done(), onKey('ok');
+    if (k === 'Tab') return done(), onKey('next');
+    const r = rows[focus];
+    switch (k.toLowerCase()) {
+      case 'k': return done(), onKey('ko');
+      case 's': return done(), onKey('skip');
+      case 'c': return r ? (done(), patch(focus, {crit: !r.crit})) : undefined;
+      case 'x': return r ? (done(), dropRow(focus)) : undefined;
+    }
+  };
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => keyRef.current(e);
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, []);
 
   // --- context-aware chips ------------------------------------------------
   const fx = move ? moveFx(move) : {};
@@ -260,9 +340,20 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
     <>
       <div className="sheet-backdrop" onClick={onClose} />
       <div className="sheet" role="dialog" aria-label={`${title} action`}>
+        {queue.some(r => !sameMon(r, actor)) && (
+          <div className="queue">
+            <span className="small muted">still to move:</span>
+            {queue.map(r => (
+              <button key={monKey(r)} className={`qchip ${r.side}${sameMon(r, actor) ? ' on' : ''}`} onClick={() => onPickActor(r)}>
+                {monLabel(battle, mons, r, live)}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="sheet-head">
           <span className={`tag ${actor.side}`}>{actor.side === 'me' ? 'you' : 'opp'}</span>
           <span className="who">{title}{move ? ` · ${move}` : ''}</span>
+          {locked && move === locked && <span className="tag" title="A Choice item keeps it on this move">locked</span>}
           {stage !== 'move' && <button className="btn sm ghost" onClick={() => {
             setStage('move');
             setMove(null);
@@ -274,11 +365,11 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
         {stage === 'move' && (
           <>
             <div className="movegrid">
-              {moveList.map(m => {
+              {moveList.map((m, i) => {
                 const type = dexMove(gen, m.name)?.type ?? 'Normal';
                 return (
                   <button key={m.name} className={`mv${m.seen ? ' seen' : ''}`} style={{'--type': TYPE_COLORS[type]} as React.CSSProperties} onClick={() => pickMove(m.name)}>
-                    <span className="n">{m.name}</span>
+                    <span className="n">{i < 9 && <kbd className="kbd">{i + 1}</kbd>}{m.name}</span>
                     {m.hint && <span className="p">{m.hint}</span>}
                   </button>
                 );
@@ -287,6 +378,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
                 <span className="n">Other move…</span><span className="p">search</span>
               </button>
             </div>
+            <div className="note kbd-hint">Keys: 1–9 move · a letter searches · ← → switch Pokémon · Esc close</div>
             <div className="chips">
               {quickOptions.map(q => (
                 <span key={q} className={`chip warn-on${quick === q ? ' on' : ''}`} onClick={() => setQuick(quick === q ? null : q)}>{q} activated</span>
@@ -329,9 +421,9 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
           <>
             <div className="small muted">Target?</div>
             <div className="targets-pick">
-              {[...foes, ...allies].map(r => (
+              {[...foes, ...allies].map((r, i) => (
                 <button key={monKey(r)} className="btn" style={{minHeight: 56}} onClick={() => pickTarget(r)}>
-                  <span className={`tag ${r.side}`}>{r.side === 'me' ? 'you' : 'opp'}</span> {monLabel(battle, mons, r, live)}
+                  <kbd className="kbd">{i + 1}</kbd> <span className={`tag ${r.side}`}>{r.side === 'me' ? 'you' : 'opp'}</span> {monLabel(battle, mons, r, live)}
                 </button>
               ))}
             </div>
@@ -345,7 +437,8 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
           <>
             {rows.length === 0 && <div className="small muted">No target on the field: logged for turn order only.</div>}
             {rows.map((r, i) => {
-              const before = r.before !== undefined ? r.before : String(hpBefore(r.ref));
+              const unknown = !!live.mons[monKey(r.ref)]?.hpUnknown;
+              const before = r.before !== undefined ? r.before : unknown ? '?' : String(hpBefore(r.ref));
               const unit = r.ref.side === 'opp' ? '%' : '';
               const statuses = statusChoices();
               return (
@@ -357,7 +450,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
                       e.stopPropagation();
                       setFocus(i);
                       setEditBefore(!(editBefore && focus === i));
-                      if (r.before === undefined) patch(i, {before: String(hpBefore(r.ref))});
+                      if (r.before === undefined) patch(i, {before: unknown ? '' : String(hpBefore(r.ref))});
                     }}>
                       {editBefore && focus === i ? <u>{before}{unit}</u> : <>{before}{unit}</>} →
                     </button>
@@ -379,11 +472,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
                     {messageChips(r).map(([t, label]) => (
                       <span key={t} className={`chip warn-on${r.triggers.includes(t) ? ' on' : ''}`} onClick={() => patch(i, {triggers: toggle(r.triggers, t)})}>{label}</span>
                     ))}
-                    <span className="chip" onClick={() => {
-                      const next = rows.filter((_, j) => j !== i);
-                      setRows(next);
-                      setFocus(0);
-                    }}>Missed / protected</span>
+                    <span className="chip" onClick={() => dropRow(i)}>Missed / protected</span>
                   </div>
                 </div>
               );
@@ -400,8 +489,9 @@ export function ActionSheet({gen, battle, mons, ctx, actor, onCommit, onMega, on
                 ))}
               </div>
             )}
-            <Keypad onKey={onKey} multi={rows.length > 1} />
-            <div className="note">Type the HP shown right after the hit (before berries). A message chip left off means the message didn't appear.</div>
+            <Keypad onKey={onKey} multi={rows.length > 1} ready={ready} />
+            <div className="note">Type the HP shown right after the hit (before berries). A message chip left off means the message didn't appear. No time? <b>skip HP</b> logs the move without it.</div>
+            <div className="note kbd-hint">Keys: type the HP · Enter log · Tab next target · K KO · C crit · X missed · S skip HP · Esc close</div>
           </>
         )}
       </div>

@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useEffect, useRef, useState} from 'react';
 import {STAT_LABELS, type BoostID, type Gen} from '../../data/dex';
 import type {FormatData} from '../../data/format';
 import {megaFormeOf} from '../../engine/likelihood';
@@ -16,6 +16,7 @@ import {
   logSwitch, moveAction, orderInTurn, ordinal, setOrdered, stateCtx, undo,
 } from './actions';
 import {pendingChecks} from './checks';
+import {nextToMove} from './order';
 import {SpeedOrder} from './visuals';
 import {headline, Intel} from './Intel';
 import {monLabel, oppSpecies} from './names';
@@ -114,7 +115,9 @@ function Tile({gen, battle, result, ctx, ref_, selected, onTap}: {
       <div className="top">
         <Sprite gen={gen} species={species} />
         <span className="nm">{name}</span>
-        <span className="hp">{fainted ? 'KO' : ref_.side === 'opp' ? `${c?.hp ?? 100}%` : `${c?.hp}/${max}`}</span>
+        <span className="hp" title={c?.hpUnknown ? 'HP not read since the last hit' : undefined}>
+          {fainted ? 'KO' : ref_.side === 'opp' ? `${c?.hp ?? 100}%${c?.hpUnknown ? '?' : ''}` : `${c?.hp}${c?.hpUnknown ? '?' : ''}/${max}`}
+        </span>
       </div>
       <HpBar frac={(c?.hp ?? max) / max} />
       <div className="badges">
@@ -180,7 +183,7 @@ function describe(battle: Battle, result: InferResult | null, ev: BattleEvent): 
   const nm = (r: MonRef) => `${r.side === 'me' ? '' : 'opp '}${monLabel(battle, result?.mons, r)}`;
   switch (ev.kind) {
     case 'action': {
-      const hits = ev.hits.map(h => `${nm(h.target)} ${h.noEffect ? 'unaffected' : h.fainted ? 'KO' : `→${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}${h.status ? ` ${h.status}` : ''}${h.triggers.length ? ` [${h.triggers.join(',')}]` : ''}`);
+      const hits = ev.hits.map(h => `${nm(h.target)} ${h.noEffect ? 'unaffected' : h.fainted ? 'KO' : h.unread ? '→ ? (HP skipped)' : `→${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}${h.status ? ` ${h.status}` : ''}${h.triggers.length ? ` [${h.triggers.join(',')}]` : ''}`);
       return `${nm(ev.actor)}: ${ev.move}${ev.quick ? ` (${ev.quick})` : ''}${ev.failed ? ' (failed)' : ''}${hits.length ? ` · ${hits.join('; ')}` : ''}${ev.actorTriggers.length ? ` [${ev.actorTriggers.join(',')}]` : ''}${ev.ordered ? '' : ' · order unsure'}`;
     }
     case 'reveal':
@@ -352,6 +355,56 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
 }) {
   const ctx = stateCtx(fmt, gen, battle, result?.mons);
   const run = (fn: (b: Battle, c: StateCtx) => Battle) => update(b => fn(b, stateCtx(fmt, gen, b, result?.mons)));
+  const queue = nextToMove(battle, result);
+  // A short tick when something is logged, so eyes can stay on the Switch (Android; a no-op elsewhere).
+  const tick = () => {
+    try {
+      navigator.vibrate?.(12);
+    } catch {
+      // Not supported.
+    }
+  };
+  const pickActor = (r: MonRef | null) => {
+    if (r?.side === 'opp') setFocusOpp(r.slot);
+    setActor(r);
+  };
+
+  // Keyboard (PC): Q W their Pokémon, A S yours (left to right), E ends the turn, Ctrl+Z undoes.
+  // An open sheet handles its own keys.
+  const keyRef = useRef<(e: KeyboardEvent) => void>(() => {});
+  keyRef.current = e => {
+    const el = e.target as HTMLElement | null;
+    if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      if (battle.events.length) {
+        e.preventDefault();
+        update(undo);
+      }
+      return;
+    }
+    if (actor || e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    const at: Record<string, [SideID, number]> = {q: ['opp', 0], w: ['opp', 1], a: ['me', 0], s: ['me', 1]};
+    if (at[k]) {
+      const [side, pos] = at[k];
+      const slot = battle.live.active[side][pos];
+      if (slot !== null && slot !== undefined && (battle.live.mons[`${side}${slot}`]?.hp ?? 1) > 0) {
+        e.preventDefault();
+        pickActor({side, slot});
+      }
+      return;
+    }
+    if (k === 'e') {
+      e.preventDefault();
+      run((b, c) => endTurn(c, b));
+      tick();
+    }
+  };
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => keyRef.current(e);
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, []);
 
   const intel = (
     <div className="col">
@@ -387,7 +440,10 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
       <div className="bt-main">
         <div className="bt-head">
           <span className="turn">T{battle.turn}</span>
-          <button className={`btn primary sm${everyoneMoved(battle) ? ' ready' : ''}`} onClick={() => run((b, c) => endTurn(c, b))}>End turn</button>
+          <button className={`btn primary sm${everyoneMoved(battle) ? ' ready' : ''}`} onClick={() => {
+            run((b, c) => endTurn(c, b));
+            tick();
+          }}>End turn</button>
           <button className="btn sm" disabled={!battle.events.length} onClick={() => update(undo)} title="Undo the last entry">↶ Undo</button>
           <Pills battle={battle} update={update} />
         </div>
@@ -399,6 +455,7 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
         <Side gen={gen} battle={battle} result={result} ctx={ctx} side="me" selected={actor}
           onTap={tap} onEmpty={pos => setBenchPick({side: 'me', position: pos})} onBench={slot => onBench('me', slot)} />
         <SpeedOrder battle={battle} result={result} />
+        <div className="note kbd-hint">Keys: Q W their Pokémon · A S yours · E end turn · Ctrl+Z undo</div>
 
         {benchPick && (
           <div className="panel col">
@@ -435,10 +492,18 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
           <ActionSheet
             key={`${actor.side}${actor.slot}${battle.events.length}`}
             gen={gen} battle={battle} mons={result?.mons} ctx={ctx} actor={actor}
+            queue={queue} onPickActor={pickActor}
             onClose={() => setActor(null)}
             onCommit={draft => {
-              run((b, c) => logAction(c, b, draft));
-              setActor(null);
+              // Straight on to whoever should move next; the sheet closes once everyone has.
+              const after: {next: MonRef | null} = {next: null};
+              run((b, c) => {
+                const nb = logAction(c, b, draft);
+                after.next = nextToMove(nb, result)[0] ?? null;
+                return nb;
+              });
+              tick();
+              pickActor(after.next);
             }}
             onMega={forme => {
               run((b, c) => logMega(c, b, actor, forme));

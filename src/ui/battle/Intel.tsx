@@ -1,14 +1,14 @@
 import {useState} from 'react';
-import {STAT_LABELS, usesStatPoints, type Gen} from '../../data/dex';
+import {STAT_LABELS, move as dexMove, usesStatPoints, type Gen} from '../../data/dex';
 import type {FormatData} from '../../data/format';
 import type {StatBelief} from '../../engine/posterior';
 import {OTHER_ITEM} from '../../engine/prior';
 import {maxHPOf} from '../../engine/state';
 import type {InferResult, MonSummary} from '../../engine/worker';
 import type {Battle} from '../../engine/types';
-import {DistBars, DistRow, Sprite, pct} from '../common';
+import {DistBars, DistRow, ItemIcon, Sprite, TypeTab, pct} from '../common';
 import {megaFormeOf} from '../../engine/likelihood';
-import {oppSpecies} from './names';
+import {oppSpecies, spokenName} from './names';
 import {MatchupCards, SpeedVerdicts, type Card} from './visuals';
 
 /** 95% interval of a stat, drawn inside the prior's interval: it narrows as evidence comes in. */
@@ -50,28 +50,36 @@ export function headline(m: MonSummary, mega = false): string {
   return bits.join(' · ');
 }
 
+/**
+ * One block for the ability: the one in play now, plus what a Mega brings (each Mega has
+ * exactly one ability, so it's only as uncertain as which Mega, if any, it holds the stone for).
+ */
 function Abilities({m, mega}: {m: MonSummary; mega: boolean}) {
   const megas = m.formes.filter(f => f.p > 0 && m.megaAbilityOf[f.name]);
-  if (!megas.length) {
-    return (
-      <div className="section">
-        <h3>Ability</h3>
-        <DistBars entries={m.abilities} max={3} />
-      </div>
-    );
-  }
-  // A Mega has two abilities in play: the one it came in with (uncertain) and its own (fixed).
+  const entry = m.abilities.filter(a => a.p > 0);
   return (
     <div className="section col">
-      <h3>{mega ? 'Ability (Mega)' : 'Ability if it Mega Evolves'}</h3>
-      <div className="dist">
-        {megas.map(f => (
-          <DistRow key={f.name} name={<>{m.megaAbilityOf[f.name]} <span className="muted small">{f.name.replace(/^.*?-Mega/, 'Mega')}</span></>}
-            p={f.p} certain={f.certain} />
-        ))}
-      </div>
-      <h3>{mega ? 'Ability before Mega Evolving' : 'Ability now'}</h3>
-      <DistBars entries={m.abilities} max={3} />
+      <h3>Ability</h3>
+      {mega && megas.length > 0 ? (
+        <div className="dist">
+          {megas.map(f => (
+            <DistRow key={f.name} name={<>{m.megaAbilityOf[f.name]} <span className="muted small">{spokenName(f.name)}</span></>} p={f.p} certain={f.certain} />
+          ))}
+        </div>
+      ) : (
+        <DistBars entries={m.abilities} max={3} />
+      )}
+      {megas.length > 0 && !mega && (
+        <div className="small">
+          <span className="muted">If it Mega Evolves: </span>
+          {megas.map((f, i) => (
+            <span key={f.name}>{i > 0 && ' · '}<b>{m.megaAbilityOf[f.name]}</b> <span className="muted">({spokenName(f.name)}, {f.certain ? 'certain' : pct(f.p)})</span></span>
+          ))}
+        </div>
+      )}
+      {megas.length > 0 && mega && entry.length > 0 && (
+        <div className="small muted">Before Mega Evolving: {entry.slice(0, 2).map(a => `${a.name} ${a.certain ? '✓' : pct(a.p)}`).join(' · ')}</div>
+      )}
     </div>
   );
 }
@@ -80,7 +88,6 @@ export function Intel({fmt, gen, battle, result, slot}: {
   fmt: FormatData; gen: Gen; battle: Battle; result: InferResult | null; slot: number;
 }) {
   const [more, setMore] = useState(false);
-  const [allMoves, setAllMoves] = useState(false);
   const m = result?.mons[slot];
   if (!m) return <div className="panel empty">Loading beliefs…</div>;
   const live = battle.live;
@@ -99,10 +106,12 @@ export function Intel({fmt, gen, battle, result, slot}: {
       const c = live.mons[`me${s}`];
       const max = maxHPOf(stateCtx, live, {side: 'me', slot: s});
       const hp = c?.hp ?? max;
+      const asMega = mu.myMegas.includes(s);
       return {
         slot: s,
         name: set.nickname || set.species,
-        species: c?.mega ? megaFormeOf(gen, set) ?? set.species : set.species,
+        species: c?.mega || asMega ? megaFormeOf(gen, set) ?? set.species : set.species,
+        asMega,
         hp: (100 * hp) / max,
         hpText: `${hp}/${max}`,
         takes: mu.theirs.filter(x => x.slot === s).map(x => x.r),
@@ -110,6 +119,8 @@ export function Intel({fmt, gen, battle, result, slot}: {
       };
     })
     : [];
+  const topItem = m.items.find(e => e.p > 0 && e.name !== OTHER_ITEM);
+  const moveType = (name: string) => dexMove(gen, name)?.type ?? 'Normal';
   // Stats are for the forme it battles in: say so while a likely Mega hasn't evolved yet.
   const likelyMega = m.formes.find(f => f.p > 0.5 && m.megaAbilityOf[f.name]);
   const statsForme = !mega && likelyMega ? likelyMega.name : '';
@@ -120,7 +131,7 @@ export function Intel({fmt, gen, battle, result, slot}: {
         <Sprite gen={gen} species={species} large />
         <div style={{minWidth: 0}}>
           <h2>{species}</h2>
-          <div className="small muted">{headline(m, mega) || 'no evidence yet'}</div>
+          <div className="small muted with-icon">{topItem && <ItemIcon name={topItem.name} />}<span>{headline(m, mega) || 'no evidence yet'}</span></div>
         </div>
       </div>
       {conflicts.map((n, i) => <div key={i} className="note alert">⚠ {n.note}</div>)}
@@ -128,25 +139,30 @@ export function Intel({fmt, gen, battle, result, slot}: {
       {mu && cards.length > 0 && (
         <div className="section col">
           <h3>Damage</h3>
-          <MatchupCards gen={gen} cards={cards} oppHp={live.mons[`opp${slot}`]?.hp ?? 100} moveP={moveP}
-            speed={mu.speed} trickRoom={live.field.trickRoom} all={allMoves} onAll={setAllMoves} />
-          <div className="note">% of max HP (95% range over rolls and its possible sets). Bar: solid = HP surely left, striped = depends on the roll.</div>
+          {mu.asMega && (
+            <div className="note">Counts it as {spokenName(mu.asMega.forme)} ({mu.asMega.p >= 0.995 ? 'it has the stone' : `${pct(mu.asMega.p)} it has the stone`}): Mega Evolution comes before anyone moves.</div>
+          )}
+          <MatchupCards gen={gen} cards={cards} oppName={spokenName(species)} oppHp={live.mons[`opp${slot}`]?.hp ?? 100} moveP={moveP}
+            speed={mu.speed} trickRoom={live.field.trickRoom} />
+          <div className="note">% of max HP (95% range over rolls and its possible sets). Bar: solid = HP surely left, striped = depends on the roll. Faded: needs four hits or more.</div>
         </div>
       )}
 
       {mu && (
         <div className="section col">
           <h3>Speed</h3>
-          <SpeedVerdicts battle={battle} speed={mu.speed} profile={mu.profile} trickRoom={live.field.trickRoom} skip={cards.map(c => c.slot)} />
+          <SpeedVerdicts battle={battle} oppName={spokenName(species)} speed={mu.speed} profile={mu.profile} trickRoom={live.field.trickRoom} skip={cards.map(c => c.slot)} />
         </div>
       )}
 
       <div className="section">
         <h3>Item</h3>
-        <DistBars entries={m.items} max={4} label={n => (n === OTHER_ITEM ? <span className="muted">other</span> : n)} />
+        <DistBars entries={m.items} max={4} label={n => (n === OTHER_ITEM
+          ? <span className="muted">other</span>
+          : <span className="with-icon"><ItemIcon name={n} /><span className="nm">{n}</span></span>)} />
       </div>
       <Abilities m={m} mega={mega} />
-      {!mega && m.formes.filter(f => f.p > 0).length > 1 && (
+      {!mega && m.formes.filter(f => f.p > 0 && !m.megaAbilityOf[f.name]).length > 1 && (
         <div className="section">
           <h3>Forme</h3>
           <DistBars entries={m.formes} max={3} />
@@ -156,7 +172,8 @@ export function Intel({fmt, gen, battle, result, slot}: {
         <h3>Moves</h3>
         <div className="dist">
           {m.moves.filter(x => x.p > 0).slice(0, 8).map(x => (
-            <DistRow key={x.name} name={x.revealed ? <b>✓ {x.name}</b> : x.name} p={x.p} prior={x.revealed ? undefined : x.prior} certain={x.revealed} />
+            <DistRow key={x.name} name={<span className="with-icon"><TypeTab type={moveType(x.name)} /><span className="nm">{x.revealed ? <b>{x.name}</b> : x.name}</span></span>}
+              p={x.p} prior={x.revealed ? undefined : x.prior} certain={x.revealed} />
           ))}
         </div>
       </div>

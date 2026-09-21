@@ -38,12 +38,25 @@ export function hitVerdict(r: DamageMatchup, cur: number): HitVerdict {
   return {text: `${fewest}+HKO`, cls, title, weak};
 }
 
-/** Before or after this opponent, for same-priority moves. */
-export function speedVerdict(s: SpeedMatchup | undefined, trickRoom: boolean): {text: string; cls: string} | null {
+/** Who moves first, yours or theirs (same-priority moves), named so there's no "it" to decode. */
+export function speedVerdict(
+  s: SpeedMatchup | undefined, trickRoom: boolean, names: {mine: string; opp: string},
+): {text: string; cls: string} | null {
   if (!s) return null;
   // Under Trick Room the slower one moves first.
   const theyFirst = trickRoom ? 1 - s.pFaster - s.pTie : s.pFaster;
-  if (theyFirst >= 1) return {text: 'it moves first', cls: 'bad'};
-  if (theyFirst + s.pTie <= 0) return {text: 'you move first', cls: 'good'};
-  return {text: `it first ${pct(theyFirst + s.pTie / 2)}`, cls: 'warn'};
+  if (theyFirst >= 1) return {text: `${names.opp} moves first`, cls: 'bad'};
+  if (theyFirst + s.pTie <= 0) return {text: `${names.mine} moves first`, cls: 'good'};
+  const pThem = theyFirst + s.pTie / 2;
+  return pThem >= 0.5
+    ? {text: `${names.opp} first ${pct(pThem)}`, cls: 'warn'}
+    : {text: `${names.mine} first ${pct(1 - pThem)}`, cls: 'warn'};
+}
+
+/** "×2", "×½", "×0"; nothing for neutral. */
+export function effText(eff: number): string {
+  if (eff === 1) return '';
+  if (eff === 0.5) return '×½';
+  if (eff === 0.25) return '×¼';
+  return `×${eff}`;
 }

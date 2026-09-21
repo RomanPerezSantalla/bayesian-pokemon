@@ -5,10 +5,11 @@
  * summaries and matchups (the big hypothesis arrays never leave the worker).
  */
 import type {FormatData} from '../data/format';
-import {getGen} from '../data/dex';
+import {getGen, isDamagingMove} from '../data/dex';
 import {computeBeliefs, type MonBelief} from './posterior';
 import {
-  myMoveInto, oppMoveInto, speedMatchups, speedProfile, type DamageMatchup, type SpeedMatchup, type SpeedProfile,
+  myMoveInto, oppMoveInto, predictionSnapshot, speedMatchups, speedProfile, type DamageMatchup, type SpeedMatchup,
+  type SpeedProfile,
 } from './predict';
 import type {Battle} from './types';
 
@@ -20,6 +21,10 @@ export interface Matchups {
   profile: SpeedProfile;
   mine: {slot: number; r: DamageMatchup}[];
   theirs: {slot: number; r: DamageMatchup}[];
+  /** Predictions count it as Mega Evolving this turn (its likeliest Mega, and how likely it has one). */
+  asMega?: {forme: string; p: number};
+  /** Your Pokémon counted as Mega Evolving this turn. */
+  myMegas: number[];
 }
 
 export type WorkerRequest =
@@ -40,18 +45,19 @@ let fmt: FormatData | null = null;
 
 function matchupsFor(battle: Battle, b: MonBelief): Matchups {
   const gen = getGen(fmt!.gen);
-  const live = battle.live;
+  const {snap: live, asMega, myMegas} = predictionSnapshot(gen, battle, battle.live, b);
   const mineActive = live.active.me.filter((s): s is number => s !== null);
   const mySlots = mineActive.length ? mineActive : battle.myTeam.map((_, i) => i).slice(0, 2);
   const mine = mySlots.flatMap(slot => battle.myTeam[slot].moves
     .map(m => ({slot, r: myMoveInto(fmt!, gen, battle, b, slot, m, live)}))
     .filter((x): x is {slot: number; r: DamageMatchup} => !!x.r));
-  const theirMoves = b.moves.filter(m => m.p > 0.12).slice(0, 6).map(m => m.name);
+  // Every attack it plausibly has, not just the top few: on turn one nothing is known yet.
+  const theirMoves = b.moves.filter(m => m.p >= 0.03 && isDamagingMove(gen, m.name)).slice(0, 10).map(m => m.name);
   const theirs = theirMoves.flatMap(m => mySlots
     .map(slot => ({slot, r: oppMoveInto(fmt!, gen, battle, b, slot, m, live)}))
     .filter((x): x is {slot: number; r: DamageMatchup} => !!x.r));
   const profile = speedProfile(fmt!, gen, battle, b, live);
-  return {speed: speedMatchups(fmt!, gen, battle, b, live, profile), profile, mine, theirs};
+  return {speed: speedMatchups(fmt!, gen, battle, b, live, profile), profile, mine, theirs, asMega, myMegas};
 }
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {

@@ -1,8 +1,11 @@
-import {useEffect, useState, type ReactNode} from 'react';
-import {getGen, spriteUrl, type Gen} from '../data/dex';
+import {createElement, useEffect, useState, type ReactNode} from 'react';
+import {getGen, spriteUrl, toID, type Gen} from '../data/dex';
 import {loadFormat, loadFormatIndex, type FormatData, type FormatInfo} from '../data/format';
 import type {DistEntry} from '../engine/posterior';
 import {pct} from './format';
+import ITEM_ICONS from '../data/items.gen.json';
+import TYPE_ICONS from '../data/types.gen.json';
+import {effText} from './battle/verdict';
 
 export {pct};
 
@@ -11,6 +14,41 @@ export const TYPE_COLORS: Record<string, string> = {
   Fighting: '#ff8000', Poison: '#9141cb', Ground: '#915121', Flying: '#81b9ef', Psychic: '#ef4179', Bug: '#91a119',
   Rock: '#afa981', Ghost: '#704170', Dragon: '#5060e1', Dark: '#624d4e', Steel: '#60a1b8', Fairy: '#ef70ef', Stellar: '#40b5a5',
 };
+
+type Shape = [tag: string, attrs: Record<string, string>];
+// JSON arrays type as plain arrays, not tuples.
+const TYPE_ICON = TYPE_ICONS as unknown as Record<string, {color: string; shapes: Shape[]}>;
+const camel = (k: string) => k.replace(/-(\w)/g, (_, c: string) => c.toUpperCase());
+
+/** A type's symbol as the Switch games draw it (partywhale's MIT recreation, built into types.gen.json). */
+function TypeSymbol({type}: {type: string}) {
+  const icon = TYPE_ICON[type];
+  if (!icon) return null;
+  return (
+    <svg className="type-sym" viewBox="0 0 256 256" aria-hidden>
+      {icon.shapes.map(([tag, attrs], i) => createElement(tag, {key: i, ...Object.fromEntries(Object.entries(attrs).map(([k, v]) => [camel(k), v]))}))}
+    </svg>
+  );
+}
+
+/** A type tab: its symbol on its colour, with the type multiplier beside it when there is one. */
+export function TypeTab({type, eff}: {type: string; eff?: number}) {
+  const text = eff === undefined ? '' : effText(eff);
+  return (
+    <span className={`type-tab${eff !== undefined ? ' with-eff' : ''}`} style={{background: TYPE_ICON[type]?.color ?? TYPE_COLORS[type] ?? '#888888'}}
+      title={`${type}${text ? ` ${text}` : ''}`}>
+      <TypeSymbol type={type} />
+      {text && <b>{text}</b>}
+    </span>
+  );
+}
+
+/** An item's icon from Showdown's sprite sheet (16 per row, 24px each). */
+export function ItemIcon({name}: {name: string}) {
+  const num = (ITEM_ICONS as Record<string, number>)[toID(name)];
+  if (!num) return <span className="item-icon none" aria-hidden />;
+  return <span className="item-icon" aria-hidden style={{backgroundPosition: `-${(num % 16) * 24}px -${Math.floor(num / 16) * 24}px`}} />;
+}
 
 export function useFormatIndex() {
   const [formats, setFormats] = useState<FormatInfo[] | null>(null);

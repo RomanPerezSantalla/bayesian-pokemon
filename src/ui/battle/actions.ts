@@ -98,16 +98,39 @@ function flinched(acts: ActionEvent[], ref: MonRef) {
   return false;
 }
 
+/** Pokémon on the field that haven't moved this turn and still can (not just switched in, not flinched). */
+export function stillToMove(b: Battle): MonRef[] {
+  const acts = turnActions(b);
+  const out: MonRef[] = [];
+  for (const side of ['me', 'opp'] as const) {
+    for (const slot of b.live.active[side]) {
+      if (slot === null) continue;
+      const ref = {side, slot};
+      if ((b.live.mons[monKey(ref)]?.hp ?? 1) <= 0) continue;
+      if (acts.some(a => sameMon(a.actor, ref)) || cameInThisTurn(b, ref) || flinched(acts, ref)) continue;
+      out.push(ref);
+    }
+  }
+  return out;
+}
+
 /** Everyone on the field has moved, or can't this turn: time to end it. */
 export function everyoneMoved(b: Battle): boolean {
-  const acts = turnActions(b);
-  if (!acts.length) return false;
-  return (['me', 'opp'] as const).every(side => b.live.active[side].every(slot => {
-    if (slot === null) return true;
-    const ref = {side, slot};
-    return (b.live.mons[monKey(ref)]?.hp ?? 1) <= 0 || acts.some(a => sameMon(a.actor, ref))
-      || cameInThisTurn(b, ref) || flinched(acts, ref);
-  }));
+  return turnActions(b).length > 0 && stillToMove(b).length === 0;
+}
+
+/**
+ * The move a Choice item locks it into: the last one it used since coming in, while it still
+ * holds the item. `item` is its item when known for certain.
+ */
+export function choiceLockedMove(b: Battle, ref: MonRef, item: string | undefined): string | null {
+  if (!item || !/^Choice (Band|Specs|Scarf)$/.test(item) || b.live.mons[monKey(ref)]?.itemGone) return null;
+  let last: string | null = null;
+  for (const e of b.events) {
+    if (e.kind === 'switch' && e.side === ref.side && (e.slotIn === ref.slot || e.slotOut === ref.slot)) last = null;
+    if (e.kind === 'action' && sameMon(e.actor, ref) && toID(e.move) !== 'struggle') last = e.move;
+  }
+  return last;
 }
 
 /** Helping Hand from the actor's partner earlier this turn. */
