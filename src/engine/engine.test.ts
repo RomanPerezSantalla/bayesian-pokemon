@@ -14,12 +14,16 @@ import {buildMoveModel, inclusion, itemFactors, movesLogLik} from './moveset';
 import {computeBeliefs, type DistEntry} from './posterior';
 import {predictionSnapshot} from './predict';
 import {applyAction, applyCheck, applyEndTurn, applySwitch, type StateCtx} from './state';
-import type {ActionEvent, Battle, CheckEvent, MonRef, RevealEvent} from './types';
+import type {ActionEvent, Battle, CheckEvent, MonRef, RevealEvent, SideID} from './types';
 import {
   canMoveAction, choiceLockedMove, endTurn, everyoneMoved, logAction, logSwitch, moveAction, setOrdered, stillToMove,
   turnActions, undo, type ActionDraft,
 } from '../ui/battle/actions';
 import {valueComplete} from '../ui/battle/Keypad';
+import {Narrator, type VoiceIO} from '../ui/battle/voice/narrator';
+import {parseNarration} from '../ui/battle/voice/parse';
+import {matchAt, numberAt, norm, squash} from '../ui/battle/voice/text';
+import type {MonSummary} from './worker';
 import {nextToMove} from '../ui/battle/order';
 import type {InferResult} from './worker';
 import {dmgRange, effText, hitVerdict, speedVerdict} from '../ui/battle/verdict';
@@ -626,6 +630,158 @@ describe('damage and speed readings', () => {
 
   it('writes type multipliers compactly', () => {
     expect([4, 2, 1, 0.5, 0.25, 0].map(effText)).toEqual(['×4', '×2', '', '×½', '×¼', '×0']);
+  });
+});
+
+describe('voice narration', () => {
+  const TEAM = parseTeam(`Charizard @ Charizardite Y
+Ability: Solar Power
+EVs: 2 HP / 32 SpA / 32 Spe
+Timid Nature
+- Heat Wave
+- Weather Ball
+- Solar Beam
+- Protect
+
+Garchomp @ Life Orb
+Ability: Rough Skin
+EVs: 2 HP / 32 Atk / 32 Spe
+Jolly Nature
+- Earthquake
+- Dragon Claw
+- Rock Slide
+- Protect
+
+Incineroar @ Sitrus Berry
+Ability: Intimidate
+EVs: 32 HP / 10 Def / 24 SpD
+Careful Nature
+- Fake Out
+- Flare Blitz
+- Parting Shot
+- Throat Chop`);
+
+  /** A battle driven only by what's said. */
+  function rig(preview: string[], active: Battle['live']['active']) {
+    let b = createBattle(fmt, TEAM, preview, 'test');
+    b.live.active = active;
+    let cache: {n: number; mons: MonSummary[]} | null = null;
+    const asked: [SideID, number][] = [];
+    const io: VoiceIO = {
+      gen,
+      battle: () => b,
+      mons: () => {
+        if (!cache || cache.n !== b.events.length) cache = {n: b.events.length, mons: computeBeliefs(fmt, b).mons as unknown as MonSummary[]};
+        return cache.mons;
+      },
+      ctx: bb => ({fmt, gen, battle: bb, oppAbility: () => undefined, oppItem: () => undefined}),
+      apply: fn => {
+        b = fn(b, io.ctx(b));
+      },
+      askSwitch: (side, slot) => asked.push([side, slot]),
+    };
+    const n = new Narrator(io);
+    const say = (text: string) => n.feed(parseNarration(text, {battle: b, gen, mons: io.mons()}));
+    const last = () => turnActions(b, b.events.filter(e => e.kind === 'action').at(-1)!.turn).at(-1)!;
+    return {n, say, last, asked, get b() {
+      return b;
+    }};
+  }
+  const doubles = () => rig(['Salamence', 'Rillaboom', 'Incineroar', 'Kingambit'], {me: [0, 1], opp: [0, 1]});
+
+  it('reads spoken numbers and mangled names', () => {
+    const w = (t: string) => norm(t).split(' ');
+    expect(numberAt(w('45'), 0)?.value).toBe(45);
+    expect(numberAt(w('forty five'), 0)?.value).toBe(45);
+    expect(numberAt(w('one fifty'), 0)?.value).toBe(150);
+    expect(numberAt(w('a hundred and two'), 0)?.value).toBe(102);
+    expect(numberAt(w('two oh two'), 0)?.value).toBe(202);
+    expect(numberAt(w('1 50'), 0)?.value).toBe(150);
+    const cands = ['Kingambit', 'Rillaboom', 'Incineroar'].map(n => ({key: squash(n), value: n}));
+    expect(matchAt(w('king gambit'), 0, cands)?.value).toBe('Kingambit');
+    expect(matchAt(w('rilla boom'), 0, cands)?.value).toBe('Rillaboom');
+    expect(matchAt(w('the'), 0, cands)).toBeNull();
+  });
+
+  it('logs a narrated hit with its HP', () => {
+    const r = doubles();
+    r.say('The opposing Salamence used Draco Meteor! Charizard 45');
+    r.n.commit();
+    const a = r.last();
+    expect(a).toMatchObject({actor: opp(0), move: 'Draco Meteor', narrated: true});
+    expect(a.hits).toEqual([expect.objectContaining({target: me(0), hpAfter: 45})]);
+  });
+
+  it('spread moves: immune, HP said, and HP not said', () => {
+    const r = doubles();
+    r.say("Garchomp used Earthquake! It doesn't affect the opposing Salamence. The opposing Rillaboom 60.");
+    r.n.commit();
+    const hits = r.last().hits;
+    expect(hits.find(h => h.target.side === 'opp' && h.target.slot === 0)?.noEffect).toBe(true);
+    expect(hits.find(h => h.target.side === 'opp' && h.target.slot === 1)?.hpAfter).toBe(60);
+    // It hit its partner too, HP not said.
+    expect(hits.find(h => h.target.side === 'me' && h.target.slot === 0)?.unread).toBe(true);
+  });
+
+  it('a single-target move with no HP said leaves who it hit unknown, safely', () => {
+    const r = doubles();
+    r.say('The opposing Rillaboom used Wood Hammer');
+    r.say('Garchomp used Protect');
+    const [hammer, protect] = turnActions(r.b);
+    expect(hammer.hits.every(h => h.unread)).toBe(true);
+    expect(protect.move).toBe('Protect');
+    expect(r.b.live.mons.me0.hpUnknown).toBe(true);
+  });
+
+  it('copes with how names come out of the recogniser', () => {
+    const r = doubles();
+    r.say('the opposing rilla boom used grassy glide garchomp one fifty');
+    r.n.commit();
+    expect(r.last()).toMatchObject({actor: opp(1), move: 'Grassy Glide'});
+    expect(r.last().hits[0]).toMatchObject({target: me(1), hpAfter: 150});
+  });
+
+  it('tells mirror species apart by "the opposing"', () => {
+    const r = rig(['Salamence', 'Rillaboom', 'Incineroar', 'Kingambit'], {me: [2, 1], opp: [2, 0]});
+    r.say('Incineroar used Fake Out');
+    r.n.commit();
+    expect(r.last().actor).toEqual(me(2));
+    r.say('The opposing Incineroar used Fake Out');
+    r.n.commit();
+    expect(r.last().actor).toEqual(opp(2));
+  });
+
+  it('crits and faints land on the target', () => {
+    const r = doubles();
+    r.say('The opposing Salamence used Double-Edge! A critical hit! Charizard fainted!');
+    r.n.commit();
+    expect(r.last().hits[0]).toMatchObject({target: me(0), fainted: true, crit: true});
+  });
+
+  it('switches, Mega Evolution and the turn ending', () => {
+    const r = doubles();
+    r.say('The opposing trainer withdrew Salamence! The opposing trainer sent out Kingambit!');
+    expect(r.b.live.active.opp[0]).toBe(3);
+    r.say('Charizard has Mega Evolved into Mega Charizard Y!');
+    expect(r.b.live.mons.me0.mega).toBe(true);
+    r.say('Charizard used Heat Wave! The opposing Kingambit 70. The opposing Rillaboom 55.');
+    r.say('What will Charizard do?');
+    expect(r.b.turn).toBe(2);
+    expect(turnActions(r.b, 1)[0].hits.map(h => h.hpAfter)).toEqual([70, 55]);
+  });
+
+  it("a message that wasn't said is no evidence (Life Orb)", () => {
+    const narrated = doubles();
+    narrated.say('The opposing Salamence used Draco Meteor! Charizard 45');
+    narrated.n.commit();
+    const tapped = doubles();
+    tapped.say('The opposing Salamence used Draco Meteor! Charizard 45');
+    tapped.n.commit();
+    // The same hit tapped in, with the Life Orb chip left off, rules Life Orb out.
+    const b2 = {...tapped.b, events: tapped.b.events.map(e => (e.kind === 'action' ? {...e, narrated: undefined} : e))};
+    const lo = (b: Battle) => p(computeBeliefs(fmt, b).mons[0]!.items, 'Life Orb');
+    expect(lo(narrated.b)).toBeGreaterThan(0);
+    expect(lo(b2)).toBe(0);
   });
 });
 

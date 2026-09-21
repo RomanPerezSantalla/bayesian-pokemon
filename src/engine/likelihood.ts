@@ -356,7 +356,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         const v = hypView(fmt, space, h, oppCond);
         const lo = v.item === 'Life Orb' && !oppCond.itemGone;
         const exempt = v.ability === 'Magic Guard' || (v.ability === 'Sheer Force' && !!moveData?.secondaries);
-        raw[h] = seen ? (lo && !exempt ? 1 : 0) : (lo && !exempt ? 0 : 1);
+        raw[h] = seen ? (lo && !exempt ? 1 : 0) : (lo && !exempt && !ev.narrated ? 0 : 1);
       }
       out.push({slot, raw, kind: 'trigger', note: seen ? 'Life Orb recoil' : 'no Life Orb recoil'});
     }
@@ -422,9 +422,10 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       const tr = hit.triggers;
       const landed = !hit.noEffect;
       const berry = has && landed && berryApplies(v.item, m.type, m.eff);
-      if (tr.includes('berry') !== berry) t = 0;
+      // Narrated: a message said pins it; one not said proves nothing.
+      if (ev.narrated ? tr.includes('berry') && !berry : tr.includes('berry') !== berry) t = 0;
       const wp = has && landed && v.item === 'Weakness Policy' && m.eff > 1 && !hit.fainted;
-      if (tr.includes('wp') !== wp) t = 0;
+      if (ev.narrated ? tr.includes('wp') && !wp : tr.includes('wp') !== wp) t = 0;
       if (tr.includes('sitrus') && !(has && v.item === 'Sitrus Berry')) t = 0;
       if (tr.includes('sash') && !((has && v.item === 'Focus Sash') || v.ability === 'Sturdy')) t = 0;
       // A guaranteed stat drop the user was asked about (Defiant, Competitive, Clear Amulet…).
@@ -433,7 +434,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       }
       if (contact && landed && oppHits.length === 1) {
         const helmet = has && v.item === 'Rocky Helmet';
-        if (ev.actorTriggers.includes('helmet') !== helmet) t = 0;
+        if (ev.narrated ? ev.actorTriggers.includes('helmet') && !helmet : ev.actorTriggers.includes('helmet') !== helmet) t = 0;
         // Contact that left my attacker with a status: Flame Body, Static, Poison Point, Effect Spore.
         if (ev.actorStatus) t *= CONTACT_PUNISH[v.ability]?.[ev.actorStatus] ?? 0;
       }

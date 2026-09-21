@@ -93,7 +93,7 @@ export function cameInThisTurn(b: Battle, ref: MonRef): boolean {
 function flinched(acts: ActionEvent[], ref: MonRef) {
   for (const a of acts) {
     if (sameMon(a.actor, ref)) return false;
-    if (toID(a.move) === 'fakeout' && !a.failed && a.hits.some(h => sameMon(h.target, ref) && !h.noEffect && !h.fainted)) return true;
+    if (toID(a.move) === 'fakeout' && !a.failed && a.hits.some(h => sameMon(h.target, ref) && !h.noEffect && !h.fainted && !h.unread)) return true;
   }
   return false;
 }

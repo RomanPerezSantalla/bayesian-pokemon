@@ -20,11 +20,18 @@ npm run data         # refresh the Showdown structure data + move/ability tables
 npm run data:tables  # just the move/ability tables (no download)
 ```
 
-## On your phone
+## Deploying, and your phone
 
-The app is an installable PWA and works offline once loaded. Easiest: push to GitHub and let
-`.github/workflows/deploy.yml` publish it to GitHub Pages (Settings → Pages → Source: *GitHub
-Actions*, one time). Then open the URL on your phone and "Add to Home Screen".
+It's a static site: `npm run build` puts everything in `dist/`, with relative paths, so any static
+host and any path work. On **Cloudflare Pages**, connect the repo with build command `npm run build`
+and output directory `dist`; every push to `main` then publishes. Open the URL on your phone and
+"Add to Home Screen": it installs as an app and works offline once loaded. (GitHub only runs the
+tests and a build on each push, `.github/workflows/ci.yml`; it doesn't deploy anything.)
+
+Voice and the offline install need HTTPS. To try the dev server on your phone before deploying,
+`npm run dev -- --host` works on the same Wi-Fi (everything but voice), or put a free HTTPS tunnel in
+front of it: `npx cloudflared tunnel --url http://localhost:5173` and open the `trycloudflare.com`
+link it prints.
 
 ## Logging a turn fast
 
@@ -42,6 +49,19 @@ Actions*, one time). Then open the URL on your phone and "Add to Home Screen".
    to move one tap away; it closes when everyone has moved and *End turn* pulses (a Fake Out flinch counts).
    Tapping someone who already moved this turn, or who came in this turn, starts the next turn for you.
    A short vibration confirms each entry (Android).
+
+**By voice (prototype):** tap **🎙 Voice** and read the battle text as it appears, adding HP where you
+have it: "The opposing Salamence used Draco Meteor! Charizard 45", "Garchomp used Earthquake! It
+doesn't affect the opposing Salamence… the opposing Rillaboom 60", "A critical hit!", "Charizard
+fainted!", "The opposing trainer sent out Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved
+into Mega Charizard Y!". Ability banners answer the *What did the game show?* questions ("The opposing
+Salamence's Intimidate!"), and "What will Garchomp do?" (or "next turn") ends the turn. Each move is
+logged when the next one starts or after a short pause; HP left out is logged as skipped, and a
+message not said (Life Orb recoil, a berry) is never taken as not having happened. The recogniser
+mangles names; matching only against the Pokémon on the field and their likely moves copes with most
+of it. English game text; speech recognition works in Chrome (Android, desktop) and Safari, and
+Chrome sends the audio to Google to transcribe (it needs a connection). With the game audio on
+speakers, use headphones.
 
 **On a PC, the keyboard does it all:** Q W open their Pokémon and A S yours (left to right), 1–9 pick a
 move or target, typing a letter searches every move, ← → switch Pokémon; then type the HP, Tab for the
