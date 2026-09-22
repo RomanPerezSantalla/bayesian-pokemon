@@ -1,7 +1,9 @@
 // Offline support: the app shell and data are cached so a battle can be tracked
-// with a flaky connection. Hashed build assets are cache-first; the page, data
-// files and the official ladder snapshot are network-first with a cached fallback.
-const CACHE = 'battle-analyzer-v1';
+// with a flaky connection. Hashed build assets are cache-first; the page and data
+// files are network-first with a cached fallback. The official ladder data is left
+// alone: src/data/official.ts keeps its own copy of the latest snapshot (v1 kept
+// every day's snapshot here, forever; changing the name clears it).
+const CACHE = 'battle-analyzer-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './data/formats.json',
   './data/structure-doubles.json', './data/structure-singles.json', './icons/icon-192.png'];
 
@@ -43,7 +45,8 @@ self.addEventListener('fetch', event => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   const sameOrigin = url.origin === self.location.origin;
+  if (url.hostname === 'championsbattledata.com' || (sameOrigin && url.pathname.includes('/official/'))) return;
   if (sameOrigin && url.pathname.includes('/assets/')) return event.respondWith(cacheFirst(request));
   if (url.hostname === 'play.pokemonshowdown.com') return event.respondWith(cacheFirst(request));
-  if (sameOrigin || url.hostname === 'championsbattledata.com') return event.respondWith(networkFirst(request));
+  if (sameOrigin) return event.respondWith(networkFirst(request));
 });

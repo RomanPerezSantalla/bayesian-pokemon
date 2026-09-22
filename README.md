@@ -8,14 +8,15 @@ forme, item, ability, moves and stat spread as the battle goes.
 - Hard logic where the game is deterministic: outspeeding a 189-Speed Sneasler with no speed
   modifiers on the field *is* Choice Scarf, 100%. Mega Evolving *is* the stone. Getting poisoned
   by Close Combat *is* Poison Touch.
-- No accounts: teams and battles live in your browser (localStorage), like Showdown. Pokepaste
-  links import directly.
+- No accounts: teams and battles live in your browser, like Showdown, with a backup file to keep
+  them safe or move them to another device. Pokepaste links import directly.
 
 ```bash
 npm install
 npm run dev          # http://localhost:5173  (add `-- --host` to open it from your phone on the same Wi-Fi)
 npm test
 npm run build        # static site in dist/
+npm run phone        # the app on your phone over HTTPS (voice included), with a test log; see below
 npm run data         # refresh the Showdown structure data + move/ability tables (monthly)
 npm run data:tables  # just the move/ability tables (no download)
 ```
@@ -28,10 +29,42 @@ and output directory `dist`; every push to `main` then publishes. Open the URL o
 "Add to Home Screen": it installs as an app and works offline once loaded. (GitHub only runs the
 tests and a build on each push, `.github/workflows/ci.yml`; it doesn't deploy anything.)
 
-Voice and the offline install need HTTPS. To try the dev server on your phone before deploying,
-`npm run dev -- --host` works on the same Wi-Fi (everything but voice), or put a free HTTPS tunnel in
-front of it: `npx cloudflared tunnel --url http://localhost:5173` and open the `trycloudflare.com`
-link it prints.
+- **`functions/`** is a Cloudflare Pages Function that Pages picks up by itself: the site serves the
+  in-game Battle Data at `/official/…`, cached at Cloudflare's edge (the index for an hour, a dated
+  snapshot for a day). The fan site behind it, championsbattledata.com, then sees about one request
+  per Cloudflare location instead of one per visitor, and its hiccups don't reach anyone. On any other
+  host the app fetches the fan site directly, as it does if the function fails. `npm run dev` and
+  `npm run preview` proxy `/official/` the same way (without the cache). To check it after deploying,
+  open `/official/index.json` on your site.
+- **Link previews:** set `SITE_URL` (your address, e.g. `https://example.com/`) in the Pages project's
+  environment variables, and shared links get the page's address and icon (`og:url`, `og:image`);
+  the title and description are there either way.
+
+### Testing on your phone before deploying
+
+`npm run phone` builds a test copy of the app, serves it from your PC and opens a free Cloudflare quick
+tunnel to it (HTTPS, which voice and the offline install need; no account, works on mobile data too).
+Scan the QR code it prints with the phone's camera. The first run downloads `cloudflared` through npx
+(or install it: `winget install --id Cloudflare.cloudflared`).
+
+- The test copy is rebuilt whenever a source file changes: reload the page on the phone to get it (pull
+  down on any page but a battle, where pull-to-refresh is off so a stray pull can't reload mid-turn).
+- It reports back to the PC: each voice phrase (what the recogniser heard, its alternatives, and what it
+  logged) with undos and errors, in `.cache/phone-log.jsonl`, with a line in the terminal as they
+  happen; each battle as it's saved, in `.cache/phone-battles/`. A test can be gone through afterwards
+  from those. Normal builds have none of this.
+- The tunnel's address changes every run, and the phone keeps each address's data apart: keep it running
+  for a whole test session, or carry teams and battles over with a backup file.
+- Anyone with the address can open it while it runs; Ctrl+C stops everything.
+- `npm run phone -- --local` skips the tunnel (this PC only, at http://localhost:4180).
+
+`npm run dev -- --host` on the same Wi-Fi also works for everything but voice.
+
+**On a phone, during a battle:** the screen stays on while a battle is open (until five minutes pass with
+nothing logged or tapped) and while voice is listening, since phones lock after half a minute untouched.
+Voice lets go of the microphone when the screen locks or you switch apps, and picks up again on return
+(if the phone wants a fresh tap, it says so). With the game's sound on speakers, use headphones, so the
+microphone hears you rather than the game.
 
 ## Logging a turn fast
 
@@ -119,6 +152,29 @@ weather/terrain abilities once the game shows them (a Mega's own on evolving), S
 recoil on yours, Helping Hand from a partner, end-of-turn Leftovers / burn / poison / sand / Grassy
 Terrain. Everything is undoable (`↶`), exactly.
 
+## Your data
+
+Battles are saved in the browser's IndexedDB as they change, one record per battle; teams in
+localStorage. Leaving the app (switching apps, locking the phone) writes straight away. If the browser drops
+the database connection (Safari does after a while in the background), the next save reconnects; if saving
+still fails, it's retried every few seconds and a banner says so, and *Save backup* still includes the
+battles that couldn't be written. In memory each entry keeps whole copies of the battle state (for undo, and for what the
+inference saw at the time); saved, each copy is just what changed since the one before, so a 12-turn
+Doubles battle takes about 25 KB instead of 190 KB. Earlier versions kept everything in localStorage
+(5 MB, full after a few dozen battles); their battles move over on the first load. Once the first
+battle is saved the app asks the browser to keep its data even when space runs low (Chrome decides by
+itself, Firefox asks). Safari can still clear a website's data after a week unused unless the app is on
+the home screen, which is one more reason for backups.
+
+**Backups.** The Battles page has *Save backup* (one JSON file with every team and battle; on iPhone
+and iPad it opens the share sheet, so it can go to Files) and *Restore from file…*, which merges by id,
+keeping whichever copy was changed last. A bug report restores the same way.
+
+**When something breaks.** A screen that throws shows what broke instead of going blank, with
+*Undo the last entry* (if what was just logged broke it), *Copy this battle for a bug report* (the
+error, the build, the browser and the battle; it's saved as a file where the clipboard is blocked)
+and *Reload*. An error from a tap shows a banner with the same report. Saved battles are safe either way.
+
 ## How the inference works
 
 For every opponent Pokémon the engine enumerates hypotheses *h = (forme, stat spread, item, ability)*
@@ -160,7 +216,7 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
   Showdown publishes the previous month's stats in early month, so the Reg M-C structure arrives in
   October; until then it's Reg M-B's.
 - `src/data/moves.gen.json`, `abilities.gen.json`: from `@pkmn/dex` and `@smogon/calc`.
-- Official ladder data: live, not stored in this repo.
+- Official ladder data: live, not stored in this repo (through `/official/` on Cloudflare Pages).
 
 ## Known limitations
 
@@ -168,7 +224,10 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
   Ruin abilities from partners) show up as flagged conflicts.
 - Your HP after drain/recoil moves you used isn't computed (the damage you did is only known in %);
   tap the "before" number when logging the next hit on you to correct it.
-- Quick Claw-style random ordering, Illusion and Transform aren't modelled.
+- Quick Claw and Quick Draw count only when their chip is ticked (see *Turn order*); one left
+  unticked reads as the Pokémon being faster (a Scarf, more Speed) or, where that can't be, as a
+  flagged conflict.
+- Illusion and Transform aren't modelled.
 
 Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or
 The Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites and item icons, type symbols

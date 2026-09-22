@@ -1,8 +1,10 @@
 /**
  * The in-game ranked Battle Data, as mirrored daily by championsbattledata.com
  * (a fan project: https://github.com/Gheist23/pokemonbattledata). Fetched live
- * from the browser (CORS is open) and cached, so the app keeps working offline
- * mid-battle with the last snapshot it saw.
+ * from the browser and cached, so the app keeps working offline mid-battle with
+ * the last snapshot it saw. On Cloudflare Pages it comes through this site's own
+ * /official/ (functions/official), cached at the edge for every visitor; on any
+ * other host, or if that fails, straight from the fan site (CORS is open).
  */
 export type OfficialFormat = 'Doubles' | 'Singles';
 
@@ -28,7 +30,7 @@ export interface OfficialSnapshot {
   pokemon: Record<string, OfficialEntry>;
 }
 
-const BASE = 'https://championsbattledata.com/data/meta';
+const SOURCES = [`${import.meta.env?.BASE_URL ?? '/'}official`, 'https://championsbattledata.com/data/meta'];
 const CACHE = 'official-battle-data';
 const MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
@@ -58,14 +60,28 @@ async function cachePut(key: string, value: {at: number; data: OfficialSnapshot}
   }
 }
 
+/** From the first source that answers with JSON (a host without the function may send its HTML page). */
+async function getJSON<T>(path: string): Promise<T> {
+  let last: unknown;
+  for (const base of SOURCES) {
+    try {
+      const res = await fetch(`${base}/${path}`);
+      if (!res.ok) throw new Error(`official data: HTTP ${res.status}`);
+      if (!/json/i.test(res.headers.get('content-type') ?? '')) throw new Error('official data: not JSON');
+      return (await res.json()) as T;
+    } catch (err) {
+      last = err;
+    }
+  }
+  throw last;
+}
+
 async function fetchLatest(format: OfficialFormat): Promise<OfficialSnapshot> {
-  const index = await (await fetch(`${BASE}/index.json`)).json() as {seasons: {season: string; dates: string[]; formats: string[]}[]};
+  const index = await getJSON<{seasons: {season: string; dates: string[]; formats: string[]}[]}>('index.json');
   // Seasons are listed newest first; dates within a season too.
   const season = index.seasons.find(s => s.dates.length && s.formats.includes(format));
   if (!season) throw new Error('no dated season in the official data index');
-  const res = await fetch(`${BASE}/${season.season}/${season.dates[0]}/${format}.json`);
-  if (!res.ok) throw new Error(`official data: HTTP ${res.status}`);
-  return res.json();
+  return getJSON<OfficialSnapshot>(`${season.season}/${season.dates[0]}/${format}.json`);
 }
 
 /** Latest official snapshot, or the cached one if offline; null if never fetched. */

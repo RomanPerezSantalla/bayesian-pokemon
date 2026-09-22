@@ -8,7 +8,9 @@ import {
   monKey, sameMon, type ActionEvent, type Battle, type BattleEvent, type MonRef, type SideID, type Weather,
 } from '../../engine/types';
 import {useStore} from '../../state/store';
+import {testLog} from '../../testlog';
 import {HpBar, Sprite, pct, useFormat} from '../common';
+import {useRecentActivity, useWakeLock} from '../wake';
 import {useInference} from '../useInference';
 import {ActionSheet} from './ActionSheet';
 import {
@@ -319,10 +321,15 @@ function Settings({battle, update, onDelete}: {battle: Battle; update: Update; o
 }
 
 export function BattleScreen({battleId}: {battleId: string}) {
-  const battle = useStore(s => s.battles.find(b => b.id === battleId));
+  const battle = useStore(s => (s.current?.id === battleId ? s.current : undefined));
+  const listed = useStore(s => !s.ready || s.battles.some(b => b.id === battleId));
+  const openBattle = useStore(s => s.openBattle);
   const updateBattle = useStore(s => s.updateBattle);
   const deleteBattle = useStore(s => s.deleteBattle);
   const setView = useStore(s => s.setView);
+  useEffect(() => {
+    void openBattle(battleId);
+  }, [battleId, openBattle]);
   const {fmt, gen, error} = useFormat(battle?.formatId);
   const [actor, setActor] = useState<MonRef | null>(null);
   const [focusOpp, setFocusOpp] = useState(0);
@@ -333,7 +340,7 @@ export function BattleScreen({battleId}: {battleId: string}) {
   const intelSlot = activeOpp.includes(focusOpp) || !activeOpp.length ? focusOpp : activeOpp[0];
   const {result} = useInference(fmt, battle, [...activeOpp, intelSlot]);
 
-  if (!battle) return <div className="panel empty">Battle not found.</div>;
+  if (!battle) return <div className="panel empty">{listed ? 'Loading battle…' : 'Battle not found.'}</div>;
   if (error) return <div className="panel empty bad">Couldn't load data: {error}</div>;
   if (!fmt || !gen) return <div className="panel empty">Loading ladder data…</div>;
   return <Loaded {...{fmt, gen, battle, result, actor, setActor, intelSlot, setFocusOpp, benchPick, setBenchPick, panel, setPanel}}
@@ -356,6 +363,14 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
 }) {
   const ctx = stateCtx(fmt, gen, battle, result?.mons);
   const run = (fn: (b: Battle, c: StateCtx) => Battle) => update(b => fn(b, stateCtx(fmt, gen, b, result?.mons)));
+  const undoLast = () => {
+    const last = battle.events[battle.events.length - 1];
+    if (!last) return;
+    testLog('undo', {battle: battle.id, turn: battle.turn, undid: describe(battle, result, last), narrated: last.kind === 'action' && !!last.narrated});
+    update(undo);
+  };
+  // The screen stays on while the battle is being logged; after five minutes of nothing it may sleep.
+  useWakeLock(useRecentActivity(5 * 60_000, battle.events.length));
   const queue = nextToMove(battle, result);
   // A short tick when something is logged, so eyes can stay on the Switch (Android; a no-op elsewhere).
   const tick = () => {
@@ -379,7 +394,7 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
       if (battle.events.length) {
         e.preventDefault();
-        update(undo);
+        undoLast();
       }
       return;
     }
@@ -445,7 +460,7 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
             run((b, c) => endTurn(c, b));
             tick();
           }}>End turn</button>
-          <button className="btn sm" disabled={!battle.events.length} onClick={() => update(undo)} title="Undo the last entry">↶ Undo</button>
+          <button className="btn sm" disabled={!battle.events.length} onClick={undoLast} title="Undo the last entry">↶ Undo</button>
           <VoiceBar battleId={battle.id} gen={gen} result={result} run={run} ctxFor={b => stateCtx(fmt, gen, b, result?.mons)}
             onAskSwitch={(side, slot) => setBenchPick({side, slot})} onLogged={tick} />
           <Pills battle={battle} update={update} />

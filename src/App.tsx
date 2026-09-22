@@ -1,7 +1,8 @@
-import {useState} from 'react';
+import {useEffect, useState} from 'react';
 import {useStore} from './state/store';
 import {BattleScreen} from './ui/battle/BattleScreen';
 import {BattlesPage} from './ui/BattlesPage';
+import {ErrorBanner, ErrorBoundary} from './ui/Crash';
 import {Setup} from './ui/Setup';
 import {TeamsPage} from './ui/TeamsPage';
 
@@ -30,6 +31,10 @@ export function App() {
   const storageError = useStore(s => s.storageError);
   const battles = useStore(s => s.battles);
   const current = view.page === 'battle' ? battles.find(b => b.id === view.battleId) : undefined;
+  // No pull-to-refresh on a battle: a stray pull mid-turn reloads it (all saved, but the open sheet and voice stop).
+  useEffect(() => {
+    document.documentElement.classList.toggle('no-pull', view.page === 'battle');
+  }, [view.page]);
 
   return (
     <div className="app">
@@ -61,10 +66,14 @@ export function App() {
       </header>
       <main className="main">
         {storageError && <div className="banner warn">{storageError}</div>}
-        {view.page === 'teams' && <TeamsPage teamId={view.teamId} />}
-        {view.page === 'battles' && <BattlesPage />}
-        {view.page === 'new' && <Setup key={view.teamId} teamId={view.teamId} />}
-        {view.page === 'battle' && <BattleScreen key={view.battleId} battleId={view.battleId} />}
+        <ErrorBanner />
+        {/* A page that breaks shows the crash screen; the bar above keeps working, and leaving the page clears it. */}
+        <ErrorBoundary resetKey={JSON.stringify(view)}>
+          {view.page === 'teams' && <TeamsPage teamId={view.teamId} />}
+          {view.page === 'battles' && <BattlesPage />}
+          {view.page === 'new' && <Setup key={view.teamId} teamId={view.teamId} />}
+          {view.page === 'battle' && <BattleScreen key={view.battleId} battleId={view.battleId} />}
+        </ErrorBoundary>
       </main>
     </div>
   );

@@ -186,7 +186,9 @@ export function TeamsPage({teamId}: {teamId?: string}) {
           <div className="spacer" />
           <button className="btn sm" onClick={() => setEditing('new')}>+ New</button>
         </div>
-        <div className="small muted">Saved only in this browser.</div>
+        <div className="small muted">
+          Saved only in this browser. <button className="link-btn" onClick={() => setView({page: 'battles'})}>Back up or restore</button>
+        </div>
         <div className="team-list">
           {teams.map(t => {
             const gen = getGen(formats?.find(f => f.id === t.formatId)?.gen ?? 0);

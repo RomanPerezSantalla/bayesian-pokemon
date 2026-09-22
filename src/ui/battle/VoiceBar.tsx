@@ -8,7 +8,9 @@ import type {Gen} from '../../data/dex';
 import type {StateCtx} from '../../engine/state';
 import type {InferResult} from '../../engine/worker';
 import type {Battle, SideID} from '../../engine/types';
-import {useStore} from '../../state/store';
+import {battleById} from '../../state/store';
+import {testLog, testLogOn} from '../../testlog';
+import {useWakeLock} from '../wake';
 import {Narrator, type VoiceIO} from './voice/narrator';
 import {parseNarration} from './voice/parse';
 import {speechSupported, useSpeech} from './voice/useSpeech';
@@ -35,7 +37,7 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
   if (!narrator.current) {
     const io: VoiceIO = {
       gen,
-      battle: () => useStore.getState().battles.find(b => b.id === battleId)!,
+      battle: () => battleById(battleId)!,
       mons: () => latest.current.result?.mons,
       ctx: b => latest.current.ctxFor(b),
       apply: fn => {
@@ -50,39 +52,49 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
   const note = (items: {text: string; bad?: boolean}[]) => {
     if (items.length) setLines(prev => [...items.reverse(), ...prev].slice(0, 3));
   };
-  const commitNow = () => {
+  const commitNow = (how: 'pause' | 'tap' | 'stop') => {
     window.clearTimeout(timer.current);
-    const done = narrator.current!.commit();
+    const n = narrator.current!;
+    const was = n.open ? n.describe() : '';
+    const done = n.commit();
     if (done) note([{text: done}]);
+    if (was || done) testLog('voice-commit', {battle: battleId, how, draft: was, did: done});
     setDraft('');
   };
 
   const onFinal = (alternatives: string[]) => {
     const n = narrator.current!;
-    const env = {battle: useStore.getState().battles.find(b => b.id === battleId)!, gen, mons: latest.current.result?.mons};
+    const env = {battle: battleById(battleId)!, gen, mons: latest.current.result?.mons};
     // The recogniser's alternatives: take the one that makes the most sense.
     let events = parseNarration(alternatives[0], env);
-    for (const alt of alternatives.slice(1)) {
+    let used = 0;
+    alternatives.slice(1).forEach((alt, i) => {
       const e = parseNarration(alt, env);
-      if (e.length > events.length) events = e;
-    }
+      if (e.length > events.length) [events, used] = [e, i + 1];
+    });
     const done = n.feed(events);
+    testLog('voice', {battle: battleId, turn: env.battle.turn, heard: alternatives, used, events, did: done, draft: n.describe()});
     note([
       ...(events.length ? [] : [{text: `didn't catch: “${alternatives[0].trim()}”`, bad: true}]),
       ...done.map(text => ({text, bad: !text.startsWith('✓') && !text.startsWith('—') && /\?|isn't|wasn't|can't/.test(text)})),
     ]);
     setDraft(n.describe());
     window.clearTimeout(timer.current);
-    if (n.open) timer.current = window.setTimeout(commitNow, COMMIT_AFTER_MS);
+    if (n.open) timer.current = window.setTimeout(() => commitNow('pause'), COMMIT_AFTER_MS);
   };
 
   const {listening, interim, error, start, stop} = useSpeech(onFinal);
+  // Nothing is tapped while narrating, so the screen would otherwise lock mid-battle.
+  useWakeLock(listening);
   useEffect(() => () => window.clearTimeout(timer.current), []);
-  // Development only: feed narration as text (window.__narrate("…")) to try it without a microphone.
+  useEffect(() => {
+    if (error) testLog('voice-error', {battle: battleId, error});
+  }, [error, battleId]);
+  // Development and test builds: feed narration as text (window.__narrate("…")) to try it without a microphone.
   const feedText = useRef(onFinal);
   feedText.current = onFinal;
   useEffect(() => {
-    if (!import.meta.env.DEV) return;
+    if (!import.meta.env.DEV && !testLogOn) return;
     const w = window as unknown as {__narrate?: (t: string) => void};
     w.__narrate = t => feedText.current([t]);
     return () => {
@@ -94,7 +106,7 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
   const toggle = () => {
     if (listening) {
       stop();
-      commitNow();
+      commitNow('stop');
     } else start();
   };
   return (
@@ -111,9 +123,10 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
           {draft && (
             <div className="voice-draft">
               <span>{draft}</span>
-              <button className="btn sm" onClick={commitNow}>✓</button>
+              <button className="btn sm" onClick={() => commitNow('tap')}>✓</button>
               <button className="btn sm ghost" onClick={() => {
                 window.clearTimeout(timer.current);
+                testLog('voice-discard', {battle: battleId, draft: narrator.current!.describe()});
                 narrator.current!.discard();
                 setDraft('');
               }}>✕</button>
