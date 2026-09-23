@@ -4,8 +4,13 @@ import {previewNamesByUsage, type FormatData} from '../data/format';
 import {parseTeam, type PokemonSet} from '../data/paste';
 import {createBattle} from '../engine/battle';
 import {useStore} from '../state/store';
+import {testLog} from '../testlog';
 import {logLeads, stateCtx} from './battle/actions';
+import {ACTIVITY} from './battle/VoiceBar';
+import {previewPhrases, readPreview, type Picks, type Side, type Unsure} from './battle/voice/preview';
+import {speech, useSpeech} from './battle/voice/useSpeech';
 import {Sprite, useFormat, useFormatIndex} from './common';
+import {useWakeLock} from './wake';
 
 const LAST_FORMAT = 'bayesian-battle:last-format';
 
@@ -23,6 +28,42 @@ export function toPreviewName(fmt: FormatData, gen: Gen, raw: string): string | 
   const sp = dexSpecies(gen, name);
   if (!sp) return null;
   return /-Mega/.test(sp.name) && sp.baseSpecies ? sp.baseSpecies : sp.name;
+}
+
+/** The mic button and what it heard, on both steps of team preview. */
+function PreviewVoice({voice, heard, hint, unsure, label, onPick}: {
+  voice: ReturnType<typeof useSpeech>;
+  heard: {text: string; bad?: boolean} | null;
+  hint: string;
+  /** Heard but not sure which: the likeliest to tap. */
+  unsure: Unsure[];
+  label(option: string | number): string;
+  onPick(u: Unsure, option: string | number): void;
+}) {
+  if (!voice.listening && !heard && !voice.error && !unsure.length) return null;
+  return (
+    <div className="voice-panel">
+      {voice.error && <div className="note alert">{voice.error}</div>}
+      {voice.listening && (voice.interim ? <div className="voice-live">…{voice.interim}</div>
+        : <div className={voice.activity ? 'voice-live' : 'voice-line'}>{voice.activity ? ACTIVITY[voice.activity] : hint}</div>)}
+      {heard && <div className={`voice-line${heard.bad ? ' bad' : ''}`}>{heard.text}</div>}
+      {unsure.map((u, k) => (
+        <div key={k} className="voice-unsure">
+          <span className="voice-line">“{u.heard}”?</span>
+          {u.options.map(o => <button key={o} className="btn sm" onClick={() => onPick(u, o)}>{label(o)}</button>)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function VoiceToggle({voice}: {voice: ReturnType<typeof useSpeech>}) {
+  return (
+    <button className={`btn sm voice-btn${voice.listening ? ' on' : ''}`} onClick={() => (voice.listening ? voice.stop() : voice.start())}
+      title="Say their six, then “mine” and yours in the order you pick them">
+      {voice.listening ? '● Listening' : '🎙 Voice'}
+    </button>
+  );
 }
 
 function parsePasted(fmt: FormatData, gen: Gen, text: string): {names: string[]; sheet: PokemonSet[] | null} {
@@ -71,6 +112,18 @@ export function Setup({teamId}: {teamId?: string}) {
   const bring = info?.bring ?? 4;
   const pool = brought ?? (team ? team.sets.map((_, i) => i).slice(0, bring) : []);
 
+  // By voice (battle/voice/preview.ts): their six, then yours in pick order. The session carries on into the battle.
+  const [heard, setHeard] = useState<{text: string; bad?: boolean} | null>(null);
+  const [unsure, setUnsure] = useState<Unsure[]>([]);
+  const picks = useRef<Picks>({theirs: opp, mine: brought});
+  /** "I brought…", a pause, then the names: the side said carries on for a moment. */
+  const lastSide = useRef<{side: Side | null; at: number}>({side: null, at: 0});
+  picks.current = {theirs: opp, mine: brought};
+  const onVoice = useRef<(alternatives: string[]) => void>(() => {});
+  const phrases = useRef<() => string[]>(() => []);
+  const voice = useSpeech(alternatives => onVoice.current(alternatives), () => phrases.current());
+  useWakeLock(voice.listening);
+
   if (!teams.length) {
     return (
       <div className="panel empty">
@@ -92,19 +145,85 @@ export function Setup({teamId}: {teamId?: string}) {
   const toggleIn = (list: number[], i: number, cap: number) =>
     list.includes(i) ? list.filter(x => x !== i) : list.length < cap ? [...list, i] : [...list.slice(1), i];
 
-  const start = () => {
+  // Voice can start it straight after changing the picks, before they've reached the state.
+  const start = (theirs = opp, mine = pool, mineLeads = myLeads) => {
     if (!fmt || !gen || !team) return;
-    let b = createBattle(fmt, team.sets, opp, `vs ${opp.slice(0, 3).join(', ')}`);
-    b.brought = pool;
-    if (sheet) b.oppSheet = opp.map((_, i) => sheet[i] ?? null);
+    let b = createBattle(fmt, team.sets, theirs, `vs ${theirs.slice(0, 3).join(', ')}`);
+    b.brought = mine;
+    if (sheet) b.oppSheet = theirs.map((_, i) => sheet[i] ?? null);
     const leads = [
       ...oppLeads.slice(0, positions).map(slot => ({side: 'opp' as const, slot})),
-      ...myLeads.slice(0, positions).map(slot => ({side: 'me' as const, slot})),
+      ...mineLeads.slice(0, positions).map(slot => ({side: 'me' as const, slot})),
     ];
     b = logLeads(stateCtx(fmt, gen, b, undefined), b, leads);
     addBattle(b);
     setView({page: 'battle', battleId: b.id});
   };
+
+  phrases.current = () => (fmt && gen && team ? previewPhrases({fmt, gen, team: team.sets, bring}) : []);
+  onVoice.current = alternatives => {
+    if (!fmt || !gen || !team) return;
+    const env = {fmt, gen, team: team.sets, bring};
+    const now = picks.current;
+    // The recogniser's alternatives: take the one that makes the most sense.
+    const side = Date.now() - lastSide.current.at < 10_000 ? lastSide.current.side : null;
+    let read = readPreview(alternatives[0], now, env, side);
+    let used = 0;
+    alternatives.slice(1).forEach((alt, k) => {
+      const r = readPreview(alt, now, env, side);
+      if (r.said.length > read.said.length) [read, used] = [r, k + 1];
+    });
+    testLog('voice-preview', {heard: alternatives, used, said: read.said, unsure: read.unsure, side: read.side, battle: read.battle, picks: read.picks});
+    const next = read.picks;
+    picks.current = next;
+    lastSide.current = {side: read.side, at: Date.now()};
+    if (next.theirs.join() !== now.theirs.join()) {
+      advanceOnSix.current = true;
+      setOpp(next.theirs);
+    }
+    const mine = next.mine;
+    if (mine && mine.join() !== (now.mine ?? []).join()) {
+      setBrought(mine);
+      setMyLeads(mine.slice(0, positions));
+    }
+    if (read.battle) {
+      if (next.theirs.length) {
+        // The battle's first line: start it, and hand the line to the battle's narrator (it sets the leads).
+        speech.passOn(alternatives);
+        start(next.theirs, mine ?? pool, mine ? mine.slice(0, positions) : myLeads);
+        return;
+      }
+      setHeard({text: 'That’s the battle starting: say their team first, or tap them', bad: true});
+      return;
+    }
+    setUnsure(read.unsure);
+    if (read.said.length) setHeard({text: read.said.join(' · ')});
+    else if (read.unsure.length) setHeard(null);
+    // "I brought…" on its own: the names come next.
+    else if (read.side && read.side !== side) setHeard({text: read.side === 'mine' ? 'Yours next…' : 'Theirs next…'});
+    else setHeard({text: `didn’t catch: “${alternatives[0].trim()}”`, bad: true});
+  };
+
+  const labelOf = (option: string | number) =>
+    typeof option === 'number' ? team?.sets[option]?.nickname || team?.sets[option]?.species || '?' : option;
+  const pickUnsure = (u: Unsure, option: string | number) => {
+    const now = picks.current;
+    if (u.side === 'theirs' && typeof option === 'string' && !now.theirs.includes(option) && now.theirs.length < 6) {
+      picks.current = {...now, theirs: [...now.theirs, option]};
+      advanceOnSix.current = true;
+      setOpp(picks.current.theirs);
+    } else if (u.side === 'mine' && typeof option === 'number' && !(now.mine ?? []).includes(option)) {
+      const mine = [...(now.mine ?? []), option].slice(0, bring);
+      picks.current = {...now, mine};
+      setBrought(mine);
+      setMyLeads(mine.slice(0, positions));
+    }
+    setUnsure(list => list.filter(x => x !== u));
+    setHeard({text: `${labelOf(option)} ✓`});
+  };
+  const voicePanel = (hint: string) => (
+    <PreviewVoice voice={voice} heard={heard} hint={hint} unsure={unsure} label={labelOf} onPick={pickUnsure} />
+  );
 
   return (
     <div className="col" style={{maxWidth: 900, margin: '0 auto'}}>
@@ -144,7 +263,10 @@ export function Setup({teamId}: {teamId?: string}) {
           <div className="row">
             <h2>Their team</h2>
             <span className="small muted">tap the six you see at team preview</span>
+            <div className="spacer" />
+            <VoiceToggle voice={voice} />
           </div>
+          {voicePanel('Say their six as you see them, then “mine” and yours in the order you pick them.')}
           <div className="chosen">
             {Array.from({length: 6}, (_, i) => opp[i]).map((name, i) => (
               <div key={i} className={`slot${name ? ' filled' : ''}`} onClick={() => name && togglePick(name)}>
@@ -185,7 +307,12 @@ export function Setup({teamId}: {teamId?: string}) {
 
       {step === 'leads' && fmt && gen && team && (
         <div className="panel col">
-          <h2>Their lead{positions > 1 ? 's' : ''}</h2>
+          <div className="row">
+            <h2>Their lead{positions > 1 ? 's' : ''}</h2>
+            <div className="spacer" />
+            <VoiceToggle voice={voice} />
+          </div>
+          {voicePanel('Say “mine” and yours in the order you pick them. Reading the battle’s first line starts it.')}
           <div className="chosen">
             {opp.map((n, i) => (
               <div key={n} className={`slot filled${oppLeads.includes(i) ? ' lead' : ''}`} onClick={() => setOppLeads(l => toggleIn(l, i, positions))}>
@@ -216,7 +343,7 @@ export function Setup({teamId}: {teamId?: string}) {
           </div>
           <div className="row sticky-bar">
             <button className="btn" onClick={() => setStep('preview')}>‹ back</button>
-            <button className="btn primary" onClick={start}>Start battle</button>
+            <button className="btn primary" onClick={() => start()}>Start battle</button>
             <span className="small muted">Leads can also be set on the battle screen.</span>
           </div>
         </div>

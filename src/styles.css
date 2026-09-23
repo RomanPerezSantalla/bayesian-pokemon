@@ -222,6 +222,7 @@ table.t th { color: var(--muted); font-weight: 500; }
 .voice-draft span { flex: 1; min-width: 0; }
 .voice-line { color: var(--muted); }
 .voice-line.bad { color: var(--warn); }
+.voice-unsure { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .qchip { border: 1px solid var(--border); background: var(--panel-2); border-radius: 999px; padding: 4px 10px; font-size: 12.5px; cursor: pointer; touch-action: manipulation; }
 .qchip.opp { border-color: color-mix(in srgb, var(--opp) 45%, var(--border)); }
 .qchip.me { border-color: color-mix(in srgb, var(--me) 45%, var(--border)); }
@@ -243,6 +244,14 @@ table.t th { color: var(--muted); font-weight: 500; }
 .banner { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: var(--radius); padding: 8px 12px; margin-bottom: 10px; font-size: 13.5px; }
 .banner.warn { border-color: var(--warn); background: transparent; color: var(--warn); }
 .empty { text-align: center; padding: 32px 16px; color: var(--muted); }
+/* The voice model's download: a bottom sheet on a phone, a card in the middle on a wide screen. */
+.voice-offer { gap: 8px; }
+.voice-offer p { margin: 0; }
+.voice-offer progress { width: 100%; }
+@media (min-width: 900px) {
+  .sheet-backdrop.voice-offer-backdrop { display: block; }
+  .sheet.voice-offer { position: fixed; left: 50%; right: auto; bottom: auto; top: 20%; transform: translateX(-50%); width: min(460px, calc(100vw - 32px)); border-radius: var(--radius); border: 1px solid var(--border); box-shadow: 0 10px 40px rgb(0 0 0 / 25%); max-height: 70vh; }
+}
 .link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-decoration: underline; font-size: inherit; }
 .crash { max-width: 680px; margin: 16px auto; border-color: var(--bad); }
 .crash-msg { display: block; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel-2); padding: 8px 10px; border-radius: 8px; }

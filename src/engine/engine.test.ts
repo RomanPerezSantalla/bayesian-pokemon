@@ -758,6 +758,21 @@ Careful Nature
     expect(r.last().hits[0]).toMatchObject({target: me(0), fainted: true, crit: true});
   });
 
+  it('battle start: both leads of a side from one line', () => {
+    const r = rig(['Salamence', 'Incineroar', 'Rillaboom', 'Kingambit'], {me: [null, null], opp: [null, null]});
+    // Incineroar on both sides: "sent out" is theirs, "Go!" is yours.
+    r.say('The opposing trainer sent out Salamence and Incineroar!');
+    r.say('Go! Incineroar and Garchomp!');
+    expect(r.b.live.active).toEqual({me: [2, 1], opp: [0, 1]});
+    expect(r.asked).toEqual([]);
+  });
+
+  it("their Incineroar coming in isn't taken for yours on the field", () => {
+    const r = rig(['Salamence', 'Incineroar', 'Rillaboom', 'Kingambit'], {me: [2, 1], opp: [0, 2]});
+    r.say('The opposing trainer withdrew Salamence! The opposing trainer sent out Incineroar!');
+    expect(r.b.live.active).toEqual({me: [2, 1], opp: [1, 2]});
+  });
+
   it('switches, Mega Evolution and the turn ending', () => {
     const r = doubles();
     r.say('The opposing trainer withdrew Salamence! The opposing trainer sent out Kingambit!');

@@ -9,7 +9,8 @@ import {megaFormeOf} from '../../../engine/likelihood';
 import type {MonSummary} from '../../../engine/worker';
 import type {Battle, MonRef, SideID, Status} from '../../../engine/types';
 import {spokenName} from '../names';
-import {matchAt, norm, numberAt, squash, type Named} from './text';
+import {spokenNames} from './preview';
+import {COMMON_WORDS, matchAt, norm, numberAt, squash, type MatchOptions, type Named} from './text';
 
 export type VoiceEvent =
   | {kind: 'use'; actor: MonRef; move: string}
@@ -34,7 +35,7 @@ export interface ParseEnv {
   mons: (MonSummary | null)[] | undefined;
 }
 
-type Phrase = 'crit' | 'faint' | 'miss' | 'immune' | 'recoil' | 'status' | 'sendOut' | 'go' | 'withdraw' | 'mega' | 'endTurn';
+type Phrase = 'crit' | 'faint' | 'miss' | 'immune' | 'recoil' | 'status' | 'sendOut' | 'lead' | 'go' | 'withdraw' | 'mega' | 'endTurn';
 
 /** Game-text phrases, longest first so "critical hit" wins over "critical". */
 const PHRASES: [string[], Phrase, Status?][] = ([
@@ -47,7 +48,11 @@ const PHRASES: [string[], Phrase, Status?][] = ([
   ['lost some of its hp', 'recoil'], ['lost some hp', 'recoil'], ['lost some', 'recoil'],
   ['badly poisoned', 'status', 'tox'], ['poisoned', 'status', 'psn'], ['burned', 'status', 'brn'],
   ['paralyzed', 'status', 'par'], ['fell asleep', 'status', 'slp'], ['frozen', 'status', 'frz'],
-  ['sent out', 'sendOut'], ['send out', 'sendOut'], ['sends out', 'sendOut'],
+  ['sent out', 'sendOut'], ['send out', 'sendOut'], ['sends out', 'sendOut'], ['brought out', 'sendOut'], ['brings out', 'sendOut'],
+  // Said rather than read: "opponent sent Rillaboom and Corviknight", "I lead with Dragapult".
+  ['sent', 'sendOut'], ['sends', 'sendOut'], ['sending', 'sendOut'],
+  ['leads with', 'lead'], ['lead with', 'lead'], ['leading with', 'lead'], ['starts with', 'lead'], ['opens with', 'lead'],
+  ['leads', 'lead'], ['leading', 'lead'], ['lead', 'lead'],
   ['go for it', 'go'], ['youre in charge', 'go'], ['go', 'go'],
   ['come back', 'withdraw'], ['went back', 'withdraw'], ['withdrew', 'withdraw'], ['switched out', 'withdraw'],
   ['mega evolved', 'mega'], ['mega evolves', 'mega'], ['mega evolution', 'mega'], ['mega evolve', 'mega'],
@@ -57,7 +62,13 @@ const PHRASES: [string[], Phrase, Status?][] = ([
   .map(([p, kind, st]) => [p.split(' '), kind, st] as [string[], Phrase, Status?])
   .sort((a, b) => b[0].length - a[0].length);
 
-const OPPOSING = new Set(['opposing', 'opponent', 'opponents', 'foe', 'foes', 'enemy', 'their', 'rival', 'wild']);
+const OPPOSING = new Set(['opposing', 'opponent', 'opponents', 'foe', 'foes', 'enemy', 'their', 'theirs', 'they', 'rival', 'wild']);
+const MINE = new Set(['i', 'im', 'ill', 'my', 'me', 'mine', 'we', 'our', 'ours']);
+/**
+ * Pokémon are matched only among the dozen in the battle, so badly heard names can be let through
+ * ("carbonite" for Corviknight, "really boom" for Rillaboom), with common words kept out.
+ */
+const NAMES: MatchOptions = {consonants: true, stop: COMMON_WORDS, prefix: true};
 const USED = new Set(['used', 'uses', 'use', 'using']);
 const BEFORE_HP = new Set(['at', 'to', 'down', 'is', 'has', 'now', 'on', 'with', 'left', 'hp', 'health']);
 const AFTER_HP = new Set(['percent', 'hp', 'left']);
@@ -74,11 +85,11 @@ const refOf = (key: string): MonRef => (key.startsWith('me')
   : {side: 'opp', slot: Number(key.slice(3))});
 
 /** Every Pokémon on a side, by the names narration may use: species, nickname, base species, "Mega X". */
-function monNames(env: ParseEnv, side: SideID): Named<string>[] {
-  const out: Named<string>[] = [];
+function monNames(env: ParseEnv, side: SideID): (Named<string> & {said: string})[] {
+  const out: (Named<string> & {said: string})[] = [];
   const active = env.battle.live.active[side];
   const add = (slot: number, name: string | undefined) => {
-    if (name) out.push({key: squash(name), value: `${side}${slot}`, bonus: active.includes(slot) ? 0.04 : 0});
+    for (const said of name ? spokenNames(name) : []) out.push({key: squash(said), value: `${side}${slot}`, bonus: active.includes(slot) ? 0.04 : 0, said});
   };
   if (side === 'me') {
     env.battle.myTeam.forEach((set, slot) => {
@@ -91,10 +102,34 @@ function monNames(env: ParseEnv, side: SideID): Named<string>[] {
   } else {
     env.battle.oppPreview.forEach((species, slot) => {
       add(slot, species);
+      add(slot, env.gen.species.get(toID(species))?.baseSpecies);
       for (const f of env.mons?.[slot]?.formes ?? []) if (f.p > 0 && /-Mega/.test(f.name)) add(slot, spokenName(f.name));
     });
   }
   return out;
+}
+
+/**
+ * What can be said in this battle, for the voice model to listen out for: every name of the
+ * Pokémon in it, your moves, items and abilities, and theirs as far as they're likely.
+ */
+export function narrationPhrases(env: ParseEnv): string[] {
+  const out = new Set<string>();
+  for (const side of ['me', 'opp'] as const) for (const n of monNames(env, side)) out.add(n.said);
+  for (const set of env.battle.myTeam) {
+    for (const m of set.moves) out.add(m);
+    if (set.item) out.add(set.item);
+    if (set.ability) out.add(set.ability);
+  }
+  for (const m of env.mons ?? []) {
+    if (!m) continue;
+    const likely = <T extends {name: string; p: number}>(xs: T[], min: number) => xs.filter(x => x.p >= min).map(x => x.name);
+    for (const x of likely(m.moves, 0.02)) out.add(x);
+    for (const x of likely(m.items, 0.05)) out.add(x);
+    for (const x of likely(m.abilities, 0.05)) out.add(x);
+    for (const a of Object.values(m.megaAbilityOf ?? {})) out.add(a);
+  }
+  return [...out];
 }
 
 const listCache = new WeakMap<Gen, Record<string, Named<string>[]>>();
@@ -113,14 +148,30 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
   const names = {me: monNames(env, 'me'), opp: monNames(env, 'opp')};
   const out: VoiceEvent[] = [];
   let last: MonRef | undefined;
+  /** The word being read. */
+  let i = 0;
+  /** Whose Pokémon the words so far are about ("opponent…", "I…"): settles a species both sides have. */
+  let ctx: SideID | undefined;
+  const live = env.battle.live;
+  /** Places free on each side (empty, or its Pokémon fainted): a benched Pokémon named there has come in. */
+  const room: Record<SideID, number> = {me: 0, opp: 0};
+  for (const side of ['me', 'opp'] as const) {
+    room[side] = live.active[side].filter(s => s === null || (live.mons[`${side}${s}`]?.hp ?? 1) <= 0).length;
+  }
+  const benched = (ref: MonRef) => !live.active[ref.side].includes(ref.slot) && (live.mons[`${ref.side}${ref.slot}`]?.hp ?? 1) > 0;
+  const nameAt = (at: number, side: SideID) => matchAt(words, at, names[side], 0.6, 0.12, NAMES);
 
-  /** A Pokémon named at i. The game calls theirs "the opposing X"; without it, a species both sides have is yours. */
+  /**
+   * A Pokémon named at i. The game calls theirs "the opposing X"; without that, a species both
+   * sides have is the one of the side being talked about, else yours.
+   */
   const monAt = (i: number, prefer?: SideID): {ref: MonRef; len: number} | null => {
     const opposing = OPPOSING.has(words[i - 1] ?? '') || (words[i - 1] === 'the' && OPPOSING.has(words[i - 2] ?? ''));
-    const mine = opposing ? null : matchAt(words, i, names.me);
-    const theirs = matchAt(words, i, names.opp);
+    const mine = opposing ? null : nameAt(i, 'me');
+    const theirs = nameAt(i, 'opp');
+    const side = prefer ?? ctx;
     const m = mine && theirs
-      ? (mine.score > theirs.score || (mine.score === theirs.score && prefer !== 'opp') ? mine : theirs)
+      ? (mine.score > theirs.score || (mine.score === theirs.score && side !== 'opp') ? mine : theirs)
       : mine ?? theirs;
     return m ? {ref: refOf(m.value), len: m.len} : null;
   };
@@ -130,6 +181,30 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
       if (m) return {...m, at: j};
     }
     return null;
+  };
+  /** One side's Pokémon only: the game says "Go! X!" for yours and "…sent out X!" for theirs, whatever else is on the field. */
+  const sideAt = (at: number, side: SideID) => {
+    const m = nameAt(at, side);
+    return m ? {ref: refOf(m.value), len: m.len, at} : null;
+  };
+  const nextOnSide = (from: number, span: number, side: SideID) => {
+    for (let j = from; j < Math.min(words.length, from + span); j++) {
+      const m = sideAt(j, side);
+      if (m) return m;
+    }
+    return null;
+  };
+  /** Doubles sends out two at once: "…sent out Salamence and Rillaboom!", "Go! Incineroar and Sneasler!". */
+  const sentOut = (m: {ref: MonRef; len: number; at: number}) => {
+    out.push({kind: 'sendOut', mon: m.ref});
+    room[m.ref.side] = Math.max(0, room[m.ref.side] - 1);
+    [last, i] = [m.ref, m.at + m.len];
+    const second = words[i] === 'and' ? sideAt(i + 1, m.ref.side) : null;
+    if (second) {
+      out.push({kind: 'sendOut', mon: second.ref});
+      room[second.ref.side] = Math.max(0, room[second.ref.side] - 1);
+      [last, i] = [second.ref, second.at + second.len];
+    }
   };
   const moveAt = (i: number, ref: MonRef) => {
     if (ref.side === 'me') {
@@ -148,8 +223,9 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
     return matchAt(words, i, cands, 0.75, 0.06) ?? matchAt(words, i, every(env.gen, 'abilities'), 0.86, 0.03);
   };
 
-  let i = 0;
   while (i < words.length) {
+    if (OPPOSING.has(words[i])) ctx = 'opp';
+    else if (MINE.has(words[i])) ctx = 'me';
     const ph = phraseAt(words, i);
     if (ph) {
       i += ph.len;
@@ -179,27 +255,30 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
           break;
         }
         case 'sendOut': {
-          const m = nextMon(i, 5, 'opp');
-          if (m) {
-            [last, i] = [m.ref, m.at + m.len];
-            out.push({kind: 'sendOut', mon: m.ref});
-          }
+          // "The opposing trainer sent out Kingambit!" (the game says it only of theirs), "I sent Dragapult".
+          const m = nextOnSide(i, 5, ctx ?? 'opp');
+          if (m) sentOut(m);
+          break;
+        }
+        case 'lead': {
+          // "Opponent leads with Rillaboom and Corviknight", "I lead Dragapult and Arcanine".
+          const m = ctx ? nextOnSide(i, 5, ctx) : nextMon(i, 5);
+          if (m) sentOut(m);
           break;
         }
         case 'go': {
           // "Go! Garchomp!"
-          const m = monAt(i, 'me');
-          if (m && m.ref.side === 'me') {
-            [last, i] = [m.ref, i + m.len];
-            out.push({kind: 'sendOut', mon: m.ref});
-          }
+          const m = sideAt(i, 'me');
+          if (m) sentOut(m);
           break;
         }
         case 'withdraw': {
           // "Come back, Salamence!" / "Salamence, come back!" / "withdrew Salamence"
           const m = nextMon(i, 3);
           if (m) [last, i] = [m.ref, m.at + m.len];
-          out.push({kind: 'withdraw', mon: m?.ref ?? last});
+          const gone = m?.ref ?? last;
+          if (gone && live.active[gone.side].includes(gone.slot)) room[gone.side]++;
+          out.push({kind: 'withdraw', mon: gone});
           break;
         }
         case 'mega': {
@@ -229,8 +308,15 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
       let j = i;
       if (USED.has(words[j] ?? '')) j++;
       if (words[j] !== 'its' && words[j] !== 'their') {
-        const mv = moveAt(j, mon.ref);
-        if (mv && (j > i || mv.score >= 0.9)) {
+        let mv = moveAt(j, mon.ref);
+        if (mv && j === i && mv.score < 0.9) mv = null;
+        // "used" misheard ("Rillaboom mus said Fake Out"): a move said exactly a word or two on still counts.
+        for (let k = j + 1; !mv && j === i && k <= i + 2 && k < words.length; k++) {
+          if (numberAt(words, k - 1) || monAt(k - 1)) break;
+          const m = moveAt(k, mon.ref);
+          if (m && m.score >= 0.9) [mv, j] = [m, k];
+        }
+        if (mv) {
           out.push({kind: 'use', actor: mon.ref, move: mv.value});
           i = j + mv.len;
           continue;
@@ -251,6 +337,11 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
       if (ab) {
         out.push({kind: 'ability', mon: mon.ref, ability: ab.value});
         i += ab.len;
+      } else if (benched(mon.ref) && room[mon.ref.side] > 0) {
+        // A benched Pokémon named with a place free on its side has come in: the leads said plainly
+        // ("opponent Rillaboom and Corviknight"), or who replaced one that fainted.
+        out.push({kind: 'sendOut', mon: mon.ref});
+        room[mon.ref.side]--;
       }
       continue;
     }

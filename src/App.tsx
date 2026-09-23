@@ -5,6 +5,7 @@ import {BattlesPage} from './ui/BattlesPage';
 import {ErrorBanner, ErrorBoundary} from './ui/Crash';
 import {Setup} from './ui/Setup';
 import {TeamsPage} from './ui/TeamsPage';
+import {VoiceOffer} from './ui/VoiceSetup';
 
 const COFFEE_URL = 'https://buymeacoffee.com/romanps';
 
@@ -75,6 +76,7 @@ export function App() {
           {view.page === 'battle' && <BattleScreen key={view.battleId} battleId={view.battleId} />}
         </ErrorBoundary>
       </main>
+      <VoiceOffer />
     </div>
   );
 }

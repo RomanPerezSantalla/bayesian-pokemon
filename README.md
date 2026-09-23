@@ -17,6 +17,7 @@ npm run dev          # http://localhost:5173  (add `-- --host` to open it from y
 npm test
 npm run build        # static site in dist/
 npm run phone        # the app on your phone over HTTPS (voice included), with a test log; see below
+npm run voice-pack   # the voice model's files (~150 MB, fetched once into .cache/voice/); see "By voice"
 npm run data         # refresh the Showdown structure data + move/ability tables (monthly)
 npm run data:tables  # just the move/ability tables (no download)
 ```
@@ -24,8 +25,11 @@ npm run data:tables  # just the move/ability tables (no download)
 ## Deploying, and your phone
 
 It's a static site: `npm run build` puts everything in `dist/`, with relative paths, so any static
-host and any path work. On **Cloudflare Pages**, connect the repo with build command `npm run build`
-and output directory `dist`; every push to `main` then publishes. Open the URL on your phone and
+host and any path work. On **Cloudflare Pages**, connect the repo with build command
+`npm run build && npm run voice-pack -- dist/voice` and output directory `dist`; every push to `main`
+then publishes. The second half puts the voice model on the site, in parts under Pages' 25 MiB limit
+(it fetches it from its sources during the build and checks every file's SHA-256); without it the app
+still works, and voice offers only the browser's recogniser. Open the URL on your phone and
 "Add to Home Screen": it installs as an app and works offline once loaded. (GitHub only runs the
 tests and a build on each push, `.github/workflows/ci.yml`; it doesn't deploy anything.)
 
@@ -45,16 +49,23 @@ tests and a build on each push, `.github/workflows/ci.yml`; it doesn't deploy an
 `npm run phone` builds a test copy of the app, serves it from your PC and opens a free Cloudflare quick
 tunnel to it (HTTPS, which voice and the offline install need; no account, works on mobile data too).
 Scan the QR code it prints with the phone's camera. The first run downloads `cloudflared` through npx
-(or install it: `winget install --id Cloudflare.cloudflared`).
+(or install it: `winget install --id Cloudflare.cloudflared`), and the voice model into `.cache/voice/`.
+The first time you turn voice on, the phone downloads the model from your PC through the tunnel (about
+150 MB, as fast as your PC's upload); after that it's on the phone.
 
 - The test copy is rebuilt whenever a source file changes: reload the page on the phone to get it (pull
   down on any page but a battle, where pull-to-refresh is off so a stray pull can't reload mid-turn).
 - It reports back to the PC: each voice phrase (what the recogniser heard, its alternatives, and what it
   logged) with undos and errors, in `.cache/phone-log.jsonl`, with a line in the terminal as they
-  happen; each battle as it's saved, in `.cache/phone-battles/`. A test can be gone through afterwards
-  from those. Normal builds have none of this.
+  happen; each battle as it's saved, in `.cache/phone-battles/`. With the voice model, each line's audio
+  goes to `.cache/phone-audio/` too (it stays on your PC), with what the model heard and how long it took
+  in the log, so the reading can be tuned on your voice. A test can be gone through afterwards from
+  those. Normal builds have none of this.
 - The tunnel's address changes every run, and the phone keeps each address's data apart: keep it running
   for a whole test session, or carry teams and battles over with a backup file.
+- The QR code shows only once the address works. Opened sooner, a Wi-Fi router can take the address for
+  one that doesn't exist and remember that for up to half an hour. If the phone still says so, use
+  mobile data or run it again for a new address.
 - Anyone with the address can open it while it runs; Ctrl+C stops everything.
 - `npm run phone -- --local` skips the tunnel (this PC only, at http://localhost:4180).
 
@@ -83,18 +94,49 @@ microphone hears you rather than the game.
    Tapping someone who already moved this turn, or who came in this turn, starts the next turn for you.
    A short vibration confirms each entry (Android).
 
-**By voice (prototype):** tap **🎙 Voice** and read the battle text as it appears, adding HP where you
+**By voice:** tap **🎙 Voice** and read the battle text as it appears, adding HP where you
 have it: "The opposing Salamence used Draco Meteor! Charizard 45", "Garchomp used Earthquake! It
 doesn't affect the opposing Salamence… the opposing Rillaboom 60", "A critical hit!", "Charizard
 fainted!", "The opposing trainer sent out Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved
 into Mega Charizard Y!". Ability banners answer the *What did the game show?* questions ("The opposing
 Salamence's Intimidate!"), and "What will Garchomp do?" (or "next turn") ends the turn. Each move is
 logged when the next one starts or after a short pause; HP left out is logged as skipped, and a
-message not said (Life Orb recoil, a berry) is never taken as not having happened. The recogniser
-mangles names; matching only against the Pokémon on the field and their likely moves copes with most
-of it. English game text; speech recognition works in Chrome (Android, desktop) and Safari, and
-Chrome sends the audio to Google to transcribe (it needs a connection). With the game audio on
-speakers, use headphones.
+message not said (Life Orb recoil, a berry) is never taken as not having happened. The leads can come
+the same way: start the battle without them and read the opening lines ("The opposing trainer sent out
+Salamence and Rillaboom!", "Go! Incineroar and Sneasler!"), or say them your way ("opponent sent
+Rillaboom and Corviknight", "opponent leads with…", or just the names while their places are empty).
+A species both sides have is the side just talked about ("opponent… Altaria"), else yours.
+
+*Team preview* takes voice too: tap 🎙 Voice there and say their six as you see them ("Rillaboom,
+Sneasler, Salamence…"; formes the way you'd say them: "Alolan Ninetales", "Wash Rotom", "Aqua Tauros"),
+then "mine" (or "I brought…") and yours in the order you pick them on the Switch, which gives the ones
+you bring and your leads; after "mine", a pause doesn't send the next names back to theirs. A Pokémon
+with a female forme too (Indeedee, Basculegion) is said plain for whichever is used more; say "female" or
+"male" for the other. "Scratch that" takes back the last one, "clear" starts over. When it can't tell
+which Pokémon a word was, it offers the likeliest few to tap. The microphone stays on into the battle:
+reading or saying its first line ("…sent out…", "opponent sent…") starts it and sets their leads.
+
+**The voice model.** Voice runs a speech model on the device: the first time you turn it on, it offers a
+one-time download (about 150 MB: NVIDIA's Parakeet TDT-CTC 110M, an 8-bit ONNX copy of its CTC half,
+a speech detector and the ONNX runtime), kept in the browser's Cache Storage and removable from the
+Battles page. Nothing leaves the device, it works offline, and in any browser (Chrome, Safari, Firefox).
+It listens out for what can be said right now: in a battle, the dozen Pokémon in it, your moves, items
+and abilities and their likely ones; at team preview, every Pokémon in the format. A general recogniser
+writes names it doesn't know the way they sounded ("Corvy Kight", "King Ambot", "Rail a boom"); here
+each name that can come up is also lined up against the sound itself (`src/speech/ctc.ts`, word
+spotting as in NVIDIA's CTC-WS), and one that fits nearly as well as what was heard replaces it. That's
+what holds up for accents: names are compared on the sound, among the few possible, not on spelling. On
+synthetic voices, an American one and a Spanish one reading English, it gets 98 of 106 names and moves
+with nothing false, also on lines with no names in them. The speech detector finds where each line ends
+(a pause of 0.7 s), and the line is read in a fraction of a second on a PC, a second or so on a phone.
+
+The browser's own recogniser (Chrome, Safari) is still there for anyone who'd rather not download: the
+offer has a link for it, and the Battles page switches between the two. It sends the audio away (Chrome
+to Google), needs a connection, and mangles names ("carbonite" for Corviknight, "dragon ball" for
+Dragapult, "Celtic" for Milotic); names are then matched among the few that can be meant, by their
+consonant sounds as well, which rescues many, and Chrome on Android's phrases in pieces ("King",
+" Gambit") are put together. Either way, English game text, and with the game audio on speakers, use
+headphones.
 
 **On a PC, the keyboard does it all:** Q W open their Pokémon and A S yours (left to right), 1–9 pick a
 move or target, typing a letter searches every move, ← → switch Pokémon; then type the HP, Tab for the
@@ -231,4 +273,8 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
 
 Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or
 The Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites and item icons, type symbols
-recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT).
+recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT). Voice:
+[Parakeet TDT-CTC 110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) by NVIDIA and Suno.ai
+([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), used as the CTC half converted to 8-bit ONNX by
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx); [Silero VAD](https://github.com/snakers4/silero-vad)
+(MIT); [ONNX Runtime Web](https://onnxruntime.ai) (MIT).

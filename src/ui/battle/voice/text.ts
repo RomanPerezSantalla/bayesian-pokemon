@@ -34,6 +34,95 @@ export function levenshtein(a: string, b: string): number {
 
 export const similarity = (a: string, b: string) => 1 - levenshtein(a, b) / Math.max(a.length, b.length, 1);
 
+/**
+ * A rough sound-alike form of a squash()ed name, so that spellings the recogniser picks for the
+ * same sounds come out alike: "sneezler" and "sneasler", "fairy giraffe" and "farigiraf", "whimsy
+ * cot" and "whimsicott".
+ */
+export function sound(s: string): string {
+  return s
+    .replace(/ph/g, 'f').replace(/gh/g, 'g').replace(/ck/g, 'k')
+    .replace(/c(?=[eiy])/g, 's').replace(/[cq]/g, 'k').replace(/x/g, 'ks').replace(/z/g, 's')
+    .replace(/y/g, 'i').replace(/ee|ea|ie/g, 'i').replace(/oo|ou/g, 'u')
+    .replace(/(.)\1+/g, '$1')
+    .replace(/(.)e$/, '$1');
+}
+
+const CONSONANT: Record<string, number> = {
+  b: 1, f: 1, p: 1, v: 1, c: 2, g: 2, j: 2, k: 2, q: 2, s: 2, x: 2, z: 2, d: 3, t: 3, l: 4, m: 5, n: 5, r: 6,
+};
+
+/**
+ * The consonant sounds of a squash()ed name, in order (Soundex's classes, never cut short). The
+ * recogniser gets vowels and word breaks wrong far more than consonants, so "carbonite" and
+ * "corviknight" come out nearly alike, "really boom" and "rillaboom" exactly.
+ */
+export function consonants(s: string): string {
+  s = s.replace(/^gh/, 'g').replace(/gh/g, '').replace(/ph/g, 'f').replace(/dg/g, 'j').replace(/^kn/, 'n').replace(/^wr/, 'r');
+  let out = /^[aeiouy]/.test(s) ? 'a' : '';
+  let prev = 0;
+  for (const ch of s) {
+    const c = CONSONANT[ch];
+    if (!c) {
+      // A vowel between two alike consonants keeps both ("tat"); h and w don't.
+      if ('aeiouy'.includes(ch)) prev = 0;
+      continue;
+    }
+    if (c !== prev) out += c;
+    prev = c;
+  }
+  return out;
+}
+
+const memo = (fn: (s: string) => string) => {
+  const cache = new Map<string, string>();
+  return (s: string) => {
+    let v = cache.get(s);
+    if (v === undefined) cache.set(s, (v = fn(s)));
+    return v;
+  };
+};
+const soundOf = memo(sound);
+const consonantsOf = memo(consonants);
+
+/**
+ * Words that don't start a Pokémon's name: the ones said around names ("opponent sent … and …",
+ * "I brought …"), which a lenient match would otherwise take for a short name.
+ */
+export const COMMON_WORDS: ReadonlySet<string> = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'so', 'to', 'of', 'in', 'on', 'at', 'for', 'from', 'with', 'by', 'up', 'down',
+  'it', 'its', 'is', 'was', 'are', 'be', 'has', 'have', 'had', 'do', 'did', 'now', 'then', 'this', 'that', 'there', 'here',
+  'i', 'im', 'ill', 'my', 'me', 'mine', 'we', 'our', 'you', 'your', 'they', 'their', 'theirs', 'them',
+  'opponent', 'opponents', 'opposing', 'trainer', 'foe', 'enemy', 'rival',
+  'sent', 'send', 'sends', 'sending', 'out', 'go', 'lead', 'leads', 'leading', 'brought', 'bring', 'bringing', 'used', 'uses', 'use',
+  'what', 'who', 'know', 'mean', 'okay', 'ok', 'yes', 'no', 'not', 'just', 'like', 'well', 'oh', 'um', 'uh', 'hp', 'percent',
+  'one', 'two', 'three', 'four', 'five', 'six', 'first', 'second', 'third', 'fourth', 'turn', 'next',
+]);
+
+export interface MatchOptions {
+  /**
+   * Also compare consonant sounds: for a handful of names (the Pokémon in a battle, your team),
+   * where it rescues badly heard ones. Among hundreds it matches unrelated names, so not there.
+   */
+  consonants?: boolean;
+  /** Words a name can't start with ("and", "brought"): common words would otherwise match short names. */
+  stop?: ReadonlySet<string>;
+  /** A word of 4+ letters that starts only one name ("corvi") names it. */
+  prefix?: boolean;
+}
+
+/** How alike a heard word is to a name: by spelling, or by sound, whichever is closer. */
+function likeness(heard: string, key: string, opts: MatchOptions): number {
+  const close = Math.max(similarity(heard, key), similarity(soundOf(heard), soundOf(key)));
+  if (!opts.consonants) return close;
+  const a = consonantsOf(heard);
+  const b = consonantsOf(key);
+  if (a.length < 3 || b.length < 3) return close;
+  const c = similarity(a, b);
+  // Consonants alone, with the spelling far off, only when they agree closely ("carbonite", not "brought").
+  return close >= 0.5 || c >= 0.72 ? Math.max(close, c * 0.95) : close;
+}
+
 export interface Named<T> {
   /** squash()ed name. */
   key: string;
@@ -49,24 +138,39 @@ export interface Match<T> {
   score: number;
 }
 
-/**
- * The candidate named by the 1–3 words at \`i\`, if it's clearly the one meant: close enough
- * (\`min\`) and ahead of the next-best different candidate by \`margin\`. A trailing "s" is
- * also tried without it, for possessives ("salamences intimidate").
- */
-export function matchAt<T>(words: string[], i: number, cands: Named<T>[], min = 0.72, margin = 0.08): Match<T> | null {
+/** Every candidate for the 1–3 words at `i`, best first, each with the words that fit it best. */
+export function rankAt<T>(words: string[], i: number, cands: Named<T>[], opts: MatchOptions = {}): Match<T>[] {
   const best = new Map<T, Match<T>>();
+  if (opts.stop?.has(words[i] ?? '')) return [];
+  const keep = (value: T, len: number, score: number) => {
+    const cur = best.get(value);
+    if (!cur || score > cur.score || (score === cur.score && len < cur.len)) best.set(value, {value, len, score});
+  };
   for (let n = 1; n <= 3 && i + n <= words.length; n++) {
+    // A name doesn't run on past a number or a common word: "Celtic 3 Metagross" is two names.
+    if (n > 1 && opts.stop && (opts.stop.has(words[i + n - 1]) || /^\d/.test(words[i + n - 1]))) break;
     const w = words.slice(i, i + n).join('');
     const forms = w.length > 4 && w.endsWith('s') ? [w, w.slice(0, -1)] : [w];
     for (const c of cands) {
       if (Math.abs(c.key.length - w.length) > Math.max(2, Math.ceil(c.key.length * 0.4))) continue;
-      const score = Math.max(...forms.map(f => similarity(f, c.key))) + (c.bonus ?? 0);
-      const cur = best.get(c.value);
-      if (!cur || score > cur.score || (score === cur.score && n < cur.len)) best.set(c.value, {value: c.value, len: n, score});
+      keep(c.value, n, Math.max(...forms.map(f => likeness(f, c.key, opts))) + (c.bonus ?? 0));
     }
   }
-  const [top, next] = [...best.values()].sort((a, b) => b.score - a.score);
+  if (opts.prefix) {
+    const w = words[i] ?? '';
+    const starts = w.length >= 4 ? cands.filter(c => w.length >= c.key.length * 0.4 && (c.key.startsWith(w) || soundOf(c.key).startsWith(soundOf(w)))) : [];
+    if (starts.length && starts.every(c => c.value === starts[0].value)) keep(starts[0].value, 1, 0.8 + (starts[0].bonus ?? 0));
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score);
+}
+
+/**
+ * The candidate named by the 1–3 words at `i`, if it's clearly the one meant: close enough
+ * (`min`) and ahead of the next-best different candidate by `margin`. A trailing "s" is
+ * also tried without it, for possessives ("salamences intimidate").
+ */
+export function matchAt<T>(words: string[], i: number, cands: Named<T>[], min = 0.72, margin = 0.08, opts: MatchOptions = {}): Match<T> | null {
+  const [top, next] = rankAt(words, i, cands, opts);
   if (!top || top.score < min) return null;
   if (next && top.score - next.score < margin) return null;
   return top;

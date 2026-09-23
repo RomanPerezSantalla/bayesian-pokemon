@@ -12,8 +12,11 @@ import {battleById} from '../../state/store';
 import {testLog, testLogOn} from '../../testlog';
 import {useWakeLock} from '../wake';
 import {Narrator, type VoiceIO} from './voice/narrator';
-import {parseNarration} from './voice/parse';
-import {speechSupported, useSpeech} from './voice/useSpeech';
+import {narrationPhrases, parseNarration} from './voice/parse';
+import {useSpeech} from './voice/useSpeech';
+
+/** What the voice model is doing, while it's not showing words. */
+export const ACTIVITY = {loading: 'Loading the voice model…', hearing: 'Hearing you…', reading: 'Reading it…'} as const;
 
 /** Long enough for the HP to show after the text; the next move logs it sooner. */
 const COMMIT_AFTER_MS = 6000;
@@ -83,7 +86,8 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
     if (n.open) timer.current = window.setTimeout(() => commitNow('pause'), COMMIT_AFTER_MS);
   };
 
-  const {listening, interim, error, start, stop} = useSpeech(onFinal);
+  const {listening, interim, error, activity, start, stop} = useSpeech(onFinal,
+    () => narrationPhrases({battle: battleById(battleId)!, gen, mons: latest.current.result?.mons}));
   // Nothing is tapped while narrating, so the screen would otherwise lock mid-battle.
   useWakeLock(listening);
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -102,7 +106,6 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
     };
   }, []);
 
-  if (!speechSupported()) return null;
   const toggle = () => {
     if (listening) {
       stop();
@@ -119,7 +122,7 @@ export function VoiceBar({battleId, gen, result, run, ctxFor, onAskSwitch, onLog
       {(listening || draft || error) && (
         <div className="voice-panel">
           {error && <div className="note alert">{error}</div>}
-          {listening && <div className="voice-live">{interim ? `…${interim}` : 'Read the battle text as it appears; add HP where you have it.'}</div>}
+          {listening && <div className="voice-live">{interim ? `…${interim}` : activity ? ACTIVITY[activity] : 'Read the battle text as it appears; add HP where you have it.'}</div>}
           {draft && (
             <div className="voice-draft">
               <span>{draft}</span>

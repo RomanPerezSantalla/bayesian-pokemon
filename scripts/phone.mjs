@@ -5,7 +5,9 @@
  * phone to get it), serves it, opens a free Cloudflare quick tunnel to it and prints a QR code to
  * scan. The test copy reports back what happens on the phone: .cache/phone-log.jsonl gets each
  * voice phrase (what was heard and what it did), undos and errors; .cache/phone-battles/ gets each
- * battle as it's saved. So a test can be gone through afterwards.
+ * battle as it's saved; .cache/phone-audio/ each line the voice model heard. So a test can be gone
+ * through afterwards. It also serves the voice model (scripts/voice-pack.mjs, prepared on the first
+ * run) for the phone to download when voice is first turned on.
  *
  * The tunnel's address changes every run, and a phone keeps each address's data apart: keep this
  * running for a whole test session, or carry teams and battles over with a backup file.
@@ -14,10 +16,14 @@
  *   npm run phone -- --local   no tunnel: this PC only, at http://localhost:4180
  */
 import {spawn, spawnSync} from 'node:child_process';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
+import https from 'node:https';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import qrcode from 'qrcode-terminal';
+import QRCode from 'qrcode-terminal/vendor/QRCode/index.js';
+import QRErrorCorrectLevel from 'qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel.js';
 import {build, preview} from 'vite';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +31,8 @@ const cache = path.join(root, '.cache');
 const outDir = path.join(cache, 'phone-dist');
 const logFile = path.join(cache, 'phone-log.jsonl');
 const battleDir = path.join(cache, 'phone-battles');
+const audioDir = path.join(cache, 'phone-audio');
+const qrFile = path.join(cache, 'phone-qr.svg');
 const PORT = 4180;
 /** A bug report with a long battle is ~100 KB. */
 const MAX_BODY = 1 << 20;
@@ -35,6 +43,22 @@ const win = process.platform === 'win32';
 const rel = p => path.relative(root, p).replaceAll('\\', '/');
 
 fs.mkdirSync(battleDir, {recursive: true});
+fs.mkdirSync(audioDir, {recursive: true});
+// Last run's address is dead.
+fs.rmSync(qrFile, {force: true});
+
+/** The QR code as an image too, for a terminal that can't draw it cleanly. */
+function qrSvg(text) {
+  const qr = new QRCode(-1, QRErrorCorrectLevel.M);
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount();
+  const quiet = 4;
+  const size = n + quiet * 2;
+  let d = '';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + quiet} ${r + quiet}h1v1h-1z`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size * 8}" height="${size * 8}" shape-rendering="crispEdges"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>\n`;
+}
 
 // --- what the phone sends back (src/testlog.ts) ----------------------------------------------
 
@@ -49,6 +73,18 @@ function summary(e) {
       const parts = [...(e.did ?? []), ...(e.draft ? [`${e.draft} …`] : [])];
       return `heard “${e.heard?.[0] ?? ''}” → ${e.events?.length ? parts.join(' · ') || 'nothing to log' : "didn't understand"}`;
     }
+    case 'voice-preview': {
+      const unsure = (e.unsure ?? []).map(u => `“${u.heard}”: ${u.options.join(' / ')}?`);
+      const did = e.said?.length || unsure.length ? [...(e.said ?? []), ...unsure].join(' · ')
+        : e.battle ? 'the battle started' : e.side ? `(${e.side === 'mine' ? 'yours' : 'theirs'} next)` : "didn't understand";
+      return `team preview: heard “${e.heard?.[0] ?? ''}” → ${did}`;
+    }
+    case 'voice-heard': {
+      const spots = (e.spots ?? []).map(s => s.text);
+      const ms = e.ms ? ` (${e.ms.audio} ms of speech, read in ${e.ms.features + e.ms.model + e.ms.read} ms)` : '';
+      return `voice model: “${e.text}”${e.plain !== e.text ? ` (as heard: “${e.plain}”)` : ''}${spots.length ? ` · names: ${spots.join(', ')}` : ''}${ms}`;
+    }
+    case 'voice-model': return e.installed ? `voice model downloaded (${Math.round(e.size / 1e6)} MB)` : `voice model loaded in ${e.ms} ms (${e.threads} thread${e.threads === 1 ? '' : 's'})`;
     case 'voice-discard': return `✕ threw away: ${e.draft}`;
     case 'voice-error': return `voice: ${e.error}`;
     case 'undo': return `↶ undid ${e.undid ?? 'the last entry'}${e.narrated ? ' (logged by voice)' : ''}`;
@@ -96,6 +132,15 @@ function phoneLog() {
         req.on('end', () => {
           try {
             if (size > MAX_BODY) throw Object.assign(new Error('too big'), {status: 413});
+            if (req.url?.startsWith('/audio')) {
+              // A line the voice model heard (src/testlog.ts testLogAudio).
+              const id = new URL(req.url, 'http://x').searchParams.get('id') ?? '';
+              if (!/^[\w-]{1,80}$/.test(id)) throw new Error('bad id');
+              fs.writeFileSync(path.join(audioDir, `${id}.wav`), Buffer.concat(chunks));
+              res.statusCode = 204;
+              res.end();
+              return;
+            }
             const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             if (req.url?.startsWith('/battle')) saveBattle(body);
             else record(body);
@@ -111,6 +156,13 @@ function phoneLog() {
 }
 
 // --- build (and rebuild), serve ----------------------------------------------------------------
+
+// The voice model, for the phone to download when voice is first turned on (served at /voice/ by vite.config.ts).
+if (!fs.existsSync(path.join(cache, 'voice', 'pack', 'manifest.json'))) {
+  console.log('\n  Preparing the voice model (the first time, it downloads ~106 MB)…');
+  const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'voice-pack.mjs')], {stdio: 'inherit'});
+  if (r.status !== 0) console.error('  The voice model couldn’t be prepared: voice will offer the browser’s recogniser only.');
+}
 
 console.log('\n  Building the test copy…');
 const watcher = await build({
@@ -162,14 +214,71 @@ async function shutdown(code = 0) {
   await Promise.allSettled([watcher.close(), server.close()]);
   process.exit(code);
 }
-process.on('SIGINT', () => void shutdown(0));
-process.on('SIGTERM', () => void shutdown(0));
+// Ctrl+C, or the terminal (tab) closing.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => void shutdown(0));
 
 const footer = () => {
   console.log(`  Reload the page on the phone after a rebuild (pull down on any page but a battle, or the browser menu).`);
-  console.log(`  Test log: ${rel(logFile)}   Battles: ${rel(battleDir)}/`);
+  console.log(`  Test log: ${rel(logFile)}   Battles: ${rel(battleDir)}/   Voice lines: ${rel(audioDir)}/`);
   console.log('  Ctrl+C stops everything.\n');
 };
+
+/**
+ * Asks the zone's own name servers: unlike a Wi-Fi router, they never remember a "doesn't exist".
+ * (A router asked for the address before Cloudflare has published it holds on to that "no" for up
+ * to half an hour, and the phone can't open it meanwhile.)
+ */
+async function authoritativeResolver(zone) {
+  const servers = await dns.resolveNs(zone);
+  const ips = (await Promise.all(servers.map(s => dns.resolve4(s).catch(() => [])))).flat();
+  if (!ips.length) throw new Error(`no name servers for ${zone}`);
+  const resolver = new dns.Resolver({timeout: 3000, tries: 1});
+  resolver.setServers(ips);
+  return resolver;
+}
+
+/** The app answers through the tunnel, reached at `ip` without asking the local DNS. */
+function answers(host, ip) {
+  return new Promise(resolve => {
+    const req = https.get({host: ip, servername: host, headers: {host}, path: '/', timeout: 8000}, res => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+  });
+}
+
+async function live(address, ms) {
+  const host = new URL(address).hostname;
+  const until = Date.now() + ms;
+  let resolver = null;
+  while (Date.now() < until && !stopping) {
+    try {
+      resolver ??= await authoritativeResolver('trycloudflare.com');
+      const [ip] = await resolver.resolve4(host);
+      if (ip && await answers(host, ip)) return true;
+    } catch {
+      // Not published yet, or not connected yet.
+    }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  return false;
+}
+
+/** The QR code goes up only once the address works, so the phone's first look finds it. */
+async function showWhenLive(address) {
+  console.log('  Waiting for the address to go live…');
+  const ok = await live(address, 90_000);
+  if (stopping) return;
+  console.log(ok ? '\n  On your phone, scan this or type the address:\n' : '\n  The address isn’t answering yet; it may in a moment:\n');
+  qrcode.generate(address, {small: true}, qr => console.log(qr.replace(/^/gm, '  ')));
+  console.log(`  ${address}\n`);
+  fs.writeFileSync(qrFile, qrSvg(address));
+  console.log(`  (The QR code is also an image: ${rel(qrFile)})`);
+  console.log('  If the phone says the site doesn’t exist, its Wi-Fi router looked too early: use mobile data, or run this again.');
+  footer();
+}
 
 if (localOnly) {
   console.log(`\n  Serving the test copy at ${localUrl.replace('127.0.0.1', 'localhost')} (this PC only).`);
@@ -191,11 +300,7 @@ if (localOnly) {
       const m = !address && line.match(/https:\/\/[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com/);
       if (!m) continue;
       address = m[0];
-      console.log('\n  On your phone, scan this or type the address:\n');
-      qrcode.generate(address, {small: true}, qr => console.log(qr.replace(/^/gm, '  ')));
-      console.log(`  ${address}\n`);
-      console.log('  It can take a few seconds to start answering: reload if it doesn’t load at once.');
-      footer();
+      void showWhenLive(address);
     }
   };
   tunnel.stdout.on('data', read);
