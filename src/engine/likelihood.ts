@@ -15,7 +15,7 @@ import {
   type DamageOutcome, type MonSpec,
 } from './calc';
 import {DROP_REACT, DROP_REACT_ITEMS, announceLikelihood} from './abilities';
-import {CONTACT_PUNISH, attackerAbilityStatusChance, moveFx, moveStatusChance} from './moves';
+import {CONTACT_PUNISH, DAMAGE_NOT_FROM_STATS, attackerAbilityStatusChance, moveFx, moveStatusChance} from './moves';
 import {NO_ITEM, type FormeSpace, type MonSpace} from './prior';
 import {
   monKey, sameMon, type ActionEvent, type Battle, type BattleSettings, type HitResult, type MonCondition,
@@ -110,12 +110,13 @@ const curHPFromPct = (maxHP: number, pct: number) =>
 const QP = new Set(['Protosynthesis', 'Quark Drive']);
 
 /** Which of the hypothesis' stats can change the result of this calc. */
-function relevantStats(gen: Gen, moveName: string, role: 'attacker' | 'defender', ability: string): number[] {
+export function relevantStats(gen: Gen, moveName: string, role: 'attacker' | 'defender', ability: string): number[] {
   if (QP.has(ability)) return [0, 1, 2, 3, 4, 5];
   const id = toID(moveName);
   const out = role === 'attacker' ? [1, 3] : [0, 2, 4];
   if (role === 'attacker' && id === 'bodypress') out.push(2);
-  if (role === 'attacker' && ['eruption', 'waterspout', 'dragonenergy'].includes(id)) out.push(0);
+  // The user's HP: its share left (Eruption, Flail), or all of it (Final Gambit).
+  if (role === 'attacker' && ['eruption', 'waterspout', 'dragonenergy', 'flail', 'reversal', 'finalgambit'].includes(id)) out.push(0);
   if (role === 'defender' && id === 'foulplay') out.push(1);
   if (['gyroball', 'electroball'].includes(id)) out.push(5);
   if (!dexMove(gen, moveName)) return [0, 1, 2, 3, 4, 5];
@@ -192,13 +193,19 @@ export function hpCandidates(pct: number, max: number, settings: BattleSettings,
   return out;
 }
 
+/** A Focus Band hangs on at 1 HP one time in ten, at any HP. */
+const BAND = 0.1;
+
+/** The HP a roll leaves, with how likely: a Focus Band splits a KO into hanging on or not. */
+const outcomes = (after: number, band: boolean): [number, number][] => (after <= 0 && band ? [[after, 1 - BAND], [1, BAND]] : [[after, 1]]);
+
 /**
  * P(observed % change on an opponent | damage distribution, its max HP).
  * `sitrus`: the hypothesis holds an unused Sitrus Berry, which must have fired
- * exactly when the true HP dropped to half or less.
+ * exactly when the true HP dropped to half or less. `band`: it holds a Focus Band.
  */
 export function oppHitLikelihood(
-  dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, settings: BattleSettings, sitrus = false,
+  dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, settings: BattleSettings, sitrus = false, band = false,
 ) {
   if (hit.noEffect) return dist.get(0) ?? 0;
   const before = hpCandidates(hit.hpBefore, max, settings, hit.beforeApprox);
@@ -207,37 +214,45 @@ export function oppHitLikelihood(
   for (const hb of before) {
     for (const [roll, p] of dist) {
       if (roll === 0) continue;
-      let ha = hb - roll;
-      if (ha <= 0 && survives && hb === max) ha = 1;
-      let ok: boolean;
-      if (hit.fainted) ok = ha <= 0;
-      else if (ha <= 0) ok = false;
-      else {
-        ok = pctConsistent(ha, max, hit.hpAfter, settings);
-        if (ok && sitrus) ok = (ha <= Math.floor(max / 2)) === sawSitrus;
+      let left = hb - roll;
+      if (left <= 0 && survives && hb === max) left = 1;
+      for (const [ha, w] of outcomes(left, band)) {
+        let ok: boolean;
+        if (hit.fainted) ok = ha <= 0;
+        else if (ha <= 0) ok = false;
+        else {
+          // Read once the berry had healed it: the screen showed a quarter more.
+          const shown = hit.healed ? Math.min(max, ha + Math.floor(max / 4)) : ha;
+          ok = pctConsistent(shown, max, hit.hpAfter, settings);
+          if (ok && sitrus) ok = (ha <= Math.floor(max / 2)) === sawSitrus;
+        }
+        if (ok) total += p * w;
       }
-      if (ok) total += p;
     }
   }
   return total / before.length;
 }
 
 /** P(observed exact HP change on my Pokémon | damage distribution). Off-by-one readings allowed, weakly. */
-export function myHitLikelihood(dist: Map<number, number>, hit: HitResult, max: number, survives: boolean) {
+export function myHitLikelihood(dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, band = false) {
   if (hit.noEffect) return dist.get(0) ?? 0;
   const b = hit.hpBefore;
   let total = 0;
   for (const [roll, p] of dist) {
     if (roll === 0) continue;
-    let after = b - roll;
-    if (after <= 0 && survives && b === max) after = 1;
-    if (hit.fainted) {
-      if (after <= 0) total += p;
-      continue;
+    let left = b - roll;
+    if (left <= 0 && survives && b === max) left = 1;
+    for (const [after, w] of outcomes(left, band)) {
+      if (hit.fainted) {
+        if (after <= 0) total += p * w;
+        continue;
+      }
+      if (after <= 0) continue;
+      // Read once its Sitrus Berry had healed it, which it only does at half HP or less.
+      if (hit.healed && after > Math.floor(max / 2)) continue;
+      const diff = Math.abs((hit.healed ? Math.min(max, after + Math.floor(max / 4)) : after) - hit.hpAfter);
+      total += p * w * (diff === 0 ? 1 : diff === 1 ? 0.2 : 0);
     }
-    if (after <= 0) continue;
-    const diff = Math.abs(after - hit.hpAfter);
-    total += p * (diff === 0 ? 1 : diff === 1 ? 0.2 : 0);
   }
   return total;
 }
@@ -260,12 +275,34 @@ export function berryApplies(item: string, moveType: string, eff: number) {
 
 // --- Action events ------------------------------------------------------------
 
+/**
+ * How many times running the actor used this move just before (for Metronome): once a turn, since
+ * it last came in, with nothing else in between.
+ */
+export function usesInARow(battle: Battle, ev: ActionEvent): number {
+  let run = 0;
+  let lastTurn = -99;
+  for (const e of battle.events) {
+    if (e.id === ev.id) break;
+    if (e.kind === 'switch' && e.side === ev.actor.side && (e.slotIn === ev.actor.slot || e.slotOut === ev.actor.slot)) {
+      run = 0;
+      lastTurn = -99;
+    }
+    if (e.kind !== 'action' || !sameMon(e.actor, ev.actor)) continue;
+    run = e.move === ev.move && !e.failed ? (e.turn === lastTurn + 1 ? run + 1 : 1) : 0;
+    lastTurn = e.turn;
+  }
+  return lastTurn === ev.turn - 1 ? run : 0;
+}
+
 export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
   const {gen, fmt, battle} = ctx;
   const snap = ev.before;
   const out: SlotLikelihood[] = [];
   const aura = auras(ctx, snap);
-  const damaging = isDamagingMove(gen, ev.move);
+  // A move whose damage isn't down to stats (Counter, Super Fang, a one-hit KO) is no evidence about them.
+  const damaging = isDamagingMove(gen, ev.move) && !DAMAGE_NOT_FROM_STATS.has(toID(ev.move));
+  const metronome = usesInARow(battle, ev);
   const moveData = dexMove(gen, ev.move);
   const fx = moveFx(ev.move);
   const contact = !!moveData?.flags?.contact || !!fx.ct;
@@ -297,7 +334,8 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       const defender = makePokemon(gen, spec, myCond, faintedCount(snap, 'me'), hit.hpBefore);
       const myMax = defender.maxHP();
       const survives = (!myCond.itemGone && set.item === 'Focus Sash') || spec.ability === 'Sturdy';
-      const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets});
+      const band = !myCond.itemGone && set.item === 'Focus Band';
+      const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome});
       const multi = (ev.hitCount ?? 1) > 1;
 
       const repr = (fi: number, item: string) => {
@@ -324,7 +362,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
           const attacker = makePokemon(gen, cls === 'n' ? {...v.spec, item: NO_ITEM} : v.spec, oppCond,
             faintedCount(snap, 'opp'), curHPFromPct(v.stats[0], oppCond.hp));
           const res = runCalc(gen, attacker, defender, mv, field);
-          lik = myHitLikelihood(res.dist, hit, myMax, survives && !multi);
+          lik = myHitLikelihood(res.dist, hit, myMax, survives && !multi, band);
           memo.set(key, lik);
         }
         raw[h] = lik;
@@ -348,7 +386,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
 
     // Life Orb announces itself after every damaging hit.
     const dealt = ev.hits.some(x => x.target.side === 'me' && !x.noEffect && !x.unread
-      && (x.beforeUnknown || x.fainted || x.hpAfter < x.hpBefore));
+      && (x.beforeUnknown || x.fainted || x.healed || x.hpAfter < x.hpBefore));
     if (damaging && dealt) {
       const seen = ev.actorTriggers.includes('lifeorb');
       const raw = new Float64Array(space.n);
@@ -376,7 +414,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     const space = ctx.spaces[slot];
     if (!space || hit.unread) continue;
     const oppCond = condOf(snap, hit.target, hit.hpBefore);
-    const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets});
+    const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome});
     const multi = (ev.hitCount ?? 1) > 1;
     const repr = (fi: number, item: string) => {
       const forme = space.formes[fi];
@@ -389,8 +427,8 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       }, oppCond, faintedCount(snap, 'opp'), curHPFromPct(stats[0], hit.hpBefore));
       return runCalc(gen, attacker, d, mv, field);
     };
-    // Focus Sash changes survival and Sitrus is tied to the HP threshold: neither shows in the rolls.
-    const classes = itemClasses(space, repr, item => item === 'Focus Sash' || item === 'Sitrus Berry');
+    // Focus Sash and Focus Band change survival and Sitrus is tied to the HP threshold: none shows in the rolls.
+    const classes = itemClasses(space, repr, item => item === 'Focus Sash' || item === 'Focus Band' || item === 'Sitrus Berry');
 
     const raw = new Float64Array(space.n);
     const trig = new Float64Array(space.n);
@@ -408,7 +446,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         const has = !oppCond.itemGone;
         const survives = !multi && ((cls === 'Focus Sash' && has) || v.ability === 'Sturdy');
         m = {
-          lik: oppHitLikelihood(res.dist, hit, res.maxHP, survives, battle.settings, cls === 'Sitrus Berry' && has),
+          lik: oppHitLikelihood(res.dist, hit, res.maxHP, survives, battle.settings, cls === 'Sitrus Berry' && has, cls === 'Focus Band' && has),
           type: res.moveType,
           eff: res.effectiveness,
         };
@@ -427,7 +465,8 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       const wp = has && landed && v.item === 'Weakness Policy' && m.eff > 1 && !hit.fainted;
       if (ev.narrated ? tr.includes('wp') && !wp : tr.includes('wp') !== wp) t = 0;
       if (tr.includes('sitrus') && !(has && v.item === 'Sitrus Berry')) t = 0;
-      if (tr.includes('sash') && !((has && v.item === 'Focus Sash') || v.ability === 'Sturdy')) t = 0;
+      // "Hung on": a Focus Sash or Band, or Sturdy.
+      if (tr.includes('sash') && !((has && (v.item === 'Focus Sash' || v.item === 'Focus Band')) || v.ability === 'Sturdy')) t = 0;
       // A guaranteed stat drop the user was asked about (Defiant, Competitive, Clear Amulet…).
       if (hit.reaction !== undefined && landed && !hit.fainted) {
         t *= announceLikelihood(hit.reaction, v.ability, has ? v.item : '', DROP_REACT, DROP_REACT_ITEMS);

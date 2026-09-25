@@ -8,13 +8,13 @@
  */
 import {toID, type BoostID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
-import {makePokemon} from './calc';
+import {makePokemon, typeEffectiveness} from './calc';
 import {megaFormeOf, mySpec} from './likelihood';
 import {reactionEffect} from './abilities';
 import {moveFx, type MoveFx} from './moves';
 import {
-  monKey, type ActionEvent, type Battle, type Boosts, type CheckEvent, type FieldCondition, type MonCondition, type MonRef, type SideID,
-  type Snapshot, type Weather,
+  monKey, type ActionEvent, type Battle, type Boosts, type CheckEvent, type FieldCondition, type MonCondition, type MonRef, type SideCondition,
+  type SideID, type Snapshot, type Status, type Weather,
 } from './types';
 
 export interface StateCtx {
@@ -97,23 +97,41 @@ function setTimed(field: FieldCondition, key: string, turns: number) {
   field.turns = {...(field.turns ?? {}), [key]: turns};
 }
 
-function setWeather(field: FieldCondition, w: Weather) {
+/** The rock that makes the setter's weather last 8 turns instead of 5. */
+const WEATHER_ROCK: Partial<Record<Weather, string>> = {Sun: 'Heat Rock', Rain: 'Damp Rock', Sand: 'Smooth Rock', Snow: 'Icy Rock'};
+
+function setWeather(field: FieldCondition, w: Weather, item?: string) {
   field.weather = w;
-  setTimed(field, 'weather', 5);
+  setTimed(field, 'weather', item && WEATHER_ROCK[w] === item ? 8 : 5);
 }
 
-function applyFieldEffects(live: Snapshot, side: SideID, fx: MoveFx) {
+function setTerrain(field: FieldCondition, t: FieldCondition['terrain'], item?: string) {
+  field.terrain = t;
+  setTimed(field, 'terrain', item === 'Terrain Extender' ? 8 : 5);
+}
+
+/** A room (Trick Room, Magic Room, Wonder Room): used again while it's up, it ends. */
+function toggleRoom(f: FieldCondition, key: 'trickRoom' | 'magicRoom' | 'wonderRoom') {
+  f[key] = !f[key];
+  if (f[key]) setTimed(f, key, 5);
+  else delete f.turns?.[key];
+}
+
+const SCREENS = ['reflect', 'lightScreen', 'auroraVeil'] as const;
+
+function clearHazards(f: FieldCondition, side: SideID) {
+  f[side] = {...f[side], stealthRock: false, spikes: 0, toxicSpikes: 0, stickyWeb: false};
+}
+
+function applyFieldEffects(ctx: StateCtx, live: Snapshot, actor: MonRef, fx: MoveFx, landed: boolean) {
   const f = live.field;
-  if (fx.w) setWeather(f, WEATHER[fx.w]);
-  if (fx.tr) {
-    f.terrain = (fx.tr.charAt(0).toUpperCase() + fx.tr.slice(1)) as FieldCondition['terrain'];
-    setTimed(f, 'terrain', 5);
-  }
-  if (fx.pw === 'trickroom') {
-    f.trickRoom = !f.trickRoom;
-    if (f.trickRoom) setTimed(f, 'trickRoom', 5);
-    else delete f.turns?.trickRoom;
-  }
+  const side = actor.side;
+  const item = knownItem(ctx, live, actor);
+  if (fx.w) setWeather(f, WEATHER[fx.w], item);
+  if (fx.tr) setTerrain(f, (fx.tr.charAt(0).toUpperCase() + fx.tr.slice(1)) as FieldCondition['terrain'], item);
+  if (fx.pw === 'trickroom') toggleRoom(f, 'trickRoom');
+  if (fx.pw === 'magicroom') toggleRoom(f, 'magicRoom');
+  if (fx.pw === 'wonderroom') toggleRoom(f, 'wonderRoom');
   if (fx.pw === 'gravity') {
     f.gravity = true;
     setTimed(f, 'gravity', 5);
@@ -121,21 +139,173 @@ function applyFieldEffects(live: Snapshot, side: SideID, fx: MoveFx) {
   if (fx.sc) {
     const key = fx.sc === 'lightscreen' ? 'lightScreen' : fx.sc === 'auroraveil' ? 'auroraVeil' : fx.sc;
     f[side] = {...f[side], [key]: true};
-    setTimed(f, `${side}.${key}`, fx.sc === 'tailwind' ? 4 : 5);
+    setTimed(f, `${side}.${key}`, fx.sc === 'tailwind' ? 4 : item === 'Light Clay' ? 8 : 5);
+  }
+  const foeSide = foe(side);
+  if (fx.hz === 'stealthrock') f[foeSide] = {...f[foeSide], stealthRock: true};
+  if (fx.hz === 'stickyweb') f[foeSide] = {...f[foeSide], stickyWeb: true};
+  if (fx.hz === 'spikes') f[foeSide] = {...f[foeSide], spikes: Math.min(3, (f[foeSide].spikes ?? 0) + 1)};
+  if (fx.hz === 'toxicspikes') f[foeSide] = {...f[foeSide], toxicSpikes: Math.min(2, (f[foeSide].toxicSpikes ?? 0) + 1)};
+  if (fx.clr === 'self' && landed) clearHazards(f, side);
+  if (fx.clr === 'all') for (const s of ['me', 'opp'] as const) clearHazards(f, s);
+  if (fx.clr === 'defog') {
+    for (const s of ['me', 'opp'] as const) clearHazards(f, s);
+    f[foeSide] = {...f[foeSide], reflect: false, lightScreen: false, auroraVeil: false};
+    for (const k of SCREENS) delete f.turns?.[`${foeSide}.${k}`];
+    f.terrain = undefined;
+    delete f.turns?.terrain;
+  }
+  if (fx.clr === 'swap') {
+    const turns: Record<string, number> = {};
+    for (const [key, left] of Object.entries(f.turns ?? {})) {
+      const [s, cond] = key.split('.');
+      turns[cond && (s === 'me' || s === 'opp') ? `${foe(s)}.${cond}` : key] = left;
+    }
+    [f.me, f.opp] = [f.opp, f.me];
+    f.turns = turns;
   }
 }
 
 function switchInAbility(ctx: StateCtx, live: Snapshot, ref: MonRef, ability: string | undefined) {
   if (!ability) return;
+  const item = knownItem(ctx, live, ref);
   const w = WEATHER_ABILITY[ability];
-  if (w) setWeather(live.field, w);
+  if (w) setWeather(live.field, w, item);
   const t = TERRAIN_ABILITY[ability];
-  if (t) {
-    live.field.terrain = t;
-    setTimed(live.field, 'terrain', 5);
-  }
+  if (t) setTerrain(live.field, t, item);
   if (ability === 'Intimidate') applyIntimidate(ctx, live, ref, 1);
 }
+
+/** Its types (as a Mega once it has evolved, where that's known). */
+function typesOf(ctx: StateCtx, live: Snapshot, ref: MonRef): string[] {
+  const c = live.mons[monKey(ref)];
+  const species = ref.side === 'me'
+    ? mySpec(ctx.gen, ctx.fmt, ctx.battle.myTeam[ref.slot], c).species
+    : ctx.battle.oppPreview[ref.slot];
+  return [...(ctx.gen.species.get(toID(species))?.types ?? [])];
+}
+
+/** Berries that cure a status as soon as it's inflicted. */
+export const CURES: Record<string, Status[]> = {
+  'Lum Berry': ['brn', 'par', 'psn', 'tox', 'slp', 'frz'], 'Cheri Berry': ['par'], 'Chesto Berry': ['slp'],
+  'Pecha Berry': ['psn', 'tox'], 'Rawst Berry': ['brn'], 'Aspear Berry': ['frz'],
+};
+
+/** A status inflicted: none if it already has one, cured straight away by a berry it's known to hold. */
+function giveStatus(ctx: StateCtx, live: Snapshot, ref: MonRef, status: Status | undefined) {
+  const c = live.mons[monKey(ref)];
+  if (!status || !c || c.hp <= 0 || c.status) return;
+  const item = knownItem(ctx, live, ref);
+  if (item && CURES[item]?.includes(status)) c.itemGone = true;
+  else c.status = status;
+}
+
+/** HP lost as a fraction of its max: exact for mine, an estimate of the % for theirs. */
+function loseHP(ctx: StateCtx, live: Snapshot, ref: MonRef, frac: number, round: (x: number) => number = Math.floor) {
+  const c = live.mons[monKey(ref)];
+  if (!c || c.hp <= 0) return;
+  if (ref.side === 'me') c.hp = Math.max(0, c.hp - round(maxHPOf(ctx, live, ref) * frac));
+  else {
+    c.hp = Math.max(0, Math.round(c.hp - 100 * frac));
+    c.hpEstimated = true;
+  }
+}
+
+/** Off the ground: Flying, Levitate or an Air Balloon ("maybe": an ability or item of theirs not known yet could lift it). */
+function airborne(ctx: StateCtx, live: Snapshot, ref: MonRef): 'yes' | 'no' | 'maybe' {
+  const types = typesOf(ctx, live, ref);
+  const ability = knownAbility(ctx, live, ref);
+  const item = knownItem(ctx, live, ref);
+  if (types.includes('Flying') || ability === 'Levitate' || item === 'Air Balloon') return 'yes';
+  if (ref.side === 'me') return 'no';
+  const preview = ctx.battle.oppPreview[ref.slot];
+  const formes = ctx.fmt.preview[preview] ?? [preview];
+  const levitate = !ability && formes.some(f => (Object.values(ctx.gen.species.get(toID(f))?.abilities ?? {}) as string[]).includes('Levitate'));
+  const balloon = !item && formes.some(f => (ctx.fmt.species[f]?.items ?? []).some(([n]) => n === 'Air Balloon'));
+  return levitate || balloon ? 'maybe' : 'no';
+}
+
+/**
+ * Entry hazards on the way in. There are no Heavy-Duty Boots in Champions, so they're certain from
+ * types, except for what an unknown ability or item of theirs could change (Magic Guard, Levitate,
+ * an Air Balloon): then its HP is left unknown until it's read, rather than guessed.
+ */
+function entryHazards(ctx: StateCtx, live: Snapshot, ref: MonRef) {
+  const side: SideCondition = live.field[ref.side];
+  const c = live.mons[monKey(ref)];
+  if (!c || c.hp <= 0 || (!side.stealthRock && !side.spikes && !side.toxicSpikes && !side.stickyWeb)) return;
+  const ability = knownAbility(ctx, live, ref);
+  const preview = ctx.battle.oppPreview[ref.slot];
+  const maybeGuard = ref.side === 'opp' && !ability
+    && (ctx.fmt.preview[preview] ?? [preview]).some(f => (ctx.fmt.species[f]?.abilities ?? []).some(([n]) => n === 'Magic Guard'));
+  const air = airborne(ctx, live, ref);
+  const types = typesOf(ctx, live, ref);
+  let frac = 0;
+  if (side.stealthRock) frac += typeEffectiveness(ctx.gen, 'Rock', types) / 8;
+  if (side.spikes && air !== 'yes') frac += [0, 1 / 8, 1 / 6, 1 / 4][Math.min(3, side.spikes)];
+  if (frac && ability !== 'Magic Guard') {
+    if (maybeGuard || (side.spikes && air === 'maybe')) c.hpUnknown = true;
+    else loseHP(ctx, live, ref, frac);
+  }
+  if (air !== 'no') return;
+  if (side.toxicSpikes) {
+    // A grounded Poison type soaks them up.
+    if (types.includes('Poison')) live.field[ref.side] = {...side, toxicSpikes: 0};
+    else if (!types.includes('Steel')) giveStatus(ctx, live, ref, side.toxicSpikes >= 2 ? 'tox' : 'psn');
+  }
+  if (side.stickyWeb) dropStats(ctx, live, ref, {spe: -1});
+}
+
+/** Knock Off, Thief, Bug Bite: the target's item taken, as far as it's known there was one to take. */
+function takeItem(ctx: StateCtx, live: Snapshot, ev: ActionEvent, fx: MoveFx, target: MonRef) {
+  if (!fx.it || fx.it === 'fling' || ev.failed) return;
+  const c = live.mons[monKey(target)];
+  if (!c || c.itemGone) return;
+  // A Mega Stone can't be taken from the Pokémon it's for.
+  const set = target.side === 'me' ? ctx.battle.myTeam[target.slot] : undefined;
+  if ((set && megaFormeOf(ctx.gen, set)) || (target.side === 'opp' && c.mega)) return;
+  if (fx.it === 'knock') c.itemGone = true;
+  if (fx.it === 'steal') {
+    // Only a thief with nothing in hand takes it (known for mine).
+    const thief = ev.actor.side === 'me' ? ctx.battle.myTeam[ev.actor.slot] : undefined;
+    if (thief && (!thief.item || live.mons[monKey(ev.actor)]?.itemGone)) c.itemGone = true;
+  }
+  if (fx.it === 'eat' && /Berry$/.test(knownItem(ctx, live, target) ?? '')) c.itemGone = true;
+}
+
+/** Stat stages set, copied, reset or swapped by the move (Belly Drum, Haze, Psych Up…). */
+function stageOps(ctx: StateCtx, live: Snapshot, ev: ActionEvent, op: NonNullable<MoveFx['bo']>) {
+  const actor = live.mons[monKey(ev.actor)];
+  if (!actor) return;
+  const target = ev.targetRefs?.[0] ?? ev.hits.find(h => !h.noEffect)?.target;
+  const t = target ? live.mons[monKey(target)] : undefined;
+  const swap = (keys: ('atk' | 'def' | 'spa' | 'spd')[]) => {
+    if (!t) return;
+    const a = {...actor.boosts};
+    const b = {...t.boosts};
+    for (const k of keys) [a[k], b[k]] = [b[k], a[k]];
+    actor.boosts = a;
+    t.boosts = b;
+  };
+  if (op === 'max') actor.boosts = {...actor.boosts, atk: 6};
+  if (op === 'curse') {
+    if (typesOf(ctx, live, ev.actor).includes('Ghost')) loseHP(ctx, live, ev.actor, 1 / 2);
+    else raiseStats(live, ev.actor, {atk: 1, def: 1, spe: -1});
+  }
+  if (op === 'haze') {
+    for (const s of ['me', 'opp'] as const) {
+      for (const slot of live.active[s]) if (slot !== null && live.mons[`${s}${slot}`]) live.mons[`${s}${slot}`].boosts = {};
+    }
+  }
+  if (op === 'clear') for (const h of ev.hits) if (!h.noEffect && live.mons[monKey(h.target)]) live.mons[monKey(h.target)].boosts = {};
+  if (op === 'copy' && t) actor.boosts = {...t.boosts};
+  if (op === 'invert' && t) t.boosts = Object.fromEntries(Object.entries(t.boosts).map(([k, v]) => [k, -(v ?? 0)]));
+  if (op === 'swapdef') swap(['def', 'spd']);
+  if (op === 'swapatk') swap(['atk', 'spa']);
+}
+
+/** How HP costs are rounded, as the games do it (the rest round down). */
+const COST_ROUND: Record<string, (x: number) => number> = {shedtail: Math.ceil, mindblown: Math.round, steelbeam: Math.round, chloroblast: Math.round};
 
 /** What an Intimidate does to one target, with the reactions we can see coming. */
 function intimidateDelta(ctx: StateCtx, live: Snapshot, target: MonRef): Boosts {
@@ -180,9 +350,9 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
       t.hpEstimated = false;
       t.hpUnknown = false;
     }
-    if (hit.status && !t.status) t.status = hit.status;
+    giveStatus(ctx, next, hit.target, hit.status);
     if (hit.triggers.some(x => x === 'berry' || x === 'sash' || x === 'wp' || x === 'sitrus')) t.itemGone = true;
-    if (hit.triggers.includes('sitrus') && !hit.fainted) t.hp = Math.min(max, t.hp + Math.floor(max / 4));
+    if (hit.triggers.includes('sitrus') && !hit.fainted && !hit.healed) t.hp = Math.min(max, t.hp + Math.floor(max / 4));
     // My own Focus Sash saving me from full HP (which also turns on Unburden).
     if (hit.target.side === 'me' && !hit.unread && !hit.fainted && hit.hpAfter === 1 && hit.hpBefore === max
       && knownItem(ctx, next, hit.target) === 'Focus Sash') t.itemGone = true;
@@ -192,7 +362,14 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
         t.hp = Math.min(max, t.hp + Math.floor(max / 4));
         t.itemGone = true;
       }
+      if (knownItem(ctx, next, hit.target) === 'Oran Berry' && t.hp <= Math.floor(max / 2)) {
+        t.hp = Math.min(max, t.hp + 10);
+        t.itemGone = true;
+      }
     }
+    // An Air Balloon pops at the first hit.
+    if (knownItem(ctx, next, hit.target) === 'Air Balloon') t.itemGone = true;
+    takeItem(ctx, next, ev, fx, hit.target);
     if (hit.fainted) {
       next.mons[key] = {...t, boosts: {}};
       continue;
@@ -204,7 +381,7 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
         dropStats(ctx, next, hit.target, s.b);
         Object.assign(drops, s.b);
       }
-      if (s.ch >= 100 && s.st && !next.mons[key].status) next.mons[key] = {...next.mons[key], status: s.st};
+      if (s.ch >= 100 && s.st) giveStatus(ctx, next, hit.target, s.st);
     }
     if (hit.boosts) dropStats(ctx, next, hit.target, hit.boosts);
     if (hit.reaction) applyReaction(next, hit.target, hit.reaction, drops);
@@ -214,17 +391,33 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
     const landed = !damaging || ev.hits.some(h => !h.noEffect);
     if (landed && fx.sb) raiseStats(next, ev.actor, fx.sb);
     for (const s of fx.sec ?? []) if (landed && s.ch >= 100 && s.sb) raiseStats(next, ev.actor, s.sb);
+    if (landed && ev.actorBoosts) raiseStats(next, ev.actor, ev.actorBoosts);
     for (const target of ev.targetRefs ?? []) {
       if (fx.tb) dropStats(ctx, next, target, fx.tb);
-      const tc = next.mons[monKey(target)];
-      if (fx.st && tc && !tc.status && tc.hp > 0) next.mons[monKey(target)] = {...tc, status: fx.st};
+      giveStatus(ctx, next, target, fx.st);
     }
-    applyFieldEffects(next, ev.actor.side, fx);
+    applyFieldEffects(ctx, next, ev.actor, fx, landed);
+    if (fx.bo) stageOps(ctx, next, ev, fx.bo);
+    // Growth is doubled in the sun.
+    const sun = next.field.weather === 'Sun' || next.field.weather === 'Harsh Sunshine';
+    if (toID(ev.move) === 'growth' && sun) raiseStats(next, ev.actor, {atk: 1, spa: 1});
+    if (fx.hpc) loseHP(ctx, next, ev.actor, fx.hpc, COST_ROUND[toID(ev.move)]);
+    const self = next.mons[actorKey];
+    if (self) {
+      if (fx.it === 'fling') self.itemGone = true;
+      // A Normal Gem goes with the first Normal move it powers.
+      const moveType = ctx.gen.moves.get(toID(ev.move))?.type;
+      if (landed && damaging && moveType === 'Normal' && knownItem(ctx, next, ev.actor) === 'Normal Gem') self.itemGone = true;
+      // Healed or hurt by an amount of the damage it dealt (Drain Punch, Brave Bird): unknown until it's read.
+      if ((fx.dr || fx.rc) && ev.hits.some(h => !h.noEffect)) self.hpUnknown = true;
+      // Explosion always; Memento, Final Gambit and Healing Wish once they work.
+      if (fx.sd === 1 || (fx.sd === 2 && landed)) next.mons[actorKey] = {...self, hp: 0, boosts: {}, hpUnknown: false, hpEstimated: false};
+    }
   }
 
   const actor = next.mons[actorKey];
   if (actor) {
-    if (ev.actorStatus && !actor.status) actor.status = ev.actorStatus;
+    giveStatus(ctx, next, ev.actor, ev.actorStatus);
     const max = maxHPOf(ctx, next, ev.actor);
     const dealt = ev.hits.some(h => !h.noEffect);
     const lifeOrb = ev.actor.side === 'opp'
@@ -238,6 +431,11 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
     if (ev.actorTriggers.includes('helmet') || lifeOrb) {
       // HP after recoil is computed, not read off the screen.
       if (ev.actor.side === 'opp') actor.hpEstimated = true;
+    }
+    // Read off the screen after all that: where it really is.
+    if (ev.actorHpAfter !== undefined) {
+      Object.assign(actor, {hp: Math.min(max, ev.actorHpAfter), hpUnknown: false, hpEstimated: false});
+      if (actor.hp <= 0) actor.boosts = {};
     }
   }
   return next;
@@ -259,6 +457,7 @@ export function applySwitch(
     if (c) next.mons[`${side}${out}`] = {...c, boosts: {}, abilityOn: false, toxic: 0};
   }
   positions[position] = slotIn;
+  if (slotIn !== null) entryHazards(ctx, next, {side, slot: slotIn});
   if (slotIn !== null && entryAbility) {
     const ref = {side, slot: slotIn};
     switchInAbility(ctx, next, ref, knownAbility(ctx, next, ref));
@@ -319,6 +518,8 @@ export function applyEndTurn(ctx: StateCtx, live: Snapshot): Snapshot {
     if (key === 'weather') f.weather = undefined;
     else if (key === 'terrain') f.terrain = undefined;
     else if (key === 'trickRoom') f.trickRoom = false;
+    else if (key === 'magicRoom') f.magicRoom = false;
+    else if (key === 'wonderRoom') f.wonderRoom = false;
     else if (key === 'gravity') f.gravity = false;
     else {
       const [side, cond] = key.split('.') as [SideID, keyof typeof f.me];

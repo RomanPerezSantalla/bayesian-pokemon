@@ -2,6 +2,7 @@
 import {Field, Move, Pokemon, calculate, type Result} from '@smogon/calc';
 import {getFinalSpeed} from '@smogon/calc/dist/mechanics/util';
 import {STAT_IDS, isSpreadMove, move as dexMove, toID, type Gen} from '../data/dex';
+import {moveFx} from './moves';
 import {NO_ITEM, OTHER_ITEM} from './prior';
 import type {FieldCondition, MonCondition, SideID} from './types';
 
@@ -71,6 +72,8 @@ export function makeField(
     weather: field.weather,
     terrain: field.terrain,
     isGravity: field.gravity,
+    isMagicRoom: !!field.magicRoom,
+    isWonderRoom: !!field.wonderRoom,
     isFairyAura: opts.fairyAura,
     isDarkAura: opts.darkAura,
     attackerSide: side(attackerSide, true),
@@ -78,11 +81,13 @@ export function makeField(
   } as ConstructorParameters<typeof Field>[0]);
 }
 
-export function makeMove(gen: Gen, name: string, opts: {crit?: boolean; hits?: number; targets?: number} = {}) {
+export function makeMove(gen: Gen, name: string, opts: {crit?: boolean; hits?: number; targets?: number; metronome?: number} = {}) {
   const overrides = isSpreadMove(gen, name) && (opts.targets ?? 2) < 2 ? {target: 'normal'} : undefined;
   return new Move(gen, name, {
     isCrit: opts.crit,
     hits: opts.hits,
+    // Uses of it just before, in a row: a Metronome holder hits harder each time.
+    timesUsedWithMetronome: opts.metronome,
     overrides: overrides as never,
   });
 }
@@ -135,22 +140,20 @@ export function finalSpeed(gen: Gen, mon: Pokemon, field: Field) {
   return getFinalSpeed(gen, mon, field, field.attackerSide);
 }
 
-const HEALING = new Set([
-  'drainpunch', 'drainingkiss', 'gigadrain', 'hornleech', 'leechlife', 'paraboliccharge', 'oblivionwing', 'roost',
-  'recover', 'softboiled', 'synthesis', 'moonlight', 'morningsun', 'slackoff', 'milkdrink', 'healorder', 'shoreup',
-  'strengthsap', 'lifedew', 'junglehealing', 'floralhealing', 'healpulse', 'wish', 'rest', 'absorb', 'megadrain',
-  'bitterblade', 'matchagotcha', 'lunarblessing', 'swallow', 'purify', 'drainingkiss', 'dreameater',
-]);
-
-/** Move priority including ability-based modifiers. */
+/**
+ * Move priority including ability-based modifiers. The calc has only the positive priorities;
+ * the negative ones (Trick Room −7, Roar −6, Counter −5, Avalanche −4…) come from the move table.
+ */
 export function movePriority(gen: Gen, moveName: string, ability: string | undefined, hpFull: boolean, field: FieldCondition) {
   const m = dexMove(gen, moveName);
   if (!m) return 0;
-  let p = m.priority ?? 0;
+  const fx = moveFx(m.name);
+  let p = m.priority ?? fx.pr ?? 0;
   const status = m.category === 'Status' || (!m.category && !m.basePower);
   if (ability === 'Prankster' && status) p += 1;
   if (ability === 'Gale Wings' && m.type === 'Flying' && hpFull) p += 1;
-  if (ability === 'Triage' && HEALING.has(m.id)) p += 3;
+  // Moves that heal (the draining ones too), as Showdown flags them.
+  if (ability === 'Triage' && fx.heal) p += 3;
   if (m.id === 'grassyglide' && field.terrain === 'Grassy') p += 1;
   return p;
 }

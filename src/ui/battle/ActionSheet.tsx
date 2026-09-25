@@ -13,6 +13,7 @@ import {Datalist, TYPE_COLORS, pct} from '../common';
 import {choiceLockedMove, helpedThisTurn, type ActionDraft} from './actions';
 import {Keypad, valueComplete} from './Keypad';
 import {monLabel} from './names';
+import {hitChoices, targetPlan} from './targets';
 
 interface Row {
   ref: MonRef;
@@ -28,11 +29,6 @@ interface Row {
   reaction?: string;
 }
 
-const SELF_TARGETS = new Set(['self', 'allySide', 'all', 'allies', 'adjacentAllyOrSelf', 'foeSide', 'randomNormal']);
-const MULTI_HIT = new Set([
-  'bulletseed', 'rockblast', 'iciclespear', 'scaleshot', 'tailslap', 'pinmissile', 'armthrust', 'furyattack',
-  'doubleslap', 'watershuriken', 'populationbomb', 'bonerush', 'furyswipes', 'tripleaxel', 'triplekick', 'dualwingbeat',
-]);
 const STATUS_LABEL: Record<string, string> = {brn: 'BRN', par: 'PAR', psn: 'PSN', tox: 'TOX', slp: 'SLP', frz: 'FRZ'};
 
 const has = (m: MonSummary | null | undefined, list: 'items' | 'abilities', name: string) =>
@@ -63,6 +59,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
   const [actorTriggers, setActorTriggers] = useState<Trigger[]>([]);
   const [actorStatus, setActorStatus] = useState<Status | undefined>();
   const [hitCount, setHitCount] = useState<number | undefined>();
+  const [actorBoosts, setActorBoosts] = useState<Boosts | undefined>();
   const [quick, setQuick] = useState<'Quick Claw' | 'Quick Draw' | null>(null);
   const [query, setQuery] = useState('');
 
@@ -129,6 +126,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
       helpingHand: helpedThisTurn(battle, actor),
       actorTriggers,
       actorStatus,
+      actorBoosts,
       targetRefs: over.targetRefs,
       failed: over.failed,
       ordered: true,
@@ -153,31 +151,16 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
     const m = dexMove(gen, name);
     if (!m) return;
     setMove(m.name);
-    const target = moveFx(m.name).tg ?? m.target ?? 'normal';
-    if (isStatusMove(gen, m.name)) {
-      if (SELF_TARGETS.has(target)) return commit({move: m.name, rows: [], targetRefs: []});
-      if (target === 'adjacentAlly') return commit({move: m.name, rows: [], targetRefs: allies});
-      if (target === 'allAdjacentFoes') return commit({move: m.name, rows: [], targetRefs: foes});
-      if (foes.length <= 1) return commit({move: m.name, rows: [], targetRefs: foes});
+    const plan = targetPlan(gen, m.name, foes, allies);
+    if (plan.kind === 'log') return commit({move: m.name, rows: [], targetRefs: plan.targets});
+    if (plan.kind === 'pick') {
       setStage('target');
       return;
     }
-    if (target === 'allAdjacentFoes' || target === 'allAdjacent') {
-      const list = target === 'allAdjacent' ? [...foes, ...allies] : foes;
-      setRows(list.map(newRow));
-      setSpreadCount(list.length);
-      setFocus(0);
-      setStage('result');
-      return;
-    }
-    if (foes.length <= 1) {
-      setRows(foes.map(newRow));
-      setSpreadCount(1);
-      setFocus(0);
-      setStage('result');
-      return;
-    }
-    setStage('target');
+    setRows(plan.targets.map(newRow));
+    setSpreadCount(Math.max(1, plan.targets.length));
+    setFocus(0);
+    setStage('result');
   };
 
   const pickTarget = (ref: MonRef) => {
@@ -303,6 +286,8 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
   };
 
   const chanceBoosts = (fx.sec ?? []).filter(s => s.ch < 100 && s.b);
+  // Its own, by chance: Meteor Mash's Attack, Ancient Power's everything.
+  const selfChance = (fx.sec ?? []).filter(s => s.ch < 100 && s.sb);
 
   // Guaranteed stat drops (Icy Wind, Snarl…) can set off Defiant, Competitive, Clear Amulet…
   const guaranteedDrop = (fx.sec ?? []).some(s => s.ch >= 100 && s.b && Object.values(s.b).some(v => (v ?? 0) < 0));
@@ -326,6 +311,8 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
     ? (['brn', 'par', 'psn', 'slp'] as Status[]).filter(st => oppTargets.some(m => m?.abilities.some(a => a.p > 0 && CONTACT_PUNISH[a.name]?.[st])))
     : [];
   const helmetPossible = actor.side === 'me' && contact && oppTargets.some(m => has(m, 'items', 'Rocky Helmet'));
+  // Hits, when the number varies (Bullet Seed 2–5, Triple Axel 1–3).
+  const hits = move ? hitChoices(move) : [];
   const lifeOrbPossible = actor.side === 'opp' && has(summary, 'items', 'Life Orb') && !live.mons[monKey(actor)]?.itemGone;
 
   const megaOptions = canMega(ctx, live, actor) && !live.mons[monKey(actor)]?.mega
@@ -477,15 +464,18 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
                 </div>
               );
             })}
-            {(lifeOrbPossible || helmetPossible || contactStatuses.length > 0 || MULTI_HIT.has(toID(move ?? ''))) && (
+            {(lifeOrbPossible || helmetPossible || contactStatuses.length > 0 || hits.length > 0 || selfChance.length > 0) && (
               <div className="chips">
                 {lifeOrbPossible && <span className={`chip warn-on${actorTriggers.includes('lifeorb') ? ' on' : ''}`} onClick={() => setActorTriggers(toggle(actorTriggers, 'lifeorb'))}>Life Orb recoil</span>}
                 {helmetPossible && <span className={`chip warn-on${actorTriggers.includes('helmet') ? ' on' : ''}`} onClick={() => setActorTriggers(toggle(actorTriggers, 'helmet'))}>Hurt by Rocky Helmet</span>}
                 {contactStatuses.map(st => (
                   <span key={st} className={`chip warn-on${actorStatus === st ? ' on' : ''}`} onClick={() => setActorStatus(actorStatus === st ? undefined : st)}>I got {STATUS_LABEL[st]}</span>
                 ))}
-                {MULTI_HIT.has(toID(move ?? '')) && [2, 3, 4, 5].map(n => (
+                {hits.map(n => (
                   <span key={n} className={`chip${hitCount === n ? ' on' : ''}`} onClick={() => setHitCount(hitCount === n ? undefined : n)}>{n} hits</span>
+                ))}
+                {selfChance.map((s, k) => (
+                  <span key={`self${k}`} className={`chip${actorBoosts ? ' on' : ''}`} onClick={() => setActorBoosts(actorBoosts ? undefined : s.sb)}>Its own {boostLabel(s.sb!)}</span>
                 ))}
               </div>
             )}

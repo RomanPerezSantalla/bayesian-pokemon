@@ -16,9 +16,30 @@ export function getGen(num: GenerationNum): Gen {
   let gen = gens.get(num);
   if (!gen) {
     gen = Generations.get(num);
+    if (num === 0) completeChampionsMoves(gen);
     gens.set(num, gen);
   }
   return gen;
+}
+
+/**
+ * @smogon/calc 0.12's Champions data has 86 moves with no category. The 75 status moves among them
+ * are fine (a move with no category and no power is a status move here), but the 11 attacking ones
+ * have no type, contact or hit count either, so the calc deals 0 with them: Metal Claw, and ten no
+ * Pokémon in Champions can learn (Anchor Shot, Bolt Beak, Triple Dive…) that are in its list all
+ * the same. They're filled in from the calc's own gen 9 data, which has them whole, keeping
+ * Champions' changes (Anchor Shot's 90 power).
+ */
+function completeChampionsMoves(gen: Gen) {
+  const sv = Generations.get(9);
+  for (const m of gen.moves) {
+    if (m.type) continue;
+    const full = sv.moves.get(m.id);
+    if (!full) continue;
+    const rec = m as unknown as Record<string, unknown>;
+    for (const [k, v] of Object.entries(full)) if (rec[k] === undefined) rec[k] = structuredClone(v);
+    rec.flags = {...full.flags, ...m.flags};
+  }
 }
 
 /** Champions (gen 0 in @smogon/calc) uses Stat Points instead of EVs. */

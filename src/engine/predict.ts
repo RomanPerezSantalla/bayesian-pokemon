@@ -3,6 +3,7 @@ import {isDamagingMove, toID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import {finalSpeed, makeField, makeMove, makePokemon, runCalc} from './calc';
 import {defaultCondition, hpCandidates, hypView, megaFormeOf, mySpec, oppOrderKey, type Ctx} from './likelihood';
+import {DAMAGE_NOT_FROM_STATS} from './moves';
 import {WEATHER_ABILITY} from './state';
 import type {MonBelief} from './posterior';
 import type {Battle, Snapshot} from './types';
@@ -157,7 +158,7 @@ function summarize(move: string, points: [pct: number, w: number][], ko: number,
 export function myMoveInto(
   fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, mySlot: number, move: string, snap: Snapshot,
 ): DamageMatchup | null {
-  if (!isDamagingMove(gen, move)) return null;
+  if (!isDamagingMove(gen, move) || DAMAGE_NOT_FROM_STATS.has(toID(move))) return null;
   const set = battle.myTeam[mySlot];
   const myCond = snap.mons[`me${mySlot}`] ?? defaultCondition(1);
   const oppCond = snap.mons[`opp${belief.slot}`] ?? defaultCondition(100);
@@ -205,7 +206,7 @@ export function myMoveInto(
 export function oppMoveInto(
   fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, mySlot: number, move: string, snap: Snapshot,
 ): DamageMatchup | null {
-  if (!isDamagingMove(gen, move)) return null;
+  if (!isDamagingMove(gen, move) || DAMAGE_NOT_FROM_STATS.has(toID(move))) return null;
   const set = battle.myTeam[mySlot];
   const myCond = snap.mons[`me${mySlot}`] ?? defaultCondition(1);
   const oppCond = snap.mons[`opp${belief.slot}`] ?? defaultCondition(100);

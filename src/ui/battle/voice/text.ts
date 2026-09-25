@@ -136,15 +136,17 @@ export interface Match<T> {
   /** Words used. */
   len: number;
   score: number;
+  /** It fit best without a trailing "s": "garchomps" (Garchomp's) is followed by its item or ability. */
+  possessive?: boolean;
 }
 
 /** Every candidate for the 1–3 words at `i`, best first, each with the words that fit it best. */
 export function rankAt<T>(words: string[], i: number, cands: Named<T>[], opts: MatchOptions = {}): Match<T>[] {
   const best = new Map<T, Match<T>>();
   if (opts.stop?.has(words[i] ?? '')) return [];
-  const keep = (value: T, len: number, score: number) => {
+  const keep = (value: T, len: number, score: number, possessive = false) => {
     const cur = best.get(value);
-    if (!cur || score > cur.score || (score === cur.score && len < cur.len)) best.set(value, {value, len, score});
+    if (!cur || score > cur.score || (score === cur.score && len < cur.len)) best.set(value, {value, len, score, possessive});
   };
   for (let n = 1; n <= 3 && i + n <= words.length; n++) {
     // A name doesn't run on past a number or a common word: "Celtic 3 Metagross" is two names.
@@ -153,7 +155,10 @@ export function rankAt<T>(words: string[], i: number, cands: Named<T>[], opts: M
     const forms = w.length > 4 && w.endsWith('s') ? [w, w.slice(0, -1)] : [w];
     for (const c of cands) {
       if (Math.abs(c.key.length - w.length) > Math.max(2, Math.ceil(c.key.length * 0.4))) continue;
-      keep(c.value, n, Math.max(...forms.map(f => likeness(f, c.key, opts))) + (c.bonus ?? 0));
+      const scores = forms.map(f => likeness(f, c.key, opts));
+      // By spelling, not sound: "metagrosss" sounds like Metagross but is Metagross's.
+      const possessive = forms.length > 1 && similarity(forms[1], c.key) > similarity(forms[0], c.key);
+      keep(c.value, n, Math.max(...scores) + (c.bonus ?? 0), possessive);
     }
   }
   if (opts.prefix) {
@@ -161,18 +166,20 @@ export function rankAt<T>(words: string[], i: number, cands: Named<T>[], opts: M
     const starts = w.length >= 4 ? cands.filter(c => w.length >= c.key.length * 0.4 && (c.key.startsWith(w) || soundOf(c.key).startsWith(soundOf(w)))) : [];
     if (starts.length && starts.every(c => c.value === starts[0].value)) keep(starts[0].value, 1, 0.8 + (starts[0].bonus ?? 0));
   }
-  return [...best.values()].sort((a, b) => b.score - a.score);
+  return [...best.values()].sort((a, b) => b.score - a.score || b.len - a.len);
 }
 
 /**
  * The candidate named by the 1–3 words at `i`, if it's clearly the one meant: close enough
  * (`min`) and ahead of the next-best different candidate by `margin`. A trailing "s" is
- * also tried without it, for possessives ("salamences intimidate").
+ * also tried without it, for possessives ("salamences intimidate"). A longer name that fits
+ * about as well as a shorter one from the same word is the one said: "Trick Room", not "Trick";
+ * "Beat Up", not "Bite" (which sounds like "beat").
  */
 export function matchAt<T>(words: string[], i: number, cands: Named<T>[], min = 0.72, margin = 0.08, opts: MatchOptions = {}): Match<T> | null {
   const [top, next] = rankAt(words, i, cands, opts);
   if (!top || top.score < min) return null;
-  if (next && top.score - next.score < margin) return null;
+  if (next && top.score - next.score < margin && top.len <= next.len) return null;
   return top;
 }
 

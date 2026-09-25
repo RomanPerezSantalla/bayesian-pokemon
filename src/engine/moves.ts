@@ -26,17 +26,44 @@ export interface MoveFx {
   w?: 'sun' | 'rain' | 'sand' | 'snow';
   tr?: 'electric' | 'grassy' | 'psychic' | 'misty';
   sc?: 'tailwind' | 'reflect' | 'lightscreen' | 'auroraveil';
-  pw?: 'trickroom' | 'gravity';
+  pw?: 'trickroom' | 'gravity' | 'magicroom' | 'wonderroom';
+  /** Entry hazard set on the foe's side. */
+  hz?: 'stealthrock' | 'spikes' | 'toxicspikes' | 'stickyweb';
+  /** Hazards cleared: the user's side (Rapid Spin), both (Tidy Up; Defog, with the target's screens), or swapped (Court Change). */
+  clr?: 'self' | 'all' | 'defog' | 'swap';
+  /** The user faints: 1 always (Explosion), 2 once it hits (Memento, Final Gambit, Healing Wish). */
+  sd?: 1 | 2;
+  /** HP the user pays, as a fraction of its max (Substitute, Belly Drum, Steel Beam…). */
+  hpc?: number;
+  /** Stat stages set, copied, reset or swapped. */
+  bo?: 'max' | 'curse' | 'haze' | 'clear' | 'copy' | 'invert' | 'swapdef' | 'swapatk';
+  /** Items: the target's knocked off (Knock Off), stolen (Thief), eaten if a berry (Bug Bite); the user's thrown (Fling). */
+  it?: 'knock' | 'steal' | 'eat' | 'fling';
   dr?: [number, number];
   rc?: [number, number];
   sw?: 1;
   heal?: 1;
+  /** Priority, when not 0. */
+  pr?: number;
+  /** Hits, when the number varies: [fewest, most]. */
+  mh?: [number, number];
   /** Showdown target, when not "normal" (the calc only has it for damaging moves). */
   tg?: string;
 }
 
 const table = raw as unknown as Record<string, MoveFx>;
 export const moveFx = (name: string): MoveFx => table[toID(name)] ?? {};
+
+/**
+ * Attacking moves whose damage doesn't come from the stats the calc sees: retaliation (Counter,
+ * Mirror Coat, Metal Burst, Comeuppance: the damage taken), a share of HP (Super Fang, Endeavor),
+ * one-hit KOs, Beat Up (the party's Attack) and Spit Up (the Stockpiles). The calc gives them
+ * nothing, so a hit logged with one says nothing about stats either way.
+ */
+export const DAMAGE_NOT_FROM_STATS: ReadonlySet<string> = new Set([
+  'counter', 'mirrorcoat', 'metalburst', 'comeuppance', 'superfang', 'endeavor', 'fissure', 'guillotine', 'horndrill',
+  'sheercold', 'beatup', 'spitup',
+]);
 
 /** Chance a hit of this move inflicts `status` by itself (Serene Grace doubles it). */
 export function moveStatusChance(name: string, status: Status, sereneGrace = false): number {

@@ -758,6 +758,87 @@ Careful Nature
     expect(r.last().hits[0]).toMatchObject({target: me(0), fainted: true, crit: true});
   });
 
+  describe('things added after the move was logged', () => {
+    it('"it crit" reopens the move it goes with, and logs it again with the crit', () => {
+      const r = doubles();
+      r.say('The opposing Salamence used Dragon Claw! Charizard 45');
+      r.n.commit();
+      r.say('it crit');
+      expect(r.n.open).toBe(true);
+      r.n.commit();
+      expect(turnActions(r.b)).toHaveLength(1);
+      expect(r.last().hits[0]).toMatchObject({target: me(0), hpAfter: 45, crit: true});
+    });
+
+    it('an HP said late fills in the one that was skipped', () => {
+      const r = doubles();
+      r.say('The opposing Salamence used Dragon Claw on Charizard');
+      r.n.commit();
+      expect(r.last().hits[0].unread).toBe(true);
+      r.say('Charizard 45');
+      r.n.commit();
+      expect(turnActions(r.b)).toHaveLength(1);
+      expect(r.last().hits[0]).toMatchObject({target: me(0), hpAfter: 45, fainted: false});
+      expect(r.last().hits[0].unread).toBeUndefined();
+    });
+
+    it("only the last move, and only about whoever was in it", () => {
+      const r = doubles();
+      r.say('The opposing Salamence used Dragon Claw! Charizard 45');
+      r.say('Garchomp used Protect');
+      // Protect hit nothing: a crit can't be about it, and Salamence's move isn't the last any more.
+      expect(r.say('it crit')).toEqual(['A crit: on which move? Say it with the move']);
+      expect(r.say('The opposing Rillaboom 50')).toEqual(['HP 50 not placed (no move open)']);
+      expect(turnActions(r.b).map(a => a.move)).toEqual(['Dragon Claw', 'Protect']);
+    });
+  });
+
+  describe('turn order said in words', () => {
+    // Charizard's Weather Ball and Rillaboom's Grassy Glide touch different Pokémon's HP, so they can trade places.
+    const twoMoves = () => {
+      const r = doubles();
+      r.say('Charizard used Weather Ball on the opposing Salamence. The opposing Salamence 50');
+      r.say('The opposing Rillaboom used Grassy Glide! Garchomp 100');
+      r.n.commit();
+      return r;
+    };
+    const order = (r: ReturnType<typeof doubles>) => turnActions(r.b).map(a => `${a.actor.side}${a.actor.slot}`);
+
+    it('"Rillaboom moved first" moves its move to the front of the turn', () => {
+      const r = twoMoves();
+      expect(order(r)).toEqual(['me0', 'opp1']);
+      expect(r.say('Rillaboom moved first').join(' ')).toMatch(/moved first ✓/);
+      expect(order(r)).toEqual(['opp1', 'me0']);
+    });
+
+    it('"outsped" and "went last" say where against whom', () => {
+      const r = twoMoves();
+      r.say('The opposing Rillaboom outsped Charizard');
+      expect(order(r)).toEqual(['opp1', 'me0']);
+      r.say('The opposing Rillaboom went last');
+      expect(order(r)).toEqual(['me0', 'opp1']);
+    });
+
+    it('said before its move is logged, it takes that place once it is', () => {
+      const r = doubles();
+      r.say('Charizard used Weather Ball on the opposing Salamence. The opposing Salamence 50');
+      expect(r.say('Rillaboom moved first').join(' ')).toMatch(/noted/);
+      r.say('The opposing Rillaboom used Grassy Glide! Garchomp 100');
+      r.n.commit();
+      expect(order(r)).toEqual(['opp1', 'me0']);
+    });
+
+    it("an order that the HP typed in can't have is refused, with why", () => {
+      const r = doubles();
+      // Garchomp's Life Orb recoil and Rillaboom's hit both changed Garchomp's HP.
+      r.say('Garchomp used Dragon Claw on the opposing Salamence. The opposing Salamence 40');
+      r.say('The opposing Rillaboom used Grassy Glide! Garchomp 100');
+      r.n.commit();
+      expect(r.say('Rillaboom moved first').join(' ')).toMatch(/Can't move it: both changed the same Pokémon’s HP/);
+      expect(order(r)).toEqual(['me1', 'opp1']);
+    });
+  });
+
   it('battle start: both leads of a side from one line', () => {
     const r = rig(['Salamence', 'Incineroar', 'Rillaboom', 'Kingambit'], {me: [null, null], opp: [null, null]});
     // Incineroar on both sides: "sent out" is theirs, "Go!" is yours.
@@ -780,7 +861,8 @@ Careful Nature
     r.say('Charizard has Mega Evolved into Mega Charizard Y!');
     expect(r.b.live.mons.me0.mega).toBe(true);
     r.say('Charizard used Heat Wave! The opposing Kingambit 70. The opposing Rillaboom 55.');
-    r.say('What will Charizard do?');
+    // Champions writes nothing between turns: said, or told by the next turn's first switch or move.
+    r.say('Next turn');
     expect(r.b.turn).toBe(2);
     expect(turnActions(r.b, 1)[0].hits.map(h => h.hpAfter)).toEqual([70, 55]);
   });

@@ -45,6 +45,11 @@ export interface SideCondition {
   lightScreen: boolean;
   auroraVeil: boolean;
   friendGuard: boolean;
+  /** Entry hazards on this side (set by the other side). */
+  stealthRock?: boolean;
+  spikes?: number;
+  toxicSpikes?: number;
+  stickyWeb?: boolean;
 }
 
 export interface FieldCondition {
@@ -52,6 +57,10 @@ export interface FieldCondition {
   terrain?: Terrain;
   trickRoom: boolean;
   gravity: boolean;
+  /** Held items do nothing. */
+  magicRoom?: boolean;
+  /** Defense and Sp. Def swapped. */
+  wonderRoom?: boolean;
   me: SideCondition;
   opp: SideCondition;
   /** Turns left (counting the current one) for timed effects, e.g. "weather", "trickRoom", "opp.tailwind". */
@@ -80,8 +89,10 @@ export interface HitResult {
   target: MonRef;
   /** Same units as MonCondition.hp for the target's side. */
   hpBefore: number;
-  /** HP right after the hit, before any berry heal. */
+  /** HP right after the hit, before any berry heal (unless `healed`). */
   hpAfter: number;
+  /** hpAfter was read once its Sitrus Berry had healed it: the HP the screen settled on. */
+  healed?: boolean;
   fainted: boolean;
   crit: boolean;
   triggers: Trigger[];
@@ -119,6 +130,10 @@ export interface ActionEvent {
   actorTriggers: Trigger[];
   /** Status the actor picked up (e.g. burned by Flame Body after a contact move). */
   actorStatus?: Status;
+  /** Chance-based stat changes that happened to the actor (Meteor Mash, Ancient Power…; guaranteed ones are automatic). */
+  actorBoosts?: Boosts;
+  /** The actor's HP read after its move (recoil, drain, Life Orb, Rocky Helmet): resyncs it. 0: it fainted. */
+  actorHpAfter?: number;
   /** Targets of a non-damaging move (Spore, Parting Shot…). */
   targetRefs?: MonRef[];
   /** The move failed / was blocked (still counts for turn order and move reveal). */

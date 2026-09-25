@@ -50,11 +50,29 @@ function Pills({battle, update}: {battle: Battle; update: Update}) {
   if (f.gravity) pills.push(['grav', `Gravity${left('gravity')}`, clear(l => {
     l.field.gravity = false;
   })]);
+  for (const [k, label] of [['magicRoom', 'Magic Room'], ['wonderRoom', 'Wonder Room']] as const) {
+    if (f[k]) pills.push([k, `${label}${left(k)}`, clear(l => {
+      l.field[k] = false;
+      delete l.field.turns?.[k];
+    })]);
+  }
   for (const side of ['me', 'opp'] as const) {
+    const whose = side === 'me' ? 'Your' : 'Their';
     for (const [k, label] of [['tailwind', 'Tailwind'], ['reflect', 'Reflect'], ['lightScreen', 'L. Screen'], ['auroraVeil', 'Veil']] as const) {
-      if (f[side][k]) pills.push([`${side}${k}`, `${side === 'me' ? 'Your' : 'Their'} ${label}${left(`${side}.${k}`)}`, clear(l => {
+      if (f[side][k]) pills.push([`${side}${k}`, `${whose} ${label}${left(`${side}.${k}`)}`, clear(l => {
         l.field[side] = {...l.field[side], [k]: false};
         delete l.field.turns?.[`${side}.${k}`];
+      })]);
+    }
+    // Entry hazards on this side, laid by the other.
+    const s = f[side];
+    const hazards: [keyof typeof s, string][] = [
+      ['stealthRock', 'Stealth Rock'], ['stickyWeb', 'Sticky Web'],
+      ['spikes', `Spikes${(s.spikes ?? 0) > 1 ? ` ×${s.spikes}` : ''}`], ['toxicSpikes', `Toxic Spikes${(s.toxicSpikes ?? 0) > 1 ? ' ×2' : ''}`],
+    ];
+    for (const [k, label] of hazards) {
+      if (s[k]) pills.push([`${side}${k}`, `${label} on ${side === 'me' ? 'your' : 'their'} side`, clear(l => {
+        l.field[side] = {...l.field[side], [k]: typeof s[k] === 'number' ? 0 : false};
       })]);
     }
   }

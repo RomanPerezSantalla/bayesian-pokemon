@@ -54,7 +54,34 @@ const MOVE_OVERRIDES = {
   bittermalice: {sec: [{ch: 100, b: {atk: -1}}]},
   spicyextract: {tb: {atk: 2, def: -2}},
   chillyreception: {w: 'snow'},
-  shedtail: {},
+  // HP the user pays (a fraction of its max HP).
+  shedtail: {hpc: 0.5},
+  substitute: {hpc: 0.25},
+  clangoroussoul: {hpc: 0.33},
+  chloroblast: {hpc: 0.5},
+  // Stat stages set, copied, reset or swapped rather than raised.
+  bellydrum: {hpc: 0.5, bo: 'max'},
+  curse: {bo: 'curse'},
+  haze: {bo: 'haze'},
+  clearsmog: {bo: 'clear'},
+  psychup: {bo: 'copy'},
+  topsyturvy: {bo: 'invert'},
+  guardswap: {bo: 'swapdef'},
+  powerswap: {bo: 'swapatk'},
+  tidyup: {sb: {atk: 1, spe: 1}, clr: 'all'},
+  stuffcheeks: {sb: {def: 2}},
+  // Entry hazards cleared: the user's side, both sides (and the target's screens), or swapped.
+  rapidspin: {clr: 'self'},
+  mortalspin: {sec: [{ch: 100, st: 'psn'}], clr: 'self'},
+  defog: {clr: 'defog'},
+  courtchange: {clr: 'swap'},
+  // Items taken, thrown or eaten.
+  knockoff: {it: 'knock'},
+  thief: {it: 'steal'},
+  covet: {it: 'steal'},
+  fling: {it: 'fling'},
+  bugbite: {it: 'eat'},
+  pluck: {it: 'eat'},
 };
 
 function compactBoosts(b) {
@@ -101,10 +128,19 @@ function buildMoves() {
       if (weather) e.w = weather;
       if (m.terrain) e.tr = m.terrain.replace('terrain', '');
       if (['tailwind', 'reflect', 'lightscreen', 'auroraveil'].includes(m.sideCondition)) e.sc = m.sideCondition;
-      if (['trickroom', 'gravity'].includes(m.pseudoWeather)) e.pw = m.pseudoWeather;
+      if (['trickroom', 'gravity', 'magicroom', 'wonderroom'].includes(m.pseudoWeather)) e.pw = m.pseudoWeather;
+      if (['stealthrock', 'spikes', 'toxicspikes', 'stickyweb'].includes(m.sideCondition)) e.hz = m.sideCondition;
+      // The user faints: always (Explosion) or once it hits (Memento, Final Gambit, Healing Wish).
+      if (m.selfdestruct) e.sd = m.selfdestruct === 'always' ? 1 : 2;
+      if (m.mindBlownRecoil) e.hpc = 0.5;
+      // A hit count that varies (Bullet Seed 2–5, Triple Axel 1–3, each hit able to miss): asked when it's logged.
+      if (Array.isArray(m.multihit)) e.mh = m.multihit;
+      else if (m.multiaccuracy && m.multihit) e.mh = [1, m.multihit];
       if (m.drain) e.dr = m.drain;
       if (m.recoil) e.rc = m.recoil;
       if (m.selfSwitch) e.sw = 1;
+      // The calc keeps only positive priorities; turn order needs Trick Room's −7 too.
+      if (m.priority) e.pr = m.priority;
       if (m.flags?.heal || m.heal) e.heal = 1;
     }
     Object.assign(e, MOVE_OVERRIDES[id] || {});

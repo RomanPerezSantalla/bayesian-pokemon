@@ -14,7 +14,7 @@ forme, item, ability, moves and stat spread as the battle goes.
 ```bash
 npm install
 npm run dev          # http://localhost:5173  (add `-- --host` to open it from your phone on the same Wi-Fi)
-npm test
+npm test             # every move and item the calc has for Champions has its own test (src/engine/moves.test.ts, items.test.ts)
 npm run build        # static site in dist/
 npm run phone        # the app on your phone over HTTPS (voice included), with a test log; see below
 npm run voice-pack   # the voice model's files (~150 MB, fetched once into .cache/voice/); see "By voice"
@@ -97,15 +97,58 @@ microphone hears you rather than the game.
 **By voice:** tap **🎙 Voice** and read the battle text as it appears, adding HP where you
 have it: "The opposing Salamence used Draco Meteor! Charizard 45", "Garchomp used Earthquake! It
 doesn't affect the opposing Salamence… the opposing Rillaboom 60", "A critical hit!", "Charizard
-fainted!", "The opposing trainer sent out Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved
-into Mega Charizard Y!". Ability banners answer the *What did the game show?* questions ("The opposing
-Salamence's Intimidate!"), and "What will Garchomp do?" (or "next turn") ends the turn. Each move is
-logged when the next one starts or after a short pause; HP left out is logged as skipped, and a
-message not said (Life Orb recoil, a berry) is never taken as not having happened. The leads can come
-the same way: start the battle without them and read the opening lines ("The opposing trainer sent out
-Salamence and Rillaboom!", "Go! Incineroar and Sneasler!"), or say them your way ("opponent sent
-Rillaboom and Corviknight", "opponent leads with…", or just the names while their places are empty).
-A species both sides have is the side just talked about ("opponent… Altaria"), else yours.
+fainted!", "Kim sent out Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved into Mega
+Charizard Y!". The ability and item pop-ups ("Salamence's Intimidate", "Rillaboom's Leftovers") answer
+the *What did the game show?* questions. Each move is logged when the next one starts or after a short
+pause; HP left out is logged as skipped, and a message not said (Life Orb recoil, a berry) is never
+taken as not having happened. The leads can come the same way: start the battle without them and read
+the opening lines ("Kim sent out Salamence and Rillaboom!", "Go! Incineroar and Sneasler!"), or say
+them your way ("opponent sent Rillaboom and Corviknight", "opponent leads with…", or just the names
+while their places are empty). A species both sides have is the side just talked about ("opponent…
+Altaria"), else yours; for a pop-up, which names no side, the one it fits.
+
+Details said after a move was logged (after the pause, or once the next line started) go with it:
+"…it crit", "Dragapult 40", "it missed", "Charizard fainted", "Sitrus Berry" reopen the last move logged,
+if it's about who was in it, and log it again with that added. The turn's order can be said in words
+too: "Rillaboom moved first", "Kingambit went last", "Rillaboom outsped Dragapult", "Gholdengo moved
+before Kingambit" move a logged move as the log's *It went earlier / later* does (refused, with why,
+when the HP typed in only fits the order logged); said before that Pokémon's move, it's placed there
+once it's logged.
+
+The rest of the game's lines can be read out as they come, in order, and are taken as the game means
+them. They're worded as Champions has them (its own English battle text, as dumped in
+[projectpokemon/champout](https://github.com/projectpokemon/champout)); every one of its battle lines
+was checked to read as what it says, and `src/ui/battle/voice/turns.test.ts` reads whole turns:
+
+- **Stat changes** ("The opposing Garchomp's Attack harshly fell!", "Charizard and Incineroar's Attack
+  fell!", "…won't go any higher!") are checked against what logging already did (a move's own boosts
+  and drops, Intimidate on the way in, Sticky Web, a Defiant answered), so nothing counts twice. A chance one goes with its move (Moonblast's Sp. Atk
+  drop, Meteor Mash's Attack) and, like any stat change on a target, says whom a single-target move hit
+  (Parting Shot's target); "Attack rose sharply!" after a drop, from one that may have Defiant, is its
+  Defiant. What nothing logged explains (Moxie, Speed Boost, a seed) goes onto the board, after the move.
+- **Hits**: "A critical hit on the opposing Kingambit!", "It's super effective on the opposing Kingambit
+  and Salamence!", "…protected itself!", "But it failed to affect…", "The Pokémon was hit 4 times!", "But
+  it failed!", "Occa Berry weakened Heat Wave's power!" (the berry of whoever it hit), "…knocked off the
+  opposing Salamence's Life Orb!", "…'s Air Balloon popped!"; the user's HP said after its move ("…was
+  damaged by the recoil! Incineroar 150") sets its HP. HP read after a Sitrus Berry's pop-up is the HP it
+  settled on once healed.
+- **Couldn't move**: "…flinched and couldn't move!", "…couldn't move because it's paralyzed!", "…is fast
+  asleep." log no move (and no status on the move before); "…woke up!", "…'s Lum Berry cured its
+  paralysis!" end it; "…cannot be poisoned!", "…is already asleep!" mean the move didn't take.
+- **The field** as the game describes it (weather, terrain, the rooms, Gravity, Tailwind, screens and
+  hazards starting or ending: "It started to rain!", "The twisted dimensions returned to normal!", "A
+  tailwind started blowing on the opposing side!", "Your side's tailwind petered out!", "Pointed stones
+  float in the air on the opposing side!", "…blew away Stealth Rock!") puts the board right wherever it
+  differs.
+- **Turns**: Champions writes nothing between turns (the weather stays on the field panel, with no
+  "Rain continues to fall."), so a turn's end is told by what comes: its first end-of-turn line ("The
+  rain stopped.", "…is buffeted by the sandstorm!", "…was hurt by its burn!", "…was hurt by its
+  poisoning!", a Leftovers or Speed Boost pop-up, a tailwind or screen running out) ends it, with its
+  residual damage and timers, and HP read after that is where that Pokémon is now, not part of a move.
+  Otherwise the next turn shows itself: its switches ("…, come back!", "Kim withdrew…"), its Mega
+  Evolution, or a Pokémon moving again, including one that couldn't move before. "Next turn" (or "end
+  turn") said out loud ends one too.
+- Trainer names ("…went back to Roman!", "…is reacting to Roman's Omni Ring!") are read past.
 
 *Team preview* takes voice too: tap 🎙 Voice there and say their six as you see them ("Rillaboom,
 Sneasler, Salamence…"; formes the way you'd say them: "Alolan Ninetales", "Wash Rotom", "Aqua Tauros"),
@@ -188,11 +231,22 @@ inside the prior range, plus the likeliest spreads and the evidence behind them,
 a team. Spreads are modelled jointly, so the 66-point budget ties the stats together: learning it maxed
 SpA and Speed leaves almost nothing for the rest.
 
-Handled automatically: stat drops/boosts from moves (Icy Wind, Snarl, Close Combat, Parting Shot…),
-statuses, Tailwind / Trick Room / weather / terrain / screens with turn counters, Intimidate and
-weather/terrain abilities once the game shows them (a Mega's own on evolving), Sitrus/Focus Sash on your side, Life Orb
-recoil on yours, Helping Hand from a partner, end-of-turn Leftovers / burn / poison / sand / Grassy
-Terrain. Everything is undoable (`↶`), exactly.
+Handled automatically: stat drops/boosts from moves (Icy Wind, Snarl, Close Combat, Parting Shot…), and
+stages set, copied, reset or swapped (Belly Drum, Curse, Psych Up, Haze, Clear Smog, Topsy-Turvy, Guard and
+Power Swap); statuses, cured at once by a status berry that's known to be held; Tailwind / Trick Room /
+Magic Room / Wonder Room / Gravity / weather / terrain / screens with turn counters (8 turns with a
+weather rock, Light Clay or Terrain Extender the setter is known to hold); entry hazards (Stealth Rock by
+type, Spikes by layers, Toxic Spikes, Sticky Web) on the way in, cleared by Rapid Spin, Mortal Spin,
+Defog and Tidy Up, swapped by Court Change. There are no Heavy-Duty Boots in Champions, so hazards are
+certain from types, except where an ability or item of theirs not known yet could change it (Magic
+Guard, Levitate, an Air Balloon): then its HP is left to be read. Intimidate and weather/terrain
+abilities once the game shows them (a Mega's own on evolving); Sitrus, Oran, Focus Sash and Air Balloon
+on your side; Life Orb recoil on yours; Knock Off, Thief and Fling taking items (a Mega Stone stays);
+HP paid for Substitute, Belly Drum, Steel Beam and the like; the user fainting from Explosion, Memento,
+Final Gambit or Healing Wish; Helping Hand from a partner; end-of-turn Leftovers / burn / poison / sand /
+Grassy Terrain. A move that drains or recoils changes its user's HP by a share of damage only known in %:
+its HP shows `?` until it's read again (type it as the "before" to keep the next hit as evidence).
+Everything is undoable (`↶`), exactly.
 
 ## Your data
 
@@ -257,15 +311,25 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
 - `public/data/formats.json`, `structure-*.json`: from `npm run data` (Smogon stats, latest month).
   Showdown publishes the previous month's stats in early month, so the Reg M-C structure arrives in
   October; until then it's Reg M-B's.
-- `src/data/moves.gen.json`, `abilities.gen.json`: from `@pkmn/dex` and `@smogon/calc`.
+- `src/data/moves.gen.json`, `abilities.gen.json`: from `@pkmn/dex` and `@smogon/calc` (`npm run data:tables`),
+  including each move's priority: the calc keeps only positive ones, and turn order needs Trick Room's −7.
+- `@smogon/calc` 0.12's Champions data has 86 moves with no category. The 75 status moves among them are
+  unaffected, but the 11 attacking ones have no type either, so the calc dealt 0 with them. Of those only
+  Metal Claw is learnable in Champions (the other ten, Anchor Shot and the like, are in the calc's list
+  though no Pokémon in Champions has them). `src/data/dex.ts` fills them in from the calc's gen 9 data.
 - Official ladder data: live, not stored in this repo (through `/official/` on Cloudflare Pages).
 
 ## Known limitations
 
 - Damage uses `@smogon/calc`'s Champions mechanics; unlogged modifiers (a partner's Friend Guard,
   Ruin abilities from partners) show up as flagged conflicts.
-- Your HP after drain/recoil moves you used isn't computed (the damage you did is only known in %);
-  tap the "before" number when logging the next hit on you to correct it.
+- Damage that isn't down to stats (Counter, Mirror Coat, Metal Burst, Comeuppance, Super Fang, Endeavor,
+  one-hit KOs, Beat Up, Spit Up) is logged but learns nothing.
+- Not tracked: accuracy and evasion stages, confusion and other volatile effects (Taunt, Encore,
+  Substitute's doll, Leech Seed), Safeguard, Quick and Wide Guard, Fairy Lock, PP; Trick and Switcheroo's
+  swap, a stolen item on the thief, Baton Pass's stages; Power Trick, Power and Guard Split, Speed Swap and
+  moves that change types or abilities (Soak, Simple Beam, Skill Swap…). The per-item test lists the
+  items with nothing to model and why.
 - Quick Claw and Quick Draw count only when their chip is ticked (see *Turn order*); one left
   unticked reads as the Pokémon being faster (a Scarf, more Speed) or, where that can't be, as a
   flagged conflict.

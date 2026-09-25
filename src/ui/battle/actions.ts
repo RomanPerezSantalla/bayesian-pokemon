@@ -227,7 +227,7 @@ function hpTouched(b: Battle, ev: ActionEvent): Set<string> {
   const out = new Set(ev.hits.filter(h => !h.noEffect).map(h => monKey(h.target)));
   const dealt = ev.hits.some(h => !h.noEffect);
   const lifeOrb = ev.actor.side === 'me' ? dealt && b.myTeam[ev.actor.slot]?.item === 'Life Orb' : ev.actorTriggers.includes('lifeorb');
-  if (lifeOrb || ev.actorTriggers.includes('helmet')) out.add(monKey(ev.actor));
+  if (lifeOrb || ev.actorTriggers.includes('helmet') || ev.actorHpAfter !== undefined) out.add(monKey(ev.actor));
   return out;
 }
 
