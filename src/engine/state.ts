@@ -6,6 +6,7 @@
  * weather/terrain/Tailwind/Trick Room/screens with their turn counters, switch-in
  * abilities, berries, end-of-turn residuals.
  */
+import LEGAL_ABILITIES from '../data/abilities.gen.json';
 import {toID, type BoostID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import {makePokemon, typeEffectiveness} from './calc';
@@ -54,6 +55,18 @@ function knownItem(ctx: StateCtx, live: Snapshot, ref: MonRef): string | undefin
   const c = live.mons[monKey(ref)];
   if (c?.itemGone) return undefined;
   return ref.side === 'me' ? ctx.battle.myTeam[ref.slot]?.item : ctx.oppItem(ref.slot);
+}
+
+/** Whether it has, or for all that's known may have, this ability (theirs: any it can legally have, until one is sure). */
+function mayHaveAbility(ctx: StateCtx, live: Snapshot, ref: MonRef, name: string): boolean {
+  const c = live.mons[monKey(ref)];
+  if (ref.side === 'me') return knownAbility(ctx, live, ref) === name;
+  const known = ctx.oppAbility(ref.slot, !!c?.mega);
+  if (known && known.p >= 1) return known.name === name;
+  const preview = ctx.battle.oppPreview[ref.slot];
+  const formes = ctx.fmt.preview[preview] ?? [preview];
+  return formes.some(f => ((LEGAL_ABILITIES as Record<string, string[]>)[toID(f)]
+    ?? Object.values(ctx.gen.species.get(toID(f))?.abilities ?? {}) as string[]).includes(name));
 }
 
 export function maxHPOf(ctx: StateCtx, live: Snapshot, ref: MonRef): number {
@@ -337,9 +350,12 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
   const actorKey = monKey(ev.actor);
   const damaging = ev.hits.length > 0 || !!ctx.gen.moves.get(toID(ev.move))?.basePower;
 
+  const moveType = ctx.gen.moves.get(toID(ev.move))?.type;
   for (const hit of ev.hits) {
     const key = monKey(hit.target);
     const t = next.mons[key];
+    // A Fire move taken in by Flash Fire: its Fire moves are stronger from now on (the calc applies it where that's its ability).
+    if (t && hit.noEffect && moveType === 'Fire' && mayHaveAbility(ctx, next, hit.target, 'Flash Fire')) t.abilityOn = true;
     if (!t || hit.noEffect) continue;
     const max = maxHPOf(ctx, next, hit.target);
     if (hit.unread) {
@@ -374,6 +390,8 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
       next.mons[key] = {...t, boosts: {}};
       continue;
     }
+    // Hit by a damaging move with Electromorphosis: charged, so its next Electric move has double the power.
+    if (damaging && mayHaveAbility(ctx, next, hit.target, 'Electromorphosis')) t.abilityOn = true;
     if (hit.triggers.includes('wp')) raiseStats(next, hit.target, {atk: 2, spa: 2});
     const drops: Boosts = {};
     for (const s of fx.sec ?? []) {
@@ -406,8 +424,9 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
     if (self) {
       if (fx.it === 'fling') self.itemGone = true;
       // A Normal Gem goes with the first Normal move it powers.
-      const moveType = ctx.gen.moves.get(toID(ev.move))?.type;
       if (landed && damaging && moveType === 'Normal' && knownItem(ctx, next, ev.actor) === 'Normal Gem') self.itemGone = true;
+      // The charge from Electromorphosis goes with the Electric move it powered.
+      if (damaging && moveType === 'Electric' && self.abilityOn && mayHaveAbility(ctx, next, ev.actor, 'Electromorphosis')) self.abilityOn = false;
       // Healed or hurt by an amount of the damage it dealt (Drain Punch, Brave Bird): unknown until it's read.
       if ((fx.dr || fx.rc) && ev.hits.some(h => !h.noEffect)) self.hpUnknown = true;
       // Explosion always; Memento, Final Gambit and Healing Wish once they work.

@@ -7,7 +7,7 @@
 
 export const CACHE = 'voice-model-v1';
 /** What this app's code reads; a pack built for another is downloaded again. */
-export const MODEL_ID = 'parakeet-tdt-ctc-110m-int8';
+export const MODEL_ID = 'parakeet-tdt-ctc-110m-int8+reader-1';
 
 export interface Part {
   path: string;

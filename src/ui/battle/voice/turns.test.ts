@@ -15,9 +15,9 @@ import {createBattle} from '../../../engine/battle';
 import {computeBeliefs} from '../../../engine/posterior';
 import type {Battle, SideID} from '../../../engine/types';
 import type {MonSummary} from '../../../engine/worker';
-import {turnActions} from '../actions';
+import {turnActions, undo} from '../actions';
 import {Narrator, type VoiceIO} from './narrator';
-import {parseNarration} from './parse';
+import {narrationPhrases, parseNarration} from './parse';
 
 const data = (f: string) => JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../public/data', f), 'utf8'));
 const infos = data('formats.json').formats as FormatInfo[];
@@ -64,8 +64,8 @@ Adamant Nature
 const THEIRS = ['Salamence', 'Kingambit', 'Rillaboom', 'Clefable'];
 
 /** A battle driven only by what's read out. */
-function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEIRS} = {}) {
-  let b = createBattle(fmt, TEAM, preview, 'turns');
+function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEIRS, team = TEAM} = {}) {
+  let b = createBattle(fmt, team, preview, 'turns');
   b.live.active = active;
   let cache: {n: number; mons: MonSummary[]} | null = null;
   const asked: [SideID, number][] = [];
@@ -92,6 +92,14 @@ function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEI
     n, read, notes, asked,
     get b() {
       return b;
+    },
+    /** The screen's undo: the last entry taken back. */
+    undo: () => {
+      b = undo(b);
+    },
+    /** The battle put back as it was (a phrase taken back by voice). */
+    restore: (to: Battle) => {
+      b = to;
     },
     /** A Pokémon's stat stages now. */
     boosts: (key: string) => b.live.mons[key].boosts,
@@ -521,5 +529,262 @@ describe('Singles', () => {
     expect(r.b.live.active.me).toEqual([1]);
     expect(r.b.live.mons.me1.hp).toBe(max - Math.floor(max / 4));
     expect(r.asked).toEqual([]);
+  });
+});
+
+describe('the first battle narrated on a PC (29 Sep): your Mega Lopunny and Dragonite against Froslass and Bellibolt', () => {
+  const MINE = parseTeam(`Sneasler @ Psychic Seed
+Ability: Unburden
+- Close Combat
+
+Ceruledge @ Focus Sash
+Ability: Flash Fire
+- Bitter Blade
+
+Lopunny @ Lopunnite
+Ability: Limber
+EVs: 2 HP / 32 Atk / 32 Spe
+Jolly Nature
+- Fake Out
+- Close Combat
+- Protect
+
+Indeedee-F @ Colbur Berry
+Ability: Psychic Surge
+- Follow Me
+
+Dragonite @ Life Orb
+Ability: Inner Focus
+EVs: 2 HP / 32 Atk / 32 Spe
+Adamant Nature
+- Dragon Dance
+- Stomping Tantrum
+- Extreme Speed
+- Protect
+
+Gardevoir @ Gardevoirite
+Ability: Trace
+- Moonblast`);
+  const OPP = ['Charizard', 'Goodra-Hisui', 'Froslass', 'Annihilape', 'Bellibolt', 'Incineroar'];
+  const start = () => rig({me: [2, 4], opp: [2, 4]}, {team: MINE, preview: OPP});
+  const moves = (b: Battle) => b.events.filter(e => e.kind === 'action').map(e => (e.kind === 'action' ? `${e.turn} ${e.move}` : ''));
+
+  it('the turns stay in place: turn 1 taken back and read again, the switch, Parabolic Charge, then Fake Out starting turn 3', () => {
+    const r = start();
+    // As the voice model heard it (the Mega, said plainly), with the target named straight after the move.
+    r.read('Lopunny mega.', 'Froslass Protect Lopunny Fake Out Bellibolt.', 'Dragonite Dragon Dance.', 'Bellibolt flinched.');
+    expect(r.b.live.mons.me2.mega).toBe(true);
+    expect(turnActions(r.b).find(a => a.move === 'Fake Out')?.hits.map(h => h.target)).toEqual([{side: 'opp', slot: 4}]);
+    // Taken back on the screen, then read again: the flinch heard before goes with it.
+    r.undo();
+    r.undo();
+    r.undo();
+    r.read('Froslass Protect.', 'Lopunny Fake Out Bellibolt, eighty four percent.', 'Dragonite Dragon Dance?', 'Bellibolt flinched.');
+    expect(r.b.turn).toBe(1);
+    expect(moves(r.b)).toEqual(['1 Protect', '1 Fake Out', '1 Dragon Dance']);
+    // A switch chosen for the turn: turn 2. Scrappy and Inner Focus stop the Intimidate.
+    r.read('Withdrew Froslass sent out Incineroar.', 'Intimidate from Incineroar?', "Lopunny 's attack was not lowered.", 'Dragonite attack was not lowered.');
+    expect(r.b.turn).toBe(2);
+    expect([r.b.live.mons.me2.boosts.atk ?? 0, r.b.live.mons.me4.boosts.atk ?? 0]).toEqual([0, 1]);
+    r.read('Lopunny Close Combat Incineroar forty percent.', 'Dragonite Stomping Tantrum.', 'Bellibolt one percent?', 'Bellibolt Sitrus Berry?',
+      'Bellibolt used a Parabolic Charge.', 'Lopunny forty nine HP Dragonite ninety five HP.', 'Incineroar thirteen.');
+    expect(r.b.turn).toBe(2);
+    // Incineroar came in this turn and Fake Out goes before anything ordinary: the next turn.
+    r.read('Incineroar Fake Out Dragonite.', 'Lopunny Close Combat.');
+    // Close Combat's target wasn't said: one of the two, which the note says rather than both hit.
+    expect(r.n.commit()).toMatch(/Close Combat → Incineroar \/ Bellibolt \(not said\): HP skipped$/);
+    expect(moves(r.b)).toEqual([
+      '1 Protect', '1 Fake Out', '1 Dragon Dance', '2 Close Combat', '2 Stomping Tantrum', '2 Parabolic Charge', '3 Fake Out', '3 Close Combat',
+    ]);
+    const fakeOut = r.b.events.find(e => e.kind === 'action' && e.turn === 3 && e.move === 'Fake Out');
+    expect(fakeOut?.kind === 'action' && fakeOut.hits.map(h => h.target)).toEqual([{side: 'me', slot: 4}]);
+  });
+
+  it("\"…was not lowered\": the drop logged goes back, and yours with a Mega that would have stopped it is asked about", () => {
+    const r = start();
+    r.read('Froslass Protect.', 'Lopunny Fake Out Bellibolt, eighty four percent.', 'Dragonite Dragon Dance.', 'Bellibolt flinched.');
+    // The Mega wasn't said, so Lopunny is logged with Limber, which doesn't stop Intimidate.
+    r.read('The opposing trainer withdrew Froslass!', 'The opposing trainer sent out Incineroar!', "The opposing Incineroar's Intimidate");
+    expect(r.b.live.mons.me2.boosts.atk).toBe(-1);
+    r.read("Lopunny's Attack was not lowered!", "Dragonite's Attack was not lowered!");
+    expect(r.b.live.mons.me2.boosts.atk ?? 0).toBe(0);
+    expect(r.notes.slice(-2)).toEqual([
+      'Lopunny: Atk not lowered: put back (has it Mega Evolved? Scrappy would stop it)',
+      'Dragonite: Atk not lowered ✓',
+    ]);
+  });
+
+  it('listens out for their likely items, not the "(other)" row ("other" is said all the time)', () => {
+    const b = start().b;
+    const phrases = narrationPhrases({battle: b, gen, mons: computeBeliefs(doublesFmt, b).mons as unknown as MonSummary[]});
+    expect(phrases).toEqual(expect.arrayContaining(['Froslassite', 'Mega Evolved']));
+    expect(phrases.filter(p => p.startsWith('('))).toEqual([]);
+  });
+
+  it('a Pokémon named straight after a move aimed at one is its target, unless it moves next', () => {
+    const env = {battle: start().b, gen, mons: undefined};
+    const kinds = (line: string) => parseNarration(line, env).map(e => `${e.kind}${'mon' in e && e.mon ? ` ${e.mon.side}${e.mon.slot}` : ''}`);
+    expect(kinds('Lopunny Fake Out Bellibolt')).toEqual(['use', 'target opp4']);
+    expect(kinds('Incineroar Fake Out Dragonite')).toEqual(['use', 'target me4']);
+    expect(kinds('Lopunny Fake Out Froslass Protect')).toEqual(['use', 'use']);
+    // Dragon Dance is aimed at no one: a name after it is the next line's.
+    expect(kinds('Dragonite Dragon Dance Bellibolt flinched')).toEqual(['use', 'cant opp4']);
+  });
+
+  it('Mega Evolution said plainly: "Lopunny mega", "mega Lopunny", "Lopunny Mega Evolved"; not Mega Kick', () => {
+    const b = start().b;
+    const env = {battle: b, gen, mons: undefined};
+    for (const line of ['Lopunny mega.', 'mega Lopunny', 'Lopunny Mega Evolved', 'Lopunny has Mega Evolved into Mega Lopunny!']) {
+      expect(parseNarration(line, env).filter(e => e.kind === 'mega'), line).toEqual([{kind: 'mega', mon: {side: 'me', slot: 2}, suffix: undefined}]);
+    }
+    expect(parseNarration('The opposing Froslass used Mega Kick', env).map(e => e.kind)).not.toContain('mega');
+  });
+});
+
+describe('a phrase taken back ("scratch that", "no, it was…": the language model\'s undo)', () => {
+  it('the narrator goes back to what it knew before it, the battle to what it was', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]});
+    r.read('Charizard used Heat Wave!');
+    const battle = r.b;
+    const saved = r.n.save();
+    const was = r.n.describe();
+    // The next move logs the first; then it's taken back, with the move it logged.
+    r.read('The opposing Salamence used Draco Meteor on Charizard!', 'Charizard 40');
+    expect(r.b.events.length).toBeGreaterThan(battle.events.length);
+    r.restore(battle);
+    r.n.load(saved);
+    expect(r.b.events).toEqual(battle.events);
+    expect(r.n.describe()).toBe(was);
+    // And it carries on from there as if the phrase had never been heard.
+    r.read('The opposing Salamence used Dragon Claw on Charizard!');
+    expect(r.b.events.at(-1)).toMatchObject({kind: 'action', move: 'Heat Wave'});
+    expect(r.n.describe()).toMatch(/Dragon Claw/);
+  });
+});
+
+describe("an HP said once another move has come (the move it's about can't take it any more)", () => {
+  it('after a move logged since: where it is at now', () => {
+    const r = rig({me: [1, 3], opp: [0, 1]});
+    r.read('Incineroar used Knock Off on the opposing Salamence!', 'Metagross used Trick Room!');
+    r.read('The opposing Salamence 60');
+    r.n.commit();
+    expect(r.notes).toContain('Salamence 60%');
+    expect(r.b.live.mons.opp0.hp).toBe(60);
+  });
+
+  it('while another move is open: where it is at, once that move is logged', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('Incineroar used Knock Off on the opposing Salamence!', 'Garchomp used Dragon Claw on the opposing Kingambit!');
+    r.read('The opposing Salamence 60', 'The opposing Kingambit 70');
+    r.n.commit();
+    expect(r.b.live.mons.opp0.hp).toBe(60);
+    expect(r.b.live.mons.opp1.hp).toBe(70);
+  });
+});
+
+describe('a bare HP during a move that hit several', () => {
+  it("isn't put over one whose HP is in already (a name misheard): whose is asked", () => {
+    const r = rig({me: [2, 1], opp: [0, 1]});
+    r.read('Garchomp used Rock Slide!', 'The opposing Salamence 49', '8');
+    expect(r.notes).toContain('HP 8: whose? Say the name with it');
+    r.read('The opposing Kingambit 70');
+    r.n.commit();
+    expect([r.b.live.mons.opp0.hp, r.b.live.mons.opp1.hp]).toEqual([49, 70]);
+  });
+});
+
+describe("another Pokémon's HP while a single-target move is open", () => {
+  it("isn't a second target once the move's target is said: it's where that one is at", () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('Incineroar used Knock Off on the opposing Salamence!', 'The opposing Salamence 60', 'The opposing Kingambit 70');
+    r.n.commit();
+    const knock = r.b.events.filter(e => e.kind === 'action').at(-1);
+    expect(knock?.kind === 'action' && knock.hits.map(h => [h.target.slot, h.hpAfter])).toEqual([[0, 60]]);
+    expect(r.b.live.mons.opp1.hp).toBe(70);
+  });
+});
+
+describe('a Sitrus Berry and the HP said about it', () => {
+  it('an HP under a quarter is from before the berry (it heals a quarter), whichever came first', () => {
+    const r = rig({me: [2, 1], opp: [0, 1]});
+    r.read('Garchomp used Dragon Claw on the opposing Kingambit!', "The opposing Kingambit's Sitrus Berry", 'The opposing Kingambit 1');
+    r.n.commit();
+    const claw = r.b.events.filter(e => e.kind === 'action').at(-1);
+    expect(claw?.kind === 'action' && claw.hits[0]).toMatchObject({hpAfter: 1, healed: false});
+    expect(r.b.live.mons.opp1.hp).toBe(26);
+  });
+
+  it('one over a quarter, said after the berry, is where it settled once healed', () => {
+    const r = rig({me: [2, 1], opp: [0, 1]});
+    r.read('Garchomp used Dragon Claw on the opposing Kingambit!', "The opposing Kingambit's Sitrus Berry", 'The opposing Kingambit 40');
+    r.n.commit();
+    expect(r.b.live.mons.opp1.hp).toBe(40);
+  });
+});
+
+describe('a turn said out of order (30 Sep): what priority settles, and nothing about Speed from the rest', () => {
+  it('Fake Out said after an ordinary attack: this turn, first, its place not taken as the order', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Kingambit used Kowtow Cleave on Garchomp!', 'Garchomp 100');
+    r.read('Incineroar used Fake Out on the opposing Salamence!', 'The opposing Salamence 90');
+    r.n.commit();
+    expect(r.b.turn).toBe(1);
+    expect(turnActions(r.b).map(a => [a.move, a.ordered])).toEqual([['Fake Out', false], ['Kowtow Cleave', true]]);
+  });
+
+  it('into a Protect made this turn: nothing happened to it, and no HP is waited for', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Salamence used Protect!', 'Incineroar used Fake Out on the opposing Salamence!');
+    expect(r.n.commit()).toMatch(/Fake Out → Salamence protected$/);
+    expect(turnActions(r.b).find(a => a.move === 'Fake Out')?.hits).toEqual([]);
+  });
+
+  it('a Mega with an X and a Y, neither said: logged as Mega, not as the likelier one', () => {
+    const forme = (line: string) => {
+      const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Charizard', 'Kingambit', 'Rillaboom', 'Clefable']});
+      r.read(line);
+      const e = r.b.events.find(x => x.kind === 'reveal' && x.what === 'forme');
+      return e?.kind === 'reveal' ? e.value : undefined;
+    };
+    expect(forme('The opposing Charizard has Mega Evolved into Mega Charizard!')).toBe('Charizard-Mega');
+    expect(forme('The opposing Charizard has Mega Evolved into Mega Charizard Y!')).toBe('Charizard-Mega-Y');
+  });
+});
+
+describe('a move told again (30 Sep): the one there is, not a second move, nor a new turn', () => {
+  it('said twice, three times', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Salamence used Protect!', 'The opposing Salamence used Protect!');
+    expect(r.notes.at(-1)).toMatch(/Protect: logged already$/);
+    r.read('The opposing Salamence used Protect!');
+    expect(r.b.turn).toBe(1);
+    expect(turnActions(r.b).map(a => a.move)).toEqual(['Protect']);
+  });
+
+  it('brought up again as a phrase goes on, after the move it was about', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Salamence used Protect!', 'Incineroar used Fake Out on the opposing Salamence!');
+    r.n.commit();
+    // "Fake Out into Salamence, but Salamence had Protect": both logged already.
+    r.n.feed([
+      {kind: 'use', actor: {side: 'me', slot: 1}, move: 'Fake Out'}, {kind: 'target', mon: {side: 'opp', slot: 0}},
+      {kind: 'use', actor: {side: 'opp', slot: 0}, move: 'Protect'},
+    ]);
+    r.n.commit();
+    expect(r.b.turn).toBe(1);
+    expect(turnActions(r.b).map(a => a.move)).toEqual(['Protect', 'Fake Out']);
+  });
+
+  it('the same move into another, or with another HP in the same phrase: a second one, the next turn', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Kingambit used Kowtow Cleave on Garchomp! Garchomp 100');
+    r.n.commit();
+    r.read('The opposing Kingambit used Kowtow Cleave on Garchomp! Garchomp 40');
+    r.n.commit();
+    expect(r.b.turn).toBe(2);
+    expect(turnActions(r.b, 2).map(a => a.hits.map(h => h.hpAfter))).toEqual([[40]]);
+    r.read('The opposing Kingambit used Kowtow Cleave on Incineroar!');
+    r.n.commit();
+    expect(r.b.turn).toBe(3);
   });
 });

@@ -8,7 +8,7 @@ import type {FormatData} from '../data/format';
 import {getGen, isDamagingMove} from '../data/dex';
 import {computeBeliefs, type MonBelief} from './posterior';
 import {
-  myMoveInto, oppMoveInto, predictionSnapshot, speedMatchups, speedProfile, type DamageMatchup, type SpeedMatchup,
+  myMoveInto, oppMoveInto, predictionSnapshot, speedMatchups, speedProfile, type DamageMatchup, type MegaCount, type SpeedMatchup,
   type SpeedProfile,
 } from './predict';
 import type {Battle} from './types';
@@ -21,10 +21,12 @@ export interface Matchups {
   profile: SpeedProfile;
   mine: {slot: number; r: DamageMatchup}[];
   theirs: {slot: number; r: DamageMatchup}[];
-  /** Predictions count it as Mega Evolving this turn (its likeliest Mega, and how likely it has one). */
-  asMega?: {forme: string; p: number};
+  /** It can still Mega Evolve: whether predictions count it as doing so this turn, and why. */
+  mega?: MegaCount;
   /** Your Pokémon counted as Mega Evolving this turn. */
   myMegas: number[];
+  /** Yours on the field that could Mega Evolve this turn, counted or not. */
+  myCan: number[];
 }
 
 export type WorkerRequest =
@@ -45,7 +47,7 @@ let fmt: FormatData | null = null;
 
 function matchupsFor(battle: Battle, b: MonBelief): Matchups {
   const gen = getGen(fmt!.gen);
-  const {snap: live, asMega, myMegas} = predictionSnapshot(gen, battle, battle.live, b);
+  const {snap: live, mega, myMegas, myCan} = predictionSnapshot(gen, battle, battle.live, b);
   const mineActive = live.active.me.filter((s): s is number => s !== null);
   const mySlots = mineActive.length ? mineActive : battle.myTeam.map((_, i) => i).slice(0, 2);
   const mine = mySlots.flatMap(slot => battle.myTeam[slot].moves
@@ -57,7 +59,7 @@ function matchupsFor(battle: Battle, b: MonBelief): Matchups {
     .map(slot => ({slot, r: oppMoveInto(fmt!, gen, battle, b, slot, m, live)}))
     .filter((x): x is {slot: number; r: DamageMatchup} => !!x.r));
   const profile = speedProfile(fmt!, gen, battle, b, live);
-  return {speed: speedMatchups(fmt!, gen, battle, b, live, profile), profile, mine, theirs, asMega, myMegas};
+  return {speed: speedMatchups(fmt!, gen, battle, b, live, profile), profile, mine, theirs, mega, myMegas, myCan};
 }
 
 self.onmessage = (e: MessageEvent<WorkerRequest>) => {

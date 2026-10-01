@@ -6,8 +6,10 @@
  * pop-ups: "Salamence's Intimidate") plus HP where it's known ("Charizard 45": yours in HP, theirs in
  * %). Anything it can't place is skipped.
  */
-import {allAbilities, allItems, allMoves, toID, type Gen} from '../../../data/dex';
+import {allAbilities, allItems, allMoves, move as dexMove, toID, type BoostID, type Gen} from '../../../data/dex';
 import {megaFormeOf} from '../../../engine/likelihood';
+import {moveFx} from '../../../engine/moves';
+import {NO_ITEM, OTHER_ITEM} from '../../../engine/prior';
 import type {MonSummary} from '../../../engine/worker';
 import type {Battle, Boosts, MonRef, SideID, Status} from '../../../engine/types';
 import {spokenName} from '../names';
@@ -39,6 +41,8 @@ export type VoiceEvent =
   | {kind: 'cure'; mon?: MonRef}
   /** "…'s Attack rose sharply!": how far each stat went. `limit`: "…won't go any higher!", so it's at ±6. */
   | {kind: 'stat'; mon?: MonRef; boosts: Boosts; limit?: boolean}
+  /** "…'s Attack was not lowered!": what went to lower it (an Intimidate, a move) didn't. */
+  | {kind: 'unchanged'; mon: MonRef; stats: BoostID[]}
   /** Weather, terrain, a room, or one side's Tailwind, screens or hazards starting, carrying on or ending. */
   | {kind: 'field'; news: FieldNews}
   /** End-of-turn damage or healing (sandstorm, burn, poison, Leftovers…): the turn's moves are over. */
@@ -143,6 +147,8 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['withdrew', 'withdrawAfter', 'voluntary'],
   ['was dragged out', 'dragged'], ['dragged out', 'dragged'],
   ['mega evolved', 'mega'], ['mega evolves', 'mega'], ['mega evolution', 'mega'], ['mega evolve', 'mega'],
+  // Said rather than read: "Lopunny mega", "mega Lopunny".
+  ['mega', 'mega'],
   // Champions has no line between turns: said ("end turn", "next turn"), or worked out (see the narrator).
   ['end turn', 'endTurn'], ['end of turn', 'endTurn'], ['next turn', 'endTurn'], ['new turn', 'endTurn'], ['turn over', 'endTurn'],
   // Turn order, said after the fact: "Rillaboom moved first", "Kingambit outsped Dragapult", "Gholdengo went last".
@@ -167,9 +173,14 @@ const USED = new Set(['used', 'uses', 'use', 'using']);
 const BEFORE_HP = new Set(['at', 'to', 'down', 'is', 'has', 'now', 'on', 'with', 'left', 'hp', 'health']);
 const AFTER_HP = new Set(['percent', 'hp', 'left']);
 
+/** Mega Kick, Mega Punch, Mega Drain and Mega Launcher: a move or ability, not "mega" said for Mega Evolution. */
+const NOT_MEGA = new Set(['kick', 'punch', 'drain', 'launcher']);
+
 function phraseAt(words: string[], i: number): {kind: Phrase; len: number; extra?: string} | null {
   for (const [p, kind, extra] of PHRASES) {
-    if (p.every((w, k) => words[i + k] === w)) return {kind, len: p.length, extra};
+    if (!p.every((w, k) => words[i + k] === w)) continue;
+    if (kind === 'mega' && p.length === 1 && NOT_MEGA.has(words[i + 1] ?? '')) continue;
+    return {kind, len: p.length, extra};
   }
   return null;
 }
@@ -221,6 +232,8 @@ function monNames(env: ParseEnv, side: SideID): (Named<string> & {said: string})
 export function narrationPhrases(env: ParseEnv): string[] {
   const out = new Set<string>();
   for (const side of ['me', 'opp'] as const) for (const n of monNames(env, side)) out.add(n.said);
+  // "Lopunny has Mega Evolved…" said quickly comes out "Lopunny meega evolved", "Lopunny Mga Wt".
+  out.add('Mega Evolved');
   for (const set of env.battle.myTeam) {
     for (const m of set.moves) out.add(m);
     if (set.item) out.add(set.item);
@@ -230,7 +243,8 @@ export function narrationPhrases(env: ParseEnv): string[] {
     if (!m) continue;
     const likely = <T extends {name: string; p: number}>(xs: T[], min: number) => xs.filter(x => x.p >= min).map(x => x.name);
     for (const x of likely(m.moves, 0.02)) out.add(x);
-    for (const x of likely(m.items, 0.05)) out.add(x);
+    // Not the "(other)" and "(none)" rows: no item's name, and "other" is said all the time ("… (other) (other).").
+    for (const x of likely(m.items, 0.05)) if (x !== OTHER_ITEM && x !== NO_ITEM) out.add(x);
     for (const x of likely(m.abilities, 0.05)) out.add(x);
     for (const a of Object.values(m.megaAbilityOf ?? {})) out.add(a);
   }
@@ -354,9 +368,25 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
     }
     return ab ? {event: {kind: 'ability', mon: ref, ability: ab.value}, len: ab.len} : null;
   };
-  const statEvent = (mon: MonRef, st: {boosts: Boosts; limit?: boolean}) => {
-    // "…'s accuracy fell!" isn't tracked, "…was not lowered!" isn't a change: read past them.
+  const statEvent = (mon: MonRef, st: {boosts: Boosts; limit?: boolean; unchanged?: BoostID[]}) => {
     if (Object.keys(st.boosts).length) out.push({kind: 'stat', mon, boosts: st.boosts, limit: st.limit});
+    // "…was not lowered!": an ability or item stopped it. ("…'s accuracy fell!" isn't tracked: read past.)
+    else if (st.unchanged) out.push({kind: 'unchanged', mon, stats: st.unchanged});
+  };
+  /**
+   * The side a move is aimed at when it's chosen against one Pokémon (not spread moves, not its
+   * user's own): a foe, or its ally for Helping Hand and the like.
+   */
+  const aimedSide = (move: string, actor: MonRef): SideID | null => {
+    const t = moveFx(move).tg ?? dexMove(env.gen, move)?.target ?? 'normal';
+    if (t === 'adjacentAlly') return actor.side;
+    return t === 'normal' || t === 'any' || t === 'adjacentFoe' ? (actor.side === 'me' ? 'opp' : 'me') : null;
+  };
+  /** A move of this Pokémon's at `at`: "…Bellibolt used Thunderbolt", "…Bellibolt Thunderbolt". */
+  const movesAt = (at: number, ref: MonRef) => {
+    if (USED.has(words[at] ?? '')) return true;
+    const m = moveAt(at, ref);
+    return !!m && m.score >= 0.9 && spelled(at, m);
   };
 
   while (i < words.length) {
@@ -610,7 +640,11 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
           break;
         }
         case 'mega': {
-          // "Charizard has Mega Evolved into Mega Charizard Y!"
+          // "Charizard has Mega Evolved into Mega Charizard Y!", or said: "Lopunny mega", "mega Lopunny".
+          const bare = ph.len === 1;
+          const next = bare ? monAt(i) : null;
+          const mon = bare ? next?.ref ?? (afterName ? last : undefined) : last ?? nextMon(i, 5)?.ref;
+          if (bare && !mon) break;
           let suffix: string | undefined;
           for (let j = i; j < Math.min(words.length, i + 5); j++) {
             if (words[j] === 'x' || words[j] === 'y') {
@@ -618,7 +652,17 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
               break;
             }
           }
-          out.push({kind: 'mega', mon: last ?? nextMon(i, 5)?.ref, suffix});
+          out.push({kind: 'mega', mon, suffix});
+          // "…into Mega Charizard Y": the same one again.
+          if (!bare && words[i] === 'into') {
+            let j = words[i + 1] === 'mega' ? i + 2 : i + 1;
+            const again = monAt(j);
+            if (again) {
+              j += again.len;
+              if (words[j] === 'x' || words[j] === 'y') j++;
+              i = j;
+            }
+          }
           break;
         }
         case 'endTurn':
@@ -640,6 +684,12 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
     const mon = monAt(i);
     if (mon) {
       named(mon.ref, i + mon.len);
+      // "Lopunny 's Attack…": the possessive heard apart.
+      let possessive = mon.possessive;
+      if (words[i] === 's') {
+        possessive = true;
+        lastEnd = ++i;
+      }
       // "The opposing Garchomp's Attack harshly fell!"
       const st = statAt(words, i);
       if (st) {
@@ -657,7 +707,7 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
         continue;
       }
       // "Rillaboom's Psychic Seed" is its item, not the move Psychic.
-      const own = mon.possessive ? abilityOrItemAt(i, mon.ref) : null;
+      const own = possessive ? abilityOrItemAt(i, mon.ref) : null;
       if (own) {
         out.push(own.event);
         i += own.len;
@@ -668,7 +718,7 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
       // "X used Y" (but "X used its Quick Claw" is an item, and "Garchomp's Earthquake was disabled!" no move used).
       let j = i;
       if (USED.has(words[j] ?? '')) j++;
-      if (words[j] !== 'its' && words[j] !== 'their' && !(mon.possessive && j === i)) {
+      if (words[j] !== 'its' && words[j] !== 'their' && !(possessive && j === i)) {
         let mv = moveAt(j, mon.ref);
         // With no "used": the move's own name, spelled out ("has" only sounds like Haze).
         if (mv && j === i && (mv.score < 0.9 || !spelled(j, mv))) mv = null;
@@ -686,6 +736,12 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
           if (t && !same(t.ref, mon.ref)) {
             out.push({kind: 'target', mon: t.ref});
             named(t.ref, t.at + t.len);
+          } else if (!t) {
+            // "Lopunny Fake Out Bellibolt": one named straight after a move aimed at one is its target,
+            // unless it's the next to move ("…Bellibolt Thunderbolt"). Its name is read on (its HP, a line about it).
+            const side = aimedSide(mv.value, mon.ref);
+            const n = side ? sideAt(i, side) : null;
+            if (n && !same(n.ref, mon.ref) && !movesAt(i + n.len, n.ref)) out.push({kind: 'target', mon: n.ref});
           }
           continue;
         }
@@ -711,6 +767,16 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
         out.push({kind: 'sendOut', mon: mon.ref});
         room[mon.ref.side]--;
       }
+      continue;
+    }
+
+    // "Intimidate from Incineroar": its ability, said the other way round.
+    const from = words[i + 1] === 'from' ? i + 1 : words[i + 2] === 'from' ? i + 2 : -1;
+    const whose = from > i ? nextMon(from + 1, 3) : null;
+    const said = whose ? abilityAt(i, whose.ref) : null;
+    if (whose && said && said.len === from - i) {
+      out.push({kind: 'ability', mon: whose.ref, ability: said.value});
+      named(whose.ref, whose.at + whose.len);
       continue;
     }
 

@@ -1,0 +1,5 @@
+# Cloudflare Pages: cross-origin isolation, so the voice models can use several threads (vite.config.ts
+# sends the same while developing). "credentialless": the Showdown sprites don't send CORP headers.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless

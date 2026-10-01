@@ -120,13 +120,23 @@ export const TYPES = [
   'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy', 'Stellar',
 ];
 
-/** Showdown sprite URL (hotlinked, with graceful fallback in the UI). */
-export function spriteUrl(gen: Gen, speciesName: string) {
+const SPRITES = 'https://play.pokemonshowdown.com/sprites/gen5/';
+/** The calc's Aegislash is Aegislash-Blade with two formes of its own; Showdown draws Shield as plain Aegislash. */
+const SPRITE_IDS: Record<string, string> = {
+  'Aegislash-Blade': 'aegislash-blade', 'Aegislash-Shield': 'aegislash', 'Aegislash-Both': 'aegislash',
+};
+
+/**
+ * Showdown sprite URLs (hotlinked), best first: the forme's own, then its regular forme's, for the new Megas
+ * Showdown hasn't drawn yet (Mega Malamar, Mega Raichu X…). The UI shows letters if none loads.
+ */
+export function spriteUrls(gen: Gen, speciesName: string): string[] {
   const sp = species(gen, speciesName);
   const name = sp?.name ?? speciesName;
-  const base = sp?.baseSpecies;
-  const id = base && name.startsWith(`${base}-`)
-    ? `${toID(base)}-${toID(name.slice(base.length + 1))}`
-    : toID(name);
-  return `https://play.pokemonshowdown.com/sprites/gen5/${id}.png`;
+  if (SPRITE_IDS[name]) return [`${SPRITES}${SPRITE_IDS[name]}.png`];
+  // Showdown names a forme's sprite base-forme. Champions' data has Floette-Mega come from Floette-Eternal and makes
+  // Floette-Eternal a species of its own, so the base can come from gen 9's data, where both are Floette's.
+  const base = [sp?.baseSpecies, species(getGen(9), name)?.baseSpecies].find(b => b && name.startsWith(`${b}-`));
+  if (!base) return [`${SPRITES}${toID(name)}.png`];
+  return [`${SPRITES}${toID(base)}-${toID(name.slice(base.length + 1))}.png`, `${SPRITES}${toID(base)}.png`];
 }

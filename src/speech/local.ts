@@ -7,6 +7,7 @@
 import {testLog, testLogAudio, testLogOn} from '../testlog';
 import type {Activity, Recognizer} from '../ui/battle/voice/useSpeech';
 import captureUrl from './capture.worklet.ts?worker&url';
+import {loadReader, unloadReader} from './reader';
 import {fetchManifest, install, installedManifest, uninstall, type Manifest, type Progress} from './store';
 import type {WorkerIn, WorkerOut} from './worker';
 
@@ -167,6 +168,7 @@ function unload() {
   worker?.terminate();
   worker = null;
   loaded = null;
+  unloadReader();
 }
 
 function engine(m: Manifest): Promise<Worker> {
@@ -184,6 +186,8 @@ function engine(m: Manifest): Promise<Worker> {
       if (msg.type === 'ready') {
         testLog('voice-model', {loaded: m.id, ms: msg.ms, threads: msg.threads});
         resolve(w);
+        // The language model that reads what's said, if the pack has it: voice reads by its rules until it's ready.
+        void loadReader(m);
         return;
       }
       if (msg.type === 'error' && !active) reject(new Error(msg.message));
@@ -230,6 +234,8 @@ export class LocalRecognizer implements Recognizer {
   private stream: MediaStream | null = null;
   private node: AudioWorkletNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private samples: Float32Array<ArrayBuffer> | null = null;
   private workletAdded = false;
 
   start() {
@@ -251,12 +257,17 @@ export class LocalRecognizer implements Recognizer {
 
   private async begin(run: number, ctx: AudioContext) {
     const current = () => run === this.run && this.running;
+    // Test builds: where setting up stopped, if it did.
+    let stage = 'finding the model';
+    const stuck = setTimeout(() => testLog('voice-mic', {stuck: stage, state: this.audio?.state}), 10_000);
     try {
       const m = await installedManifest();
       if (!m) throw Object.assign(new Error('The voice model isn’t on this device: turn voice on again to download it'), {code: 'model'});
       if (!loaded) this.onactivity?.('loading');
+      stage = 'loading the model';
       const w = await engine(m);
       if (!current()) return;
+      stage = 'asking for the microphone';
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true},
       });
@@ -265,10 +276,13 @@ export class LocalRecognizer implements Recognizer {
         return;
       }
       this.stream = stream;
+      stage = 'connecting the microphone';
       let source: MediaStreamAudioSourceNode;
+      let resampled = false;
       try {
         source = ctx.createMediaStreamSource(stream);
       } catch {
+        resampled = true;
         // Firefox won't take a microphone at another rate than the context's: run at the microphone's (the worklet resamples).
         void ctx.close().catch(() => {});
         ctx = this.audio = new AudioContext({latencyHint: 'interactive'});
@@ -276,9 +290,11 @@ export class LocalRecognizer implements Recognizer {
         source = ctx.createMediaStreamSource(stream);
       }
       if (!this.workletAdded) {
+        stage = 'loading the capture worklet';
         await ctx.audioWorklet.addModule(captureUrl);
         this.workletAdded = true;
       }
+      stage = 'starting the audio';
       await ctx.resume();
       const node = new AudioWorkletNode(ctx, 'speech-capture', {numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1});
       const channel = new MessageChannel();
@@ -288,12 +304,21 @@ export class LocalRecognizer implements Recognizer {
       post(w, {type: 'listen', on: true, keepAudio: testLogOn});
       // Nothing is played: the node's output is silence, connected so the graph keeps running it.
       source.connect(node).connect(ctx.destination);
+      // For the screen's meter.
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      this.analyser = analyser;
       this.node = node;
       this.source = source;
       active = this;
+      clearTimeout(stuck);
+      const track = stream.getAudioTracks()[0];
+      testLog('voice-mic', {rate: ctx.sampleRate, state: ctx.state, resampled, device: track?.label, settings: track?.getSettings?.()});
       this.onactivity?.(null);
       this.onaudiostart?.();
     } catch (err) {
+      clearTimeout(stuck);
       if (!current()) return;
       const name = err instanceof DOMException ? err.name : '';
       const own = (err as {code?: unknown}).code;
@@ -315,14 +340,28 @@ export class LocalRecognizer implements Recognizer {
     this.source?.disconnect();
     this.node?.disconnect();
     this.node?.port.close();
+    this.analyser?.disconnect();
     this.source = null;
     this.node = null;
+    this.analyser = null;
     for (const t of this.stream?.getTracks() ?? []) t.stop();
     this.stream = null;
     void this.audio?.suspend().catch(() => {});
     this.onactivity?.(null);
     // Like the browser's recogniser: the end comes after stop() returns.
     setTimeout(() => this.onend?.(), 0);
+  }
+
+  /** How loud the microphone is right now: 0 at -60 dB or quieter, 1 at -10 dB (a loud voice close by). */
+  level(): number {
+    const a = this.analyser;
+    if (!a) return 0;
+    const buf = (this.samples ??= new Float32Array(a.fftSize));
+    a.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (const v of buf) sum += v * v;
+    const db = 10 * Math.log10(sum / buf.length + 1e-12);
+    return Math.min(1, Math.max(0, (db + 60) / 50));
   }
 
   /** From the worker, while this one is listening. */
@@ -347,6 +386,9 @@ export class LocalRecognizer implements Recognizer {
         if (reading.alternatives.length) this.onresult?.(finalResult(reading.alternatives));
         break;
       }
+      case 'level':
+        testLog('voice-level', {batches: msg.batches, rms: msg.rms, peak: msg.peak, speech: msg.speech});
+        break;
       case 'error':
         this.onerror?.({error: msg.message});
         break;

@@ -4,6 +4,7 @@ import type {FormatData} from '../../data/format';
 import type {StatBelief} from '../../engine/posterior';
 import {OTHER_ITEM} from '../../engine/prior';
 import {maxHPOf} from '../../engine/state';
+import type {MegaCount} from '../../engine/predict';
 import type {InferResult, MonSummary} from '../../engine/worker';
 import type {Battle} from '../../engine/types';
 import {DistBars, DistRow, ItemIcon, Sprite, TypeTab, pct} from '../common';
@@ -84,8 +85,31 @@ function Abilities({m, mega}: {m: MonSummary; mega: boolean}) {
   );
 }
 
-export function Intel({fmt, gen, battle, result, slot}: {
+/**
+ * Whether the damage and Speed below count it as Mega Evolving this turn, and why: it has the stone
+ * (so it may), or it let a turn go by without (so it may not). The other way round is a tap away.
+ */
+function MegaNote({m, onSwitch}: {m: MegaCount; onSwitch?: () => void}) {
+  const stone = m.p >= 0.995 ? 'it has the stone' : `${pct(m.p)} it has the stone`;
+  const passed = m.passed ? `it didn't Mega Evolve on turn ${m.passed}` : '';
+  const text = m.counted
+    ? m.chosen
+      ? `Counts it as ${spokenName(m.forme)}, as you said (${stone}${passed ? `; ${passed}` : ''}).`
+      : `Counts it as ${spokenName(m.forme)} (${stone}): Mega Evolution comes before anyone moves, if it does.`
+    : m.chosen
+      ? `Counts it as it is, as you said (${stone}).`
+      : `Counts it as it is: ${passed}, though ${stone} (it may yet).`;
+  return (
+    <div className="note">
+      {text} {onSwitch && <button className="btn sm ghost" onClick={onSwitch}>{m.counted ? 'count it as it is' : 'count it as Mega'}</button>}
+    </div>
+  );
+}
+
+export function Intel({fmt, gen, battle, result, slot, onMegaPlan}: {
   fmt: FormatData; gen: Gen; battle: Battle; result: InferResult | null; slot: number;
+  /** Count a Pokémon as Mega Evolving this turn, or not (see Battle.megaPlan). */
+  onMegaPlan?(plan: NonNullable<Battle['megaPlan']>): void;
 }) {
   const [more, setMore] = useState(false);
   const m = result?.mons[slot];
@@ -106,12 +130,12 @@ export function Intel({fmt, gen, battle, result, slot}: {
       const c = live.mons[`me${s}`];
       const max = maxHPOf(stateCtx, live, {side: 'me', slot: s});
       const hp = c?.hp ?? max;
-      const asMega = mu.myMegas.includes(s);
+      const counted = mu.myMegas.includes(s);
       return {
         slot: s,
         name: set.nickname || set.species,
-        species: c?.mega || asMega ? megaFormeOf(gen, set) ?? set.species : set.species,
-        asMega,
+        species: c?.mega || counted ? megaFormeOf(gen, set) ?? set.species : set.species,
+        mega: counted ? 'counted' : mu.myCan.includes(s) ? 'can' : undefined,
         hp: (100 * hp) / max,
         hpText: `${hp}/${max}`,
         takes: mu.theirs.filter(x => x.slot === s).map(x => x.r),
@@ -139,11 +163,12 @@ export function Intel({fmt, gen, battle, result, slot}: {
       {mu && cards.length > 0 && (
         <div className="section col">
           <h3>Damage</h3>
-          {mu.asMega && (
-            <div className="note">Counts it as {spokenName(mu.asMega.forme)} ({mu.asMega.p >= 0.995 ? 'it has the stone' : `${pct(mu.asMega.p)} it has the stone`}): Mega Evolution comes before anyone moves.</div>
+          {mu.mega && (
+            <MegaNote m={mu.mega} onSwitch={onMegaPlan && (() => onMegaPlan({...battle.megaPlan, opp: {...battle.megaPlan?.opp, [slot]: !mu.mega!.counted}}))} />
           )}
           <MatchupCards gen={gen} cards={cards} oppName={spokenName(species)} oppHp={live.mons[`opp${slot}`]?.hp ?? 100} moveP={moveP}
-            speed={mu.speed} trickRoom={live.field.trickRoom} />
+            speed={mu.speed} trickRoom={live.field.trickRoom}
+            onMega={onMegaPlan && ((s, on) => onMegaPlan({...battle.megaPlan, me: on ? s : null}))} />
           <div className="note">% of max HP (95% range over rolls and its possible sets). Bar: solid = HP surely left, striped = depends on the roll. Faded: needs four hits or more.</div>
         </div>
       )}

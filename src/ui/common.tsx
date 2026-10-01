@@ -1,5 +1,5 @@
 import {createElement, useEffect, useState, type ReactNode} from 'react';
-import {getGen, spriteUrl, toID, type Gen} from '../data/dex';
+import {getGen, spriteUrls, toID, type Gen} from '../data/dex';
 import {loadFormat, loadFormatIndex, type FormatData, type FormatInfo} from '../data/format';
 import type {DistEntry} from '../engine/posterior';
 import {pct} from './format';
@@ -77,10 +77,18 @@ export function useFormat(id: string | undefined) {
 }
 
 export function Sprite({gen, species, large}: {gen: Gen; species: string; large?: boolean}) {
-  const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [species]);
-  if (failed || !species) return <div className="sprite-fallback">{species.slice(0, 2)}</div>;
-  return <img className={`sprite${large ? ' lg' : ''}`} src={spriteUrl(gen, species)} alt="" loading="lazy" onError={() => setFailed(true)} />;
+  const [failed, setFailed] = useState(0);
+  useEffect(() => setFailed(0), [species]);
+  // An updated service worker taking over (the first load after an update): what it couldn't give is tried again.
+  useEffect(() => {
+    const sw = typeof navigator !== 'undefined' ? navigator.serviceWorker : undefined;
+    const retry = () => setFailed(0);
+    sw?.addEventListener('controllerchange', retry);
+    return () => sw?.removeEventListener('controllerchange', retry);
+  }, []);
+  const url = species ? spriteUrls(gen, species)[failed] : undefined;
+  if (!url) return <div className="sprite-fallback">{species.slice(0, 2)}</div>;
+  return <img key={url} className={`sprite${large ? ' lg' : ''}`} src={url} alt="" loading="lazy" onError={() => setFailed(n => n + 1)} />;
 }
 
 /** Beliefs now vs. where the usage-stats prior started (thin tick). Ruled-out options are hidden. */

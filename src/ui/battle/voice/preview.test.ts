@@ -8,7 +8,7 @@ import {parseTeam} from '../../../data/paste';
 import {createBattle} from '../../../engine/battle';
 import type {MonRef} from '../../../engine/types';
 import {parseNarration} from './parse';
-import {readPreview, spokenNames, type Picks} from './preview';
+import {addTheirs, previewPhrases, readPreview, spokenNames, type Picks} from './preview';
 import {IDLE_MS, QUIET_MS, SpeechSession, WAIT_MS, type Recognizer} from './useSpeech';
 
 const data = (f: string) => JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../public/data', f), 'utf8'));
@@ -66,7 +66,8 @@ describe('team preview by voice', () => {
     const [more, other] = f ? ['Basculegion-F', 'Basculegion'] : ['Basculegion', 'Basculegion-F'];
     expect(say('basculegion').theirs).toEqual([more]);
     expect(say(`${f ? 'male' : 'female'} basculegion`).theirs).toEqual([other]);
-    expect(say('male basculegion female basculegion').theirs).toEqual(['Basculegion', 'Basculegion-F']);
+    // Never both (Species Clause): the one said second puts the first right.
+    expect(say('male basculegion female basculegion').theirs).toEqual(['Basculegion-F']);
   });
 
   it('then yours, in the order picked: the ones you bring and your leads', () => {
@@ -79,7 +80,22 @@ describe('team preview by voice', () => {
 
   it('"mine" and "theirs" say whose, whatever has been said so far', () => {
     const r = readPreview('they have pelipper archaludon, mine is incineroar and garchomp, theirs gholdengo', none, env);
-    expect(r.picks).toEqual({theirs: ['Pelipper', 'Archaludon', 'Gholdengo'], mine: [0, 2]});
+    expect(r.picks).toEqual({theirs: ['Pelipper', 'Archaludon', 'Gholdengo'], mine: [0, 2], last: 'theirs'});
+  });
+
+  it('a forme of one of theirs puts it right: one of each species', () => {
+    expect(say('goodra', 'froslass', 'hisuian goodra').theirs).toEqual(['Froslass', 'Goodra-Hisui']);
+    expect(addTheirs(['Charizard', 'Goodra', 'Froslass'], 'Goodra-Hisui', gen))
+      .toEqual({theirs: ['Charizard', 'Froslass', 'Goodra-Hisui'], said: 'Goodra → Goodra-Hisui'});
+    // The one said last is the one taken back.
+    expect(say('goodra', 'froslass', 'hisuian goodra', 'scratch that').theirs).toEqual(['Froslass']);
+    // Going back on it replaces it too: never both.
+    const r = readPreview('goodra', {theirs: ['Goodra-Hisui', 'Froslass'], mine: null}, env);
+    expect(r).toMatchObject({picks: {theirs: ['Froslass', 'Goodra']}, said: ['Goodra-Hisui → Goodra']});
+    // A gender said is a forme said: "male Basculegion" after the plain one, whichever the plain one is.
+    const plain = say('basculegion').theirs[0];
+    const other = plain === 'Basculegion' ? 'female basculegion' : 'male basculegion';
+    expect(say('basculegion', other).theirs).toEqual([plain === 'Basculegion' ? 'Basculegion-F' : 'Basculegion']);
   });
 
   it('taking back and clearing', () => {
@@ -133,9 +149,17 @@ describe('the first real test (Chrome on Android)', () => {
     const five = {theirs: THEIRS.slice(0, 5), mine: null};
     const first = readPreview('I brought', five, real);
     expect(first.side).toBe('mine');
-    expect(readPreview('Dragon Ball', first.picks, real, first.side).picks).toEqual({theirs: THEIRS.slice(0, 5), mine: [1]});
+    expect(readPreview('Dragon Ball', first.picks, real, first.side).picks).toEqual({theirs: THEIRS.slice(0, 5), mine: [1], last: 'mine'});
     // Without it, a name after the pause would count as theirs.
     expect(readPreview('Dragon Ball', first.picks, real).picks.mine).toBeNull();
+  });
+
+  it('whose it was carries on only while said or used', () => {
+    const five = {theirs: THEIRS.slice(0, 5), mine: null};
+    expect(readPreview('mine', five, real).side).toBe('mine');
+    expect(readPreview('Dragon Ball', five, real, 'mine').side).toBe('mine');
+    // A phrase that names none of yours doesn't keep it going.
+    expect(readPreview('okay', five, real, 'mine').side).toBeNull();
   });
 
   it("what it can't tell apart it offers to tap", () => {
@@ -190,6 +214,42 @@ describe('the first real test (Chrome on Android)', () => {
     expect(events[0]).toEqual({kind: 'use', actor: opp(1), move: 'Fake Out'});
     // Not across a number or another Pokémon: "Rillaboom 45 Fake Out" is its HP, then a move nobody used.
     expect(parseNarration('Rillaboom 45 Fake Out', {battle: b, gen, mons: undefined})[0]).toEqual({kind: 'hp', mon: opp(1), value: 45});
+  });
+});
+
+describe('the first test on a PC (Firefox, the voice model)', () => {
+  // Your team then had Indeedee-F; theirs was Charizard, Hisuian Goodra, Froslass, Annihilape, Bellibolt, Incineroar.
+  const MINE = parseTeam(['Dragapult', 'Milotic', 'Metagross-Mega', 'Indeedee-F', 'Arcanine-Hisui', 'Altaria'].map(s => `${s}\n- Protect`).join('\n\n'));
+  const real = {fmt, gen, team: MINE, bring: 4};
+  const two: Picks = {theirs: ['Charizard', 'Goodra-Hisui'], mine: null};
+
+  it('a stray "I" isn\'t "mine"', () => {
+    const r = readPreview("An I' Froslass.", two, real);
+    expect(r.picks.theirs).toEqual(['Charizard', 'Goodra-Hisui', 'Froslass']);
+    expect(r.side).toBeNull();
+  });
+
+  it("a Pokémon that isn't on your team is theirs, even after \"mine\"", () => {
+    // As the app heard them: "Annihilate" is Annihilape, not a stretch for your Indeedee.
+    let picks = two;
+    for (const line of ['Froslass.', 'Annihilate.', 'Bellibolt.', 'Incineroar']) picks = readPreview(line, picks, real, 'mine').picks;
+    expect(picks).toMatchObject({theirs: ['Charizard', 'Goodra-Hisui', 'Froslass', 'Annihilape', 'Bellibolt', 'Incineroar'], mine: null});
+    // Yours still are yours.
+    expect(readPreview('Indeedee', picks, real, 'mine').picks.mine).toEqual([3]);
+  });
+
+  it('a Pokémon heard that changes nothing says why', () => {
+    const r = readPreview('Froslass.', {theirs: [...two.theirs, 'Froslass'], mine: null}, real);
+    expect(r).toMatchObject({said: [], notes: ['Froslass is in already']});
+    const six = {theirs: ['Charizard', 'Goodra-Hisui', 'Froslass', 'Annihilape', 'Bellibolt', 'Incineroar'], mine: null};
+    expect(readPreview('Kingambit', six, real).notes).toEqual(['their six are in already, not Kingambit']);
+  });
+
+  it('"No, not that" (heard "No, nothing I") takes back the last one picked, whoever\'s', () => {
+    expect(previewPhrases(real)).toEqual(expect.arrayContaining(['not that', 'scratch that']));
+    const picked = readPreview('mine Indeedee', two, real).picks;
+    // Said after the side ran out: theirs by default, but the last one picked was yours.
+    expect(readPreview('No, not that', picked, real).picks).toMatchObject({theirs: two.theirs, mine: []});
   });
 });
 

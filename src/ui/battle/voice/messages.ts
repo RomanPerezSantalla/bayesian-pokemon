@@ -210,10 +210,10 @@ const CHANGES: [string[], number, boolean?][] = ([
 
 /**
  * A stat change at `i`, after the Pokémon's name: the stats and how far they went. `limit`: it
- * couldn't go further (so it's at ±6). Empty `boosts`: a line to read past (a stat that isn't
- * tracked, or one that didn't change).
+ * couldn't go further (so it's at ±6). `unchanged`: "…was not lowered" (whatever went to lower
+ * it didn't). Empty `boosts` and no `unchanged`: a line to read past (a stat that isn't tracked).
  */
-export function statAt(words: string[], i: number): {boosts: Boosts; limit?: boolean; len: number} | null {
+export function statAt(words: string[], i: number): {boosts: Boosts; limit?: boolean; unchanged?: BoostID[]; len: number} | null {
   const s = statsAt(words, i);
   if (!s) return null;
   const j = i + s.len;
@@ -221,5 +221,6 @@ export function statAt(words: string[], i: number): {boosts: Boosts; limit?: boo
   if (!ch) return null;
   const boosts: Boosts = {};
   if (ch[1]) for (const id of s.stats) boosts[id] = ch[1];
-  return {boosts, limit: ch[2], len: s.len + ch[0].length};
+  const unchanged = !ch[1] && s.stats.length ? s.stats : undefined;
+  return {boosts, limit: ch[2], unchanged, len: s.len + ch[0].length};
 }

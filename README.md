@@ -17,7 +17,7 @@ npm run dev          # http://localhost:5173  (add `-- --host` to open it from y
 npm test             # every move and item the calc has for Champions has its own test (src/engine/moves.test.ts, items.test.ts)
 npm run build        # static site in dist/
 npm run phone        # the app on your phone over HTTPS (voice included), with a test log; see below
-npm run voice-pack   # the voice model's files (~150 MB, fetched once into .cache/voice/); see "By voice"
+npm run voice-pack   # the voice model's files (~280 MB: fetched once into .cache/voice/, the reader from .cache/llm); see "By voice"
 npm run data         # refresh the Showdown structure data + move/ability tables (monthly)
 npm run data:tables  # just the move/ability tables (no download)
 ```
@@ -94,18 +94,21 @@ microphone hears you rather than the game.
    Tapping someone who already moved this turn, or who came in this turn, starts the next turn for you.
    A short vibration confirms each entry (Android).
 
-**By voice:** tap **🎙 Voice** and read the battle text as it appears, adding HP where you
-have it: "The opposing Salamence used Draco Meteor! Charizard 45", "Garchomp used Earthquake! It
-doesn't affect the opposing Salamence… the opposing Rillaboom 60", "A critical hit!", "Charizard
-fainted!", "Kim sent out Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved into Mega
-Charizard Y!". The ability and item pop-ups ("Salamence's Intimidate", "Rillaboom's Leftovers") answer
-the *What did the game show?* questions. Each move is logged when the next one starts or after a short
-pause; HP left out is logged as skipped, and a message not said (Life Orb recoil, a berry) is never
-taken as not having happened. The leads can come the same way: start the battle without them and read
-the opening lines ("Kim sent out Salamence and Rillaboom!", "Go! Incineroar and Sneasler!"), or say
-them your way ("opponent sent Rillaboom and Corviknight", "opponent leads with…", or just the names
-while their places are empty). A species both sides have is the side just talked about ("opponent…
-Altaria"), else yours; for a pop-up, which names no side, the one it fits.
+**By voice:** tap **🎙 Voice** and read the battle text as it appears, adding HP where you have it: "The
+opposing Salamence used Draco Meteor! Charizard 45", "Garchomp used Earthquake! It doesn't affect the
+opposing Salamence… the opposing Rillaboom 60", "A critical hit!", "Charizard fainted!", "Kim sent out
+Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved into Mega Charizard Y!" (or just "Charizard
+mega", "mega Charizard"). The ability and item pop-ups ("Salamence's Intimidate", "Rillaboom's
+Leftovers", or said "Intimidate from Salamence") answer the *What did the game show?* questions. Said
+your way, a Pokémon named straight after a move aimed at one is its target ("Lopunny Fake Out
+Bellibolt"), unless it's the next to move ("…Bellibolt Thunderbolt"). Each move is logged when the next
+one starts or after a short pause; HP left out is logged as skipped (a single-target move with no target
+said is one of them, "Incineroar or Bellibolt?", and both are marked unread), and a message not said
+(Life Orb recoil, a berry) is never taken as not having happened. The leads can come the same way: start
+the battle without them and read the opening lines ("Kim sent out Salamence and Rillaboom!", "Go!
+Incineroar and Sneasler!"), or say them your way ("opponent sent Rillaboom and Corviknight", "opponent
+leads with…", or just the names while their places are empty). A species both sides have is the side
+just talked about ("opponent… Altaria"), else yours; for a pop-up, which names no side, the one it fits.
 
 Details said after a move was logged (after the pause, or once the next line started) go with it:
 "…it crit", "Dragapult 40", "it missed", "Charizard fainted", "Sitrus Berry" reopen the last move logged,
@@ -121,11 +124,14 @@ them. They're worded as Champions has them (its own English battle text, as dump
 was checked to read as what it says, and `src/ui/battle/voice/turns.test.ts` reads whole turns:
 
 - **Stat changes** ("The opposing Garchomp's Attack harshly fell!", "Charizard and Incineroar's Attack
-  fell!", "…won't go any higher!") are checked against what logging already did (a move's own boosts
-  and drops, Intimidate on the way in, Sticky Web, a Defiant answered), so nothing counts twice. A chance one goes with its move (Moonblast's Sp. Atk
-  drop, Meteor Mash's Attack) and, like any stat change on a target, says whom a single-target move hit
-  (Parting Shot's target); "Attack rose sharply!" after a drop, from one that may have Defiant, is its
-  Defiant. What nothing logged explains (Moxie, Speed Boost, a seed) goes onto the board, after the move.
+  fell!", "…won't go any higher!") are checked against what logging already did (a move's own boosts and
+  drops, Intimidate on the way in, Sticky Web, a Defiant answered), so nothing counts twice; "…'s Attack
+  was not lowered!" takes back the drop logged for it this turn (and asks, for one of yours whose Mega's
+  ability would have stopped it, whether it Mega Evolved). A chance one goes with its move (Moonblast's
+  Sp. Atk drop, Meteor Mash's Attack) and, like any stat change on a target, says whom a single-target
+  move hit (Parting Shot's target); "Attack rose sharply!" after a drop, from one that may have Defiant,
+  is its Defiant. What nothing logged explains (Moxie, Speed Boost, a seed) goes onto the board, after
+  the move.
 - **Hits**: "A critical hit on the opposing Kingambit!", "It's super effective on the opposing Kingambit
   and Salamence!", "…protected itself!", "But it failed to affect…", "The Pokémon was hit 4 times!", "But
   it failed!", "Occa Berry weakened Heat Wave's power!" (the berry of whoever it hit), "…knocked off the
@@ -140,38 +146,63 @@ was checked to read as what it says, and `src/ui/battle/voice/turns.test.ts` rea
   tailwind started blowing on the opposing side!", "Your side's tailwind petered out!", "Pointed stones
   float in the air on the opposing side!", "…blew away Stealth Rock!") puts the board right wherever it
   differs.
-- **Turns**: Champions writes nothing between turns (the weather stays on the field panel, with no
-  "Rain continues to fall."), so a turn's end is told by what comes: its first end-of-turn line ("The
-  rain stopped.", "…is buffeted by the sandstorm!", "…was hurt by its burn!", "…was hurt by its
-  poisoning!", a Leftovers or Speed Boost pop-up, a tailwind or screen running out) ends it, with its
-  residual damage and timers, and HP read after that is where that Pokémon is now, not part of a move.
-  Otherwise the next turn shows itself: its switches ("…, come back!", "Kim withdrew…"), its Mega
-  Evolution, or a Pokémon moving again, including one that couldn't move before. "Next turn" (or "end
-  turn") said out loud ends one too.
+- **Turns**: Champions writes nothing between turns (the weather stays on the field panel, with no "Rain
+  continues to fall."), so a turn's end is told by what comes: its first end-of-turn line ("The rain
+  stopped.", "…is buffeted by the sandstorm!", "…was hurt by its burn!", "…was hurt by its poisoning!",
+  a Leftovers or Speed Boost pop-up, a tailwind or screen running out) ends it, with its residual damage
+  and timers, and HP read after that is where that Pokémon is now, not part of a move. Otherwise the
+  next turn shows itself: its switches ("…, come back!", "Kim withdrew…"), its Mega Evolution, a Pokémon
+  moving again (including one that couldn't move before, or one that came in this turn), or a move that
+  can't come after one already made (Protect or Fake Out after an ordinary attack: priority, counting
+  the Prankster, Gale Wings or Triage the earlier ones may have had). "Next turn" (or "end turn") said
+  out loud ends one too. Entries taken back on the screen take what was heard about them with them: a
+  turn undone and read again isn't split by the "…flinched" heard the first time.
 - Trainer names ("…went back to Roman!", "…is reacting to Roman's Omni Ring!") are read past.
 
 *Team preview* takes voice too: tap 🎙 Voice there and say their six as you see them ("Rillaboom,
 Sneasler, Salamence…"; formes the way you'd say them: "Alolan Ninetales", "Wash Rotom", "Aqua Tauros"),
 then "mine" (or "I brought…") and yours in the order you pick them on the Switch, which gives the ones
-you bring and your leads; after "mine", a pause doesn't send the next names back to theirs. A Pokémon
-with a female forme too (Indeedee, Basculegion) is said plain for whichever is used more; say "female" or
-"male" for the other. "Scratch that" takes back the last one, "clear" starts over. When it can't tell
-which Pokémon a word was, it offers the likeliest few to tap. The microphone stays on into the battle:
-reading or saying its first line ("…sent out…", "opponent sent…") starts it and sets their leads.
+you bring and your leads. "Mine" holds over a pause, not for good: it runs out ten seconds after it was
+said or one of yours named, and a Pokémon that isn't on your team is theirs whatever was said (a stray
+"I" heard once sent the rest of their team to yours). A Pokémon with a female forme too (Indeedee,
+Basculegion) is said plain for whichever is used more; say "female" or "male" for the other. Another
+forme of one already in replaces it, said or tapped ("Goodra", then "Hisuian Goodra", or back): one of
+each species.
+"Scratch that" (or "not that") takes back the last one picked, "clear" starts over, and a Pokémon heard
+that changes nothing says why ("Froslass is in already"). When it can't tell which Pokémon a word was,
+it offers the likeliest few to tap. The microphone stays on into the battle: reading or saying its first
+line ("…sent out…", "opponent sent…") starts it and sets their leads.
 
 **The voice model.** Voice runs a speech model on the device: the first time you turn it on, it offers a
-one-time download (about 150 MB: NVIDIA's Parakeet TDT-CTC 110M, an 8-bit ONNX copy of its CTC half,
-a speech detector and the ONNX runtime), kept in the browser's Cache Storage and removable from the
-Battles page. Nothing leaves the device, it works offline, and in any browser (Chrome, Safari, Firefox).
-It listens out for what can be said right now: in a battle, the dozen Pokémon in it, your moves, items
-and abilities and their likely ones; at team preview, every Pokémon in the format. A general recogniser
-writes names it doesn't know the way they sounded ("Corvy Kight", "King Ambot", "Rail a boom"); here
-each name that can come up is also lined up against the sound itself (`src/speech/ctc.ts`, word
-spotting as in NVIDIA's CTC-WS), and one that fits nearly as well as what was heard replaces it. That's
-what holds up for accents: names are compared on the sound, among the few possible, not on spelling. On
-synthetic voices, an American one and a Spanish one reading English, it gets 98 of 106 names and moves
-with nothing false, also on lines with no names in them. The speech detector finds where each line ends
-(a pause of 0.7 s), and the line is read in a fraction of a second on a PC, a second or so on a phone.
+one-time download (about 280 MB: NVIDIA's Parakeet TDT-CTC 110M, an 8-bit ONNX copy of its CTC half, a
+speech detector, the reader below and the ONNX runtime), kept in the browser's Cache Storage and
+removable from the Battles page. Nothing leaves the device, it works offline, and in any browser (Chrome,
+Safari, Firefox). It listens out for what can be said right now: in a battle, the dozen Pokémon in it,
+your moves, items and abilities and their likely ones; at team preview, every Pokémon in the format, and
+"scratch that" and "not that" (not "clear", "mine" or "theirs": short words, which it found in lines
+without them). A general recogniser writes names it doesn't know the way they sounded ("Corvy Kight",
+"King Ambot", "Rail a boom"); here each name that can come up is also lined up against the sound itself
+(`src/speech/ctc.ts`, word spotting as in NVIDIA's CTC-WS), and one that fits nearly as well as what was
+heard replaces it. That's what holds up for accents: names are compared on the sound, among the few
+possible, not on spelling. On synthetic voices, an American one and a Spanish one reading English, it
+gets 98 of 106 names and moves with nothing false, also on lines with no names in them. The speech
+detector finds where each line ends (a pause of 0.7 s), and the line is read in a fraction of a second on
+a PC, a second or so on a phone.
+
+**The reader.** What was heard then goes to a small language model on the device (Google's FunctionGemma
+270M, fine-tuned for this, 130 MB in 8-bit, in the same download), which turns it into the app's actions:
+it's shown the battle (who's out, who has Mega Evolved) or team preview, what the phrase before did, and
+the phrase, and answers one action a line ("use me:Lopunny Fake Out > opp:Bellibolt", "hp opp:Bellibolt
+84", "add opp:Froslass"). So it takes however you say it ("Froslass out, Incineroar in", "Intimidate from
+Incineroar", "Dragonite's attack wasn't lowered"), and puts the phrase before right: "no, 74", "I meant
+Triple Axel", "scratch that", "my bad, Froslass not Volcarona". It only interprets; the rules are the
+app's. Each line is checked before it's used (a Pokémon on the field or the team, a move in your set or
+one theirs can learn or has been seen with, an ability or item it can have, a field effect there is), and
+anything else is dropped; a line it wasn't sure of is offered to tap instead. On the lines from real
+battles and team previews it wasn't trained on, it gets 90 of 95 battle lines, 30 of 34 team preview
+lines, and all 32 corrections written for them; a line takes about half a second on a phone (four
+threads: the site is cross-origin isolated for that), less when the field is the same as the last line's.
+Until it's loaded, voice reads by its rules as before.
 
 The browser's own recogniser (Chrome, Safari) is still there for anyone who'd rather not download: the
 offer has a link for it, and the Battles page switches between the two. It sends the audio away (Chrome
@@ -213,15 +244,20 @@ contradicts Aerilate after.
 
 **At a glance:** the move order of everyone on the field (by Speed, flipped under Trick Room, with odds
 where it's close). Per opponent, damage comes first as one card per Pokémon of yours on the field: what
-it *takes* from the opponent's likeliest moves and what it *deals* back, each a 95% range of max HP (over
-damage rolls and its possible sets) with an HP bar (solid = surely left, striped = depends on the roll
-and their set). Each move carries its type symbol, as the Switch games draw it, with the type
-multiplier beside it (the type as it lands: Aerilate's Flying Hyper Voice shows as Flying). The badge
+it *takes* from the opponent's likeliest moves and what it *deals* back, each a 95% range of max HP
+(over damage rolls and its possible sets) with an HP bar (solid = surely left, striped = depends on the
+roll and their set). Each move carries its type symbol, as the Switch games draw it, with the type
+multiplier beside it as the hit lands (Aerilate's Hyper Voice shows as Flying; Mega Lopunny's Scrappy
+Close Combat on a Ghost as ×2, not the chart's ×0; Ring Target, Gravity, Freeze-Dry likewise). The badge
 gives the KO chance from its HP now, or else how many hits it takes (2HKO, 2–3HKO…); rows needing four
 hits or more fade, and a card's edge turns orange/red when a likely move could KO it. Every attack it
 plausibly has is listed (3%+), since on turn one nothing is known. The card header names who moves
-first. Any Pokémon that can still Mega Evolve, yours or theirs, is counted as its Mega for damage and
-Speed (it evolves before anyone moves), weather included for Drought and co. Then Speed for your other Pokémon, and item (with icons), ability and moves.
+first. A Pokémon that can still Mega Evolve is counted as its Mega for damage and Speed (it evolves
+before anyone moves), weather included for Drought and co., until it moves without doing so: then it's
+counted as it is (the stone may be kept for another, or for later), and the note says so. Only one of
+yours on the field is counted, the first that hasn't let a turn go by, since a side has one Mega. The
+note's switch, and the *as Mega* / *not Mega* tag on your cards, count it the other way. Then Speed for
+your other Pokémon, and item (with icons), ability and moves.
 
 The header has a light/dark toggle (it starts from the system setting and remembers your choice) and
 a Buy me a coffee link.
@@ -282,15 +318,25 @@ change so the screen never waits.
 - *Official ladder* ([championsbattledata.com](https://championsbattledata.com), a fan mirror of the
   in-game Battle Data): top moves, items, abilities, stat alignments, stat-point spreads and teammates
   per Pokémon, separately for Singles and Doubles. Fetched from the browser and cached for offline use.
-- *Showdown* (Smogon's usage stats for the newest Champions regulation, compiled at build time): the
-  structure the in-game lists lack. How Mega X and Mega Y users differ, which alignment goes with
-  which spread, and the long tail of spreads.
-- Formes follow the Mega Stones held (Charizardite Y 94% → Mega Y 94%). Every legal ability stays
-  possible (a share listed as 0.0% was still seen, just rarely), and spread tails and templates keep
-  unusual builds possible too.
+- *Showdown* (Smogon's usage stats for the newest Champions regulation, compiled at build time): only
+  what the in-game data can't say at all, because its shares aren't the ladder's (teams cost nothing to
+  build there, so players experiment far more). That's how a Mega forme's moves and spreads differ from
+  its species' (the in-game lists pool them: a Mega X and a Mega Y fight differently), the share each
+  teammate rank stands for, and species the in-game data doesn't list.
+- Formes follow the Mega Stones held (Charizardite Y 94% → Mega Y 94%), whatever the teammates. Each
+  in-game spread takes its alignment from the in-game alignment list, as far as it makes sense for the
+  spread; spreads past the top 10 are sampled from the top 10's own per-stat shares, plus a few
+  templates. Every legal ability stays possible (a share listed as 0.0% was still seen, just rarely),
+  so unusual builds stay possible too.
 - Move sets are modelled as 4-move samples that reproduce the usage percentages, with item rules
   (Choice Scarf users don't run Protect), so seeing a move moves the item beliefs.
-- Item Clause couples everyone's items exactly.
+- Item Clause couples everyone's items exactly, across all six at team preview (brought or not): beside
+  an Excadrill, which runs Focus Sash 85% of the time, a Sneasler almost never has one.
+- A terrain seed follows its terrain's setter on the team. The usage shares mix teams with and without
+  one, and how often a Pokémon's team has one comes from its usual teammates (the in-game list gives
+  only their ranks; each rank's share is estimated from Showdown's stats). With a setter on the team a
+  seed is as likely as among the teams that have one; without, next to never. Sneasler's Psychic Seed
+  is 27% overall, 67% beside an Indeedee-F and about 1.5% with no Psychic Terrain setter.
 
 **Observations** (`src/engine/likelihood.ts`) are exact:
 
@@ -334,11 +380,18 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
   unticked reads as the Pokémon being faster (a Scarf, more Speed) or, where that can't be, as a
   flagged conflict.
 - Illusion and Transform aren't modelled.
+- The voice reader learned from made-up battles and phrasings: a badly misheard name, or a phrase unlike
+  any it saw, can still come out wrong (checked, so never as something that can't be; offered to tap
+  when it wasn't sure). It puts right only the phrase just before (within a minute); older mistakes are
+  for Undo. Moves new in Champions are checked against the ladder data, not a learnset.
 
-Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or
-The Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites and item icons, type symbols
-recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT). Voice:
-[Parakeet TDT-CTC 110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) by NVIDIA and Suno.ai
-([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), used as the CTC half converted to 8-bit ONNX by
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx); [Silero VAD](https://github.com/snakers4/silero-vad)
-(MIT); [ONNX Runtime Web](https://onnxruntime.ai) (MIT).
+Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or The
+Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites and item icons, type
+symbols recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT). Voice:
+[Parakeet TDT-CTC 110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) by NVIDIA and Suno.ai ([CC
+BY 4.0](https://creativecommons.org/licenses/by/4.0/)), used as the CTC half converted to 8-bit ONNX by
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx); [Silero
+VAD](https://github.com/snakers4/silero-vad) (MIT); [ONNX Runtime Web](https://onnxruntime.ai) (MIT). The
+reader is a fine-tuned [FunctionGemma 270M](https://huggingface.co/google/functiongemma-270m-it): Gemma
+is provided under and subject to the Gemma Terms of Use found at
+[ai.google.dev/gemma/terms](https://ai.google.dev/gemma/terms).

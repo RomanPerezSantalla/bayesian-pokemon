@@ -8,7 +8,7 @@ import {fuse, type Structure} from '../data/fuse';
 import type {OfficialEntry, OfficialSnapshot} from '../data/official';
 import {parseTeam} from '../data/paste';
 import {createBattle, emptyField, uid} from './battle';
-import {damageDistribution, fractionalPriority, makeField, makeMove, makePokemon} from './calc';
+import {damageDistribution, fractionalPriority, makeField, makeMove, makePokemon, runCalc} from './calc';
 import {displayPct, mySpec, orderConsistency} from './likelihood';
 import {buildMoveModel, inclusion, itemFactors, movesLogLik} from './moveset';
 import {computeBeliefs, type DistEntry} from './posterior';
@@ -179,6 +179,17 @@ describe('certainty from logic', () => {
     expect(find(c.formes, 'Charizard-Mega-Y')?.certain).toBe(true);
   });
 
+  it('Mega Evolving, X or Y not said: a Mega, both still open, the base forme out', () => {
+    const b = battleVs(['Charizard', 'Venusaur']);
+    b.events.push({kind: 'reveal', id: uid(), turn: 1, mon: opp(0), what: 'forme', value: 'Charizard-Mega', negate: false});
+    const c = computeBeliefs(fmt, b).mons[0]!;
+    expect(p(c.formes, 'Charizard')).toBe(0);
+    // X is rare on the ladder (about 2% of these Megas): rare, not ruled out, and Y not taken as known.
+    expect(p(c.formes, 'Charizard-Mega-X')).toBeGreaterThan(0.005);
+    expect(find(c.formes, 'Charizard-Mega-Y')?.certain).toBeFalsy();
+    expect(p(c.formes, 'Charizard-Mega-X') + p(c.formes, 'Charizard-Mega-Y')).toBeCloseTo(1, 6);
+  });
+
   it('being poisoned by Close Combat means Poison Touch', () => {
     const b = battleVs(['Sneasler', 'Incineroar']);
     const max = b.live.mons.me0.hp;
@@ -215,6 +226,61 @@ describe('certainty from logic', () => {
     ]));
     const inc = computeBeliefs(fmt, b).mons[0]!;
     expect(find(inc.items, 'Sitrus Berry')?.certain).toBe(true);
+  });
+});
+
+describe('items that depend on the team', () => {
+  // In-game Battle Data as it stood in season M6 (25 Sep 2026), by hand: Sneasler's seeds need a
+  // terrain, set by Indeedee-F (Psychic Surge) or Rillaboom (Grassy Surge); Excadrill runs Focus Sash.
+  const entry = (position: number, items: [string, number][], abilities: [string, number][], moves: [string, number][], teammates: string[]): OfficialEntry => ({
+    position,
+    move: moves.map(([n, q], r) => [n, q, r + 1]),
+    held_item: items.map(([n, q], r) => [n, q, r + 1]),
+    ability: abilities.map(([n, q], r) => [n, q, r + 1]),
+    stat_alignment: [['Jolly', 60, 'Speed', 'Sp. Atk', 1], ['Adamant', 40, 'Attack', 'Sp. Atk', 2]],
+    stat_points: [[60, 2, 32, 0, 0, 0, 32, 1]],
+    teammate: teammates.map((n, r) => [n, r + 1]),
+  });
+  const base = officialFrom(structure, ['Milotic', 'Kingambit', 'Incineroar', 'Garchomp', 'Tyranitar']);
+  const seedFmt = fuse(info, structure, {...base, pokemon: {
+    ...base.pokemon,
+    Sneasler: entry(2, [['White Herb', 29.3], ['Psychic Seed', 26.8], ['Grassy Seed', 25.9], ['Focus Sash', 13.8], ['Normal Gem', 1],
+      ['Life Orb', 0.9], ['Electric Seed', 0.5], ['Iron Ball', 0.4]], [['Unburden', 99]], [['Close Combat', 99.3], ['Dire Claw', 92.4],
+      ['Protect', 64], ['Fake Out', 56.5]], ['Rillaboom', 'Salamence', 'Kingambit', 'Indeedee-F', 'Incineroar']),
+    'Indeedee-F': entry(20, [['Psychic Seed', 23.2], ['Choice Scarf', 40], ['Focus Sash', 20]], [['Psychic Surge', 99.8]],
+      [['Expanding Force', 98], ['Follow Me', 70], ['Protect', 60], ['Trick Room', 40]], ['Sneasler', 'Salamence']),
+    Rillaboom: entry(10, [['Miracle Seed', 56.8], ['Assault Vest', 20], ['Grassy Seed', 5.3]], [['Grassy Surge', 99.9]],
+      [['Grassy Glide', 95], ['Wood Hammer', 80], ['Fake Out', 90], ['High Horsepower', 60]], ['Sneasler', 'Kingambit']),
+    Excadrill: entry(28, [['Focus Sash', 85.1], ['Life Orb', 9.8], ['Excadrite', 1], ['Choice Scarf', 1]], [['Mold Breaker', 60], ['Sand Rush', 40]],
+      [['Iron Head', 98.7], ['Protect', 96.7], ['Rock Slide', 88.7], ['High Horsepower', 85.1]], ['Tyranitar', 'Salamence', 'Sneasler']),
+  }});
+  const sneasler = (team: string[]) => {
+    const b = createBattle(seedFmt, MY_TEAM, ['Sneasler', ...team], 'seeds');
+    return computeBeliefs(seedFmt, b).mons[0]!.items;
+  };
+  const prior = (list: DistEntry[], name: string) => list.find(e => e.name === name)?.prior ?? 0;
+
+  it('a seed goes with its terrain’s setter: Psychic Seed beside Indeedee-F, Grassy Seed beside Rillaboom', () => {
+    const indeedee = sneasler(['Indeedee-F', 'Milotic', 'Kingambit', 'Incineroar', 'Garchomp']);
+    expect(prior(indeedee, 'Psychic Seed')).toBeGreaterThan(0.5);
+    expect(prior(indeedee, 'Grassy Seed')).toBeLessThan(0.03);
+    const rilla = sneasler(['Rillaboom', 'Milotic', 'Kingambit', 'Incineroar', 'Garchomp']);
+    expect(prior(rilla, 'Grassy Seed')).toBeGreaterThan(0.35);
+    expect(prior(rilla, 'Psychic Seed')).toBeLessThan(0.03);
+  });
+
+  it('no setter on the team: next to no seeds, the rest shared as usual', () => {
+    const none = sneasler(['Tyranitar', 'Milotic', 'Kingambit', 'Incineroar', 'Garchomp']);
+    expect(prior(none, 'Psychic Seed') + prior(none, 'Grassy Seed')).toBeLessThan(0.05);
+    expect(prior(none, 'White Herb')).toBeGreaterThan(prior(none, 'Focus Sash'));
+    expect(prior(none, 'White Herb') + prior(none, 'Focus Sash')).toBeGreaterThan(0.8);
+  });
+
+  it('with Excadrill, which holds the Focus Sash, Sneasler almost never does (Item Clause)', () => {
+    const alone = sneasler(['Indeedee-F', 'Milotic', 'Kingambit', 'Incineroar', 'Garchomp']);
+    const withExca = sneasler(['Indeedee-F', 'Excadrill', 'Kingambit', 'Incineroar', 'Garchomp']);
+    expect(prior(withExca, 'Focus Sash')).toBeLessThan(0.03);
+    expect(prior(withExca, 'Focus Sash')).toBeLessThan(prior(alone, 'Focus Sash') / 2);
   });
 });
 
@@ -566,13 +632,30 @@ describe('predictions', () => {
   it('count a Mega as evolving this turn while its side still can', () => {
     const b = battleVs(['Charizard', 'Garchomp']);
     const c = computeBeliefs(fmt, b).mons[0]!;
-    const {snap, asMega} = predictionSnapshot(gen, b, b.live, c);
-    expect(asMega?.forme).toMatch(/^Charizard-Mega/);
+    const {snap, mega} = predictionSnapshot(gen, b, b.live, c);
+    expect(mega).toMatchObject({forme: expect.stringMatching(/^Charizard-Mega/), counted: true});
     expect(snap.mons.opp0.mega).toBe(true);
     expect(b.live.mons.opp0.mega).toBe(false);
     // One Mega per side: once another opponent has evolved, it can't.
     b.live.mons.opp1.mega = true;
-    expect(predictionSnapshot(gen, b, b.live, c).asMega).toBeUndefined();
+    expect(predictionSnapshot(gen, b, b.live, c).mega).toBeUndefined();
+  });
+
+  it('not once it has moved without Mega Evolving (it may yet: you can count it again)', () => {
+    const b = battleVs(['Charizard', 'Garchomp']);
+    b.events.push(action(b, 1, opp(0), 'Heat Wave'));
+    const c = computeBeliefs(fmt, b).mons[0]!;
+    let pf = predictionSnapshot(gen, b, b.live, c);
+    expect(pf.mega).toMatchObject({counted: false, passed: 1});
+    expect(pf.snap.mons.opp0.mega).toBe(false);
+    b.megaPlan = {opp: {0: true}};
+    pf = predictionSnapshot(gen, b, b.live, c);
+    expect(pf.mega).toMatchObject({counted: true, passed: 1, chosen: true});
+    expect(pf.snap.mons.opp0.mega).toBe(true);
+    // And the other way round before it has had the chance.
+    const fresh = battleVs(['Charizard', 'Garchomp']);
+    fresh.megaPlan = {opp: {0: false}};
+    expect(predictionSnapshot(gen, fresh, fresh.live, c).mega).toMatchObject({counted: false, chosen: true});
   });
 
   it('count my Mega too, weather and all, until I have used it', () => {
@@ -594,6 +677,46 @@ Timid Nature
     expect(b.live.field.weather).toBeUndefined();
     b.live.mons.me0.mega = true;
     expect(predictionSnapshot(gen, b, b.live, g).myMegas).toEqual([]);
+  });
+
+  it('count one of mine on the field at a time: the first that has not let a turn go by, or the one I say', () => {
+    const team = parseTeam(`Charizard @ Charizardite Y
+Ability: Solar Power
+- Heat Wave
+
+Lopunny @ Lopunnite
+Ability: Limber
+- Fake Out`);
+    const b = createBattle(fmt, [...team, ...MY_TEAM.slice(0, 4)], ['Garchomp', 'Incineroar'], 'test');
+    b.live.active = {me: [0, 1], opp: [0, 1]};
+    const g = computeBeliefs(fmt, b).mons[0]!;
+    expect(predictionSnapshot(gen, b, b.live, g)).toMatchObject({myMegas: [0], myCan: [0, 1]});
+    // Charizard moved without it: Lopunny, then.
+    b.events.push(action(b, 1, me(0), 'Heat Wave'));
+    expect(predictionSnapshot(gen, b, b.live, g).myMegas).toEqual([1]);
+    b.megaPlan = {me: 0};
+    expect(predictionSnapshot(gen, b, b.live, g).myMegas).toEqual([0]);
+    b.megaPlan = {me: null};
+    expect(predictionSnapshot(gen, b, b.live, g).myMegas).toEqual([]);
+  });
+});
+
+describe('the type multiplier shown with a hit', () => {
+  const hit = (attacker: string, ability: string, move: string, defender: string, defAbility: string, item?: string) => runCalc(gen,
+    makePokemon(gen, {species: attacker, level: 50, evs: [0, 32, 0, 32, 0, 2], ability}),
+    makePokemon(gen, {species: defender, level: 50, evs: [0, 0, 0, 0, 0, 0], ability: defAbility, item}),
+    makeMove(gen, move, {targets: 1}), makeField('doubles', emptyField(), 'me'));
+
+  it('is the one the hit lands with: Scrappy hits a Ghost (Mega Lopunny on Froslass), the chart would say immune', () => {
+    const cc = hit('Lopunny-Mega', 'Scrappy', 'Close Combat', 'Froslass', 'Cursed Body');
+    expect([cc.effectiveness, Math.max(...cc.dist.keys()) > 0]).toEqual([2, true]);
+    expect(hit('Lopunny-Mega', 'Scrappy', 'Fake Out', 'Froslass', 'Cursed Body').effectiveness).toBe(1);
+    // Without Scrappy it doesn't.
+    const plain = hit('Lopunny', 'Limber', 'Close Combat', 'Froslass', 'Cursed Body');
+    expect([plain.effectiveness, Math.max(...plain.dist.keys())]).toEqual([0, 0]);
+    // Ring Target takes an immunity away (Flying), leaving the rest of the chart (Steel: ×2).
+    expect(hit('Garchomp', 'Rough Skin', 'Earthquake', 'Corviknight', 'Pressure', 'Ring Target').effectiveness).toBe(2);
+    expect(hit('Garchomp', 'Rough Skin', 'Earthquake', 'Corviknight', 'Pressure').effectiveness).toBe(0);
   });
 });
 
@@ -725,9 +848,11 @@ Careful Nature
 
   it('a single-target move with no HP said leaves who it hit unknown, safely', () => {
     const r = doubles();
-    r.say('The opposing Rillaboom used Wood Hammer');
     r.say('Garchomp used Protect');
-    const [hammer, protect] = turnActions(r.b);
+    r.say('The opposing Rillaboom used Wood Hammer');
+    expect(r.n.describe()).toMatch(/Wood Hammer → Charizard \/ Garchomp$/);
+    expect(r.say('The opposing Salamence used Dragon Claw on Charizard')[0]).toMatch(/Wood Hammer → Charizard \/ Garchomp \(not said\): HP skipped$/);
+    const [protect, hammer] = turnActions(r.b);
     expect(hammer.hits.every(h => h.unread)).toBe(true);
     expect(protect.move).toBe('Protect');
     expect(r.b.live.mons.me0.hpUnknown).toBe(true);
@@ -786,10 +911,14 @@ Careful Nature
       const r = doubles();
       r.say('The opposing Salamence used Dragon Claw! Charizard 45');
       r.say('Garchomp used Protect');
-      // Protect hit nothing: a crit can't be about it, and Salamence's move isn't the last any more.
-      expect(r.say('it crit')).toEqual(['A crit: on which move? Say it with the move']);
-      expect(r.say('The opposing Rillaboom 50')).toEqual(['HP 50 not placed (no move open)']);
-      expect(turnActions(r.b).map(a => a.move)).toEqual(['Dragon Claw', 'Protect']);
+      // Said after it, but Protect comes first in a turn and Garchomp hadn't moved: this turn's, said out of order. It
+      // goes first, its place not taken as the turn's order; Dragon Claw is the last move logged again.
+      expect(r.b.events.filter(e => e.kind === 'action').map(a => [a.turn, a.kind === 'action' && a.move, a.kind === 'action' && a.ordered]))
+        .toEqual([[1, 'Protect', false], [1, 'Dragon Claw', true]]);
+      expect(r.say('it crit')).toEqual([]);
+      // No move can take Rillaboom's HP (it wasn't in Dragon Claw): it's where Rillaboom is at now, not damage.
+      expect(r.say('The opposing Rillaboom 50')).toEqual(['Rillaboom 50%']);
+      expect(r.b.events.filter(e => e.kind === 'action').flatMap(a => (a.kind === 'action' ? a.hits.map(h => h.hpAfter) : []))).not.toContain(50);
     });
   });
 
@@ -944,5 +1073,32 @@ IVs: 0 Spe
     expect(s).toMatchObject({nickname: 'Bruno', species: 'Incineroar', gender: 'M', item: 'Sitrus Berry', ability: 'Intimidate', level: 50, nature: 'Careful'});
     expect(s.evs).toEqual([32, 0, 10, 0, 24, 0]);
     expect(s.ivs).toEqual([31, 31, 31, 31, 31, 0]);
+  });
+});
+
+describe('abilities that switch on during a battle', () => {
+  const ctxOf = (b: Battle): StateCtx => ({fmt, gen, battle: b, oppAbility: () => undefined, oppItem: () => undefined});
+  const draft = (actor: MonRef, move: string, hits: ActionEvent['hits'] = []): ActionDraft => ({
+    actor, move, hits, targets: hits.length || 1, helpingHand: false, actorTriggers: [], ordered: true,
+  });
+  const log = (b: Battle, d: ActionDraft) => logAction(ctxOf(b), b, d);
+  const hit = (target: MonRef, hpBefore: number, hpAfter: number) => ({target, hpBefore, hpAfter, fainted: hpAfter <= 0, crit: false, triggers: []});
+
+  it('Electromorphosis: charged once hit, the charge spent on its next Electric move (which is judged with it)', () => {
+    let b = battleVs(['Bellibolt', 'Kingambit']);
+    b = log(b, draft(me(0), 'Fake Out', [hit(opp(0), 100, 84)]));
+    expect(b.live.mons.opp0.abilityOn).toBe(true);
+    b = log(b, draft(opp(1), 'Sucker Punch'));
+    expect(b.live.mons.opp0.abilityOn).toBe(true);
+    b = log(b, draft(opp(0), 'Parabolic Charge'));
+    const move = b.events.at(-1) as ActionEvent;
+    expect(move.before.mons.opp0.abilityOn).toBe(true);
+    expect(b.live.mons.opp0.abilityOn).toBe(false);
+  });
+
+  it("not for one that can't have it", () => {
+    let b = battleVs(['Kingambit', 'Bellibolt']);
+    b = log(b, draft(me(0), 'Fake Out', [hit(opp(0), 100, 84)]));
+    expect(b.live.mons.opp0.abilityOn).toBe(false);
   });
 });

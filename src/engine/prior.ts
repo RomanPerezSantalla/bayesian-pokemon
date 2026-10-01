@@ -72,8 +72,19 @@ const TAIL_SAMPLES = 96;
 const GENERIC_MASS = 0.02;
 const MIN_TAIL_MASS = 0.04;
 const MAX_ITEMS = 24;
-/** Tempering for the naive-Bayes teammate update (teammates are correlated). */
-const TEAMMATE_ALPHA = 0.5;
+/** A terrain seed goes off in its terrain: what sets it, by ability or by move. */
+const SEEDS: Record<string, {ability: string; move: string}> = {
+  'Psychic Seed': {ability: 'Psychic Surge', move: 'Psychic Terrain'},
+  'Grassy Seed': {ability: 'Grassy Surge', move: 'Grassy Terrain'},
+  'Electric Seed': {ability: 'Electric Surge', move: 'Electric Terrain'},
+  'Misty Seed': {ability: 'Misty Surge', move: 'Misty Terrain'},
+};
+/** A seed with no setter of its terrain on its own team (only the opponent's terrain to go off in): this share of its usage. */
+const SEED_ALONE = 0.05;
+/** Most a seed gets even beside its terrain's setter. */
+const SEED_MAX = 0.85;
+/** At most this much for all seeds together. */
+const SEEDS_MAX = 0.95;
 
 // Generic spreads in Stat Point units; scaled to EVs for other gens.
 const TEMPLATES: [number[], string[]][] = [
@@ -196,23 +207,63 @@ function buildSpreads(gen: Gen, sd: SpeciesStats | undefined, seed: string) {
   return {spreads, probs, kinds};
 }
 
-function formePriors(fmt: FormatData, formes: string[], teammates: string[]): number[] {
-  const logp = formes.map(f => Math.log(fmt.species[f]?.weight ?? 1));
-  // Naive-Bayes on teammates only when every forme has teammate data to compare.
-  if (formes.length > 1 && formes.every(f => fmt.species[f]?.teammates.length)) {
-    formes.forEach((f, idx) => {
-      const tm = new Map(fmt.species[f]?.teammates ?? []);
-      for (const t of teammates) {
-        const group = fmt.preview[t] ?? [t];
-        const p = group.reduce((s, g) => s + (tm.get(g) ?? 0), 0);
-        logp[idx] += TEAMMATE_ALPHA * Math.log(Math.max(p, 0.003));
-      }
-    });
-  }
-  const max = Math.max(...logp);
-  const w = logp.map(x => Math.exp(x - max));
-  const total = w.reduce((a, b) => a + b, 0);
+/**
+ * How likely each forme is: its share of the species as the in-game data has it (the Mega Stones
+ * held). Not tilted by teammates: only Showdown splits teammates by forme, and Showdown players,
+ * whose teams cost nothing to build, experiment far more than the Switch ladder does.
+ */
+function formePriors(fmt: FormatData, formes: string[]): number[] {
+  const w = formes.map(f => fmt.species[f]?.weight ?? 1);
+  const total = w.reduce((a, b) => a + b, 0) || 1;
   return w.map(x => x / total);
+}
+
+/** How likely a Pokémon (by preview name, over its formes) is to set the terrain a seed needs. */
+function setsTerrain(fmt: FormatData, name: string, seed: string): number {
+  const {ability, move} = SEEDS[seed];
+  let total = 0;
+  let weights = 0;
+  for (const f of fmt.preview[name] ?? [name]) {
+    const sd = fmt.species[f];
+    if (!sd) continue;
+    const pa = sd.abilities.find(([a]) => a === ability)?.[1] ?? 0;
+    const pm = sd.moves.find(([m]) => m === move)?.[1] ?? 0;
+    total += sd.weight * Math.min(1, pa + pm);
+    weights += sd.weight;
+  }
+  return weights ? total / weights : 0;
+}
+
+/**
+ * A terrain seed is worth holding only with that terrain's setter on the team: Sneasler's Psychic
+ * Seed goes with an Indeedee, its Grassy Seed with a Rillaboom. The usage stats mix teams that have a
+ * setter with teams that don't; how often its team has one (q) comes from its usual partners. With a
+ * setter on this team the seed is as likely as among the teams that have one (its usage over q, as
+ * far as SEED_MAX); without one, next to never. The other items share what's left as usual.
+ */
+function seedsForTeam(fmt: FormatData, forme: string, preview: string, teammates: string[], list: [string, number][]): [string, number][] {
+  if (!list.some(([n]) => SEEDS[n])) return list;
+  const [names, probs] = normalized(list);
+  const sd = fmt.species[forme];
+  const partners = sd?.partners?.length ? sd.partners : sd?.teammates ?? [];
+  const seeds = new Map<string, number>();
+  names.forEach((seed, k) => {
+    if (!SEEDS[seed]) return;
+    const m = probs[k];
+    const self = setsTerrain(fmt, preview, seed);
+    let usual = 1 - self;
+    for (const [t, p] of partners) usual *= 1 - p * setsTerrain(fmt, t, seed);
+    const q = Math.max(1 - usual, m / SEED_MAX, 0.02);
+    let here = 1 - self;
+    for (const t of teammates) here *= 1 - setsTerrain(fmt, t, seed);
+    const withSetter = Math.min(SEED_MAX, (m * (1 - SEED_ALONE * (1 - q))) / q);
+    seeds.set(seed, (1 - here) * withSetter + here * SEED_ALONE * m);
+  });
+  const total = [...seeds.values()].reduce((a, b) => a + b, 0);
+  const scale = total > SEEDS_MAX ? SEEDS_MAX / total : 1;
+  const rest = names.reduce((s, n, k) => s + (SEEDS[n] ? 0 : probs[k]), 0);
+  const restScale = rest > 0 ? (1 - total * scale) / rest : 0;
+  return names.map((n, k) => [n, SEEDS[n] ? seeds.get(n)! * scale : probs[k] * restScale]);
 }
 
 const spaceCache = new Map<string, MonSpace>();
@@ -229,7 +280,7 @@ export function buildMonSpace(
   if (hit) return hit;
 
   const formeNames = fmt.preview[preview] ?? [preview];
-  const priors = formePriors(fmt, formeNames, teammates);
+  const priors = formePriors(fmt, formeNames);
   const formes: FormeSpace[] = [];
 
   formeNames.forEach((name, idx) => {
@@ -244,6 +295,7 @@ export function buildMonSpace(
     if (!isMega) {
       const other = sd ? sd.itemsOther : 0.1;
       if (other > 0.002) itemList.push([OTHER_ITEM, other]);
+      itemList = seedsForTeam(fmt, name, preview, teammates, itemList);
       itemList = withExtras(itemList, extras.items, Math.max(0.01, other));
     }
     const [items, itemP] = normalized(itemList);

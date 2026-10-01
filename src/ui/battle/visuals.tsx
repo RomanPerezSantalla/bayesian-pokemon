@@ -51,8 +51,8 @@ export interface Card {
   /** Its HP now, % of max. */
   hp: number;
   hpText: string;
-  /** Counted as Mega Evolving this turn (it hasn't yet). */
-  asMega?: boolean;
+  /** It can Mega Evolve this turn (it hasn't yet): counted as doing so, or not. */
+  mega?: 'counted' | 'can';
   takes: DamageMatchup[];
   deals: DamageMatchup[];
 }
@@ -62,7 +62,7 @@ export interface Card {
  * deals back, every move a row with the HP bar and roll zone. Likeliest threats and best hits
  * come first; hits needing four or more fade.
  */
-export function MatchupCards({gen, cards, oppName, oppHp, moveP, speed, trickRoom}: {
+export function MatchupCards({gen, cards, oppName, oppHp, moveP, speed, trickRoom, onMega}: {
   gen: Gen;
   cards: Card[];
   oppName: string;
@@ -70,6 +70,8 @@ export function MatchupCards({gen, cards, oppName, oppHp, moveP, speed, trickRoo
   moveP(move: string): number;
   speed: SpeedMatchup[];
   trickRoom: boolean;
+  /** Count this one as Mega Evolving this turn, or not. */
+  onMega?(slot: number, on: boolean): void;
 }) {
   const threat = (r: DamageMatchup) => moveP(r.move) * (r.ko + r.hi / 1000);
   return (
@@ -86,7 +88,12 @@ export function MatchupCards({gen, cards, oppName, oppHp, moveP, speed, trickRoo
             <div className="mcard-head">
               <Sprite gen={gen} species={c.species} />
               <b className="mcard-name">{c.name}</b>
-              {c.asMega && <span className="tag" title="Counted as Mega Evolving this turn">as Mega</span>}
+              {c.mega && (
+                <button className={`tag${c.mega === 'counted' ? '' : ' off'}`} disabled={!onMega} onClick={() => onMega?.(c.slot, c.mega !== 'counted')}
+                  title={c.mega === 'counted' ? 'Counted as Mega Evolving this turn: tap to count it as it is' : 'It could Mega Evolve this turn: tap to count it as Mega'}>
+                  {c.mega === 'counted' ? 'as Mega' : 'not Mega'}
+                </button>
+              )}
               <span className="muted small mono">{c.hpText}</span>
               <span className="spacer" />
               {sv && <span className={`verdict ${sv.cls}`}>{sv.text}</span>}

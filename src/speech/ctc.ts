@@ -145,6 +145,12 @@ export function mergeSpots(tokens: Token[], vocab: Vocab, spots: Spot[]): string
     }
     const s = spots[si];
     if (s && tok.start <= s.end && tok.end >= s.start) continue;
+    // "Loani|'s" with the spot put in for "Loani": the possessive goes on the name ("Lopunny's").
+    if (dropTail && /^['’]/.test(piece)) {
+      text = text.trimEnd() + piece;
+      dropTail = false;
+      continue;
+    }
     // The rest of a word the spot began in ("Corvy K|ight"): part of what it replaced.
     if (dropTail && !piece.startsWith('▁') && /\p{L}/u.test(piece)) continue;
     dropTail = false;

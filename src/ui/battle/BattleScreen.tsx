@@ -447,7 +447,7 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
           <button key={i} className={`btn sm${intelSlot === i ? ' on' : ''}`} onClick={() => setFocusOpp(i)}>{oppSpecies(battle, result?.mons, i) || n}</button>
         ))}
       </div>
-      <Intel fmt={fmt} gen={gen} battle={battle} result={result} slot={intelSlot} />
+      <Intel fmt={fmt} gen={gen} battle={battle} result={result} slot={intelSlot} onMegaPlan={plan => update(b => ({...b, megaPlan: plan}))} />
     </div>
   );
 

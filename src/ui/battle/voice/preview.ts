@@ -9,12 +9,15 @@ import type {Gen} from '../../../data/dex';
 import type {FormatData} from '../../../data/format';
 import type {PokemonSet} from '../../../data/paste';
 import {toID} from '../../../data/dex';
+import {HEARD_AS} from './heard';
 import {COMMON_WORDS, matchAt, norm, rankAt, squash, type MatchOptions, type Named} from './text';
 
 /** What's been picked so far: their preview names, and your team slots in pick order (null: not said yet). */
 export interface Picks {
   theirs: string[];
   mine: number[] | null;
+  /** Whose was picked last, for "scratch that" in a later phrase. */
+  last?: Side;
 }
 
 export interface PreviewEnv {
@@ -37,28 +40,20 @@ export interface PreviewRead {
   picks: Picks;
   /** What each part of the phrase did, for the screen. */
   said: string[];
+  /** Pokémon heard that changed nothing, and why ("Froslass is in already"). */
+  notes: string[];
   unsure: Unsure[];
   /** A line from the battle itself was heard: it has started. */
   battle: boolean;
-  /** Whose Pokémon were being said at the end ("mine…"), to carry on into the next phrase. */
+  /**
+   * Whose Pokémon were being said at the end, when the phrase said so ("mine…") or named one of
+   * them: to carry on into the next phrase. Null otherwise, so a side said once doesn't stick.
+   */
   side: Side | null;
 }
 
 export type Side = 'theirs' | 'mine';
 
-/**
- * How the recogniser has heard some names in real tests. Among every Pokémon in the format there's
- * no telling these apart by sound ("carbonite" is as close to Scrafty as to Corviknight).
- */
-const HEARD_AS: Record<string, string[]> = {
-  Corviknight: ['carbonite', 'curvonite', 'corby night', 'curvy night'],
-  Rillaboom: ['really boom', 'relay boom', 'villa boom', 'relabum'],
-  Gholdengo: ['gardenia', 'gardeno', 'golden go'],
-  Pidgeot: ['idiot', 'pidgeotto'],
-  Dragapult: ['dragon ball', 'dragon pult'],
-  Milotic: ['celtic'],
-  Altaria: ['alitalia'],
-};
 
 /** Your six: few enough to let badly heard names through ("dragon ball" for Dragapult). */
 const MINE_OPTS: MatchOptions = {consonants: true, stop: COMMON_WORDS, prefix: true};
@@ -125,9 +120,15 @@ function theirNames(fmt: FormatData): Named<string>[] {
   return c;
 }
 
+/**
+ * Commands the voice model listens out for as well ("No, not that" came out "No, nothing I").
+ * Not "clear", "reset", "mine" or "theirs": short words, which it found in lines without them.
+ */
+const COMMANDS_HEARD = ['not that', 'scratch that', 'remove that', 'delete that'];
+
 /** What can be said at team preview, for the voice model to listen out for: every Pokémon here by name, and yours. */
 export function previewPhrases(env: PreviewEnv): string[] {
-  const out = new Set<string>();
+  const out = new Set<string>(COMMANDS_HEARD);
   for (const n of Object.keys(env.fmt.preview)) for (const s of spokenNames(n)) out.add(s);
   for (const set of env.team) {
     const base = env.gen.species.get(toID(set.species))?.baseSpecies;
@@ -152,25 +153,76 @@ function myNames(env: PreviewEnv): Named<number>[] {
 }
 
 const THEIRS = new Set(['theirs', 'their', 'they', 'opponent', 'opponents', 'opposing', 'enemy', 'foe', 'versus', 'vs', 'against']);
-const MINE = new Set(['mine', 'my', 'me', 'i', 'im', 'ill', 'we', 'our', 'bringing', 'bring', 'brought', 'picking', 'pick', 'picked', 'leading']);
+// Not "I" or "me" on their own: the recogniser hears them in anything ("An I' Froslass").
+const MINE = new Set(['mine', 'my', 'our', 'ours', 'bringing', 'bring', 'brought', 'picking', 'pick', 'picked', 'leading']);
 const UNDO = [['undo'], ['scratch', 'that'], ['not', 'that'], ['remove', 'that'], ['delete', 'that']];
 const CLEAR = [['clear'], ['start', 'over'], ['reset']];
 const BATTLE = [['sent'], ['sends'], ['send', 'out'], ['what', 'will'], ['start', 'battle'], ['start', 'the', 'battle'], ['lets', 'battle']];
 
 const phraseAt = (words: string[], i: number, list: string[][]) => list.find(p => p.every((w, k) => words[i + k] === w));
 
+/** The species a Pokémon is a forme of ("Goodra-Hisui", "Metagross-Mega": Goodra, Metagross), as an ID. */
+function speciesOf(gen: Gen, name: string): string {
+  const sp = gen.species.get(toID(name));
+  return sp ? toID(sp.baseSpecies ?? sp.name) : toID(name);
+}
+
+/**
+ * Their picks with `name` added. Another forme of one already there replaces it, never joins it: a
+ * team has one of each species (Species Clause), so "Goodra", then "Hisuian Goodra", or the other
+ * way round, is going back on it. The one said last goes last, for "scratch that".
+ */
+export function addTheirs(theirs: readonly string[], name: string, gen: Gen): {theirs: string[]; said?: string; note?: string} {
+  if (theirs.includes(name)) return {theirs: [...theirs], note: `${name} is in already`};
+  const k = theirs.findIndex(t => speciesOf(gen, t) === speciesOf(gen, name));
+  if (k >= 0) return {theirs: [...theirs.filter((_, j) => j !== k), name], said: `${theirs[k]} → ${name}`};
+  if (theirs.length >= 6) return {theirs: [...theirs], note: `their six are in already, not ${name}`};
+  return {theirs: [...theirs, name], said: name};
+}
+
 /** `side`: whose Pokémon the phrase before was about, if it was just now ("I brought…" then a pause). */
 export function readPreview(text: string, picks: Picks, env: PreviewEnv, side: Side | null = null): PreviewRead {
   const words = norm(text).split(' ').filter(Boolean);
-  const theirs = [...picks.theirs];
+  let theirs = [...picks.theirs];
   let mine = picks.mine ? [...picks.mine] : null;
+  let last = picks.last;
   const said: string[] = [];
+  const notes: string[] = [];
   const unsure: Unsure[] = [];
   let battle = false;
+  /** A side said in this phrase, and whether it was said or used (a Pokémon named on it). */
+  let told = false;
+  let meant = false;
   // Theirs until their six are in, then yours; "mine…" / "theirs…" say otherwise.
   const current = () => side ?? (theirs.length < 6 ? 'theirs' : 'mine');
+  const cands = theirNames(env.fmt);
   const mineNames = myNames(env);
   const mineLabel = (slot: number) => env.team[slot]?.nickname || env.team[slot]?.species || '?';
+  // Your slot for a species ("Metagross" at preview is your Metagross-Mega).
+  const mySlot = new Map<string, number>();
+  env.team.forEach((set, slot) => {
+    const s = speciesOf(env.gen, set.species);
+    if (!mySlot.has(s)) mySlot.set(s, slot);
+  });
+  const takeTheirs = (name: string) => {
+    const r = addTheirs(theirs, name, env.gen);
+    theirs = r.theirs;
+    if (r.said) {
+      said.push(r.said);
+      last = 'theirs';
+    }
+    if (r.note) notes.push(r.note);
+  };
+  const takeMine = (slot: number) => {
+    mine ??= [];
+    if (mine.includes(slot)) notes.push(`your ${mineLabel(slot)} is in already`);
+    else if (mine.length >= env.bring) notes.push(`your ${env.bring} are in already, not ${mineLabel(slot)}`);
+    else {
+      mine.push(slot);
+      said.push(`your ${mineLabel(slot)}`);
+      last = 'mine';
+    }
+  };
 
   let i = 0;
   while (i < words.length) {
@@ -181,8 +233,10 @@ export function readPreview(text: string, picks: Picks, env: PreviewEnv, side: S
       break;
     }
     if ((p = phraseAt(words, i, UNDO))) {
-      if (current() === 'theirs' && theirs.length) said.push(`took back ${theirs.pop()}`);
-      else if (current() === 'mine' && mine?.length) said.push(`took back your ${mineLabel(mine.pop()!)}`);
+      // The last one picked, whichever side, unless this phrase said whose.
+      const from = told ? current() : last ?? current();
+      if (from === 'theirs' && theirs.length) said.push(`took back ${theirs.pop()}`);
+      else if (from === 'mine' && mine?.length) said.push(`took back your ${mineLabel(mine.pop()!)}`);
       i += p.length;
       continue;
     }
@@ -193,24 +247,17 @@ export function readPreview(text: string, picks: Picks, env: PreviewEnv, side: S
       i += p.length;
       continue;
     }
-    if (THEIRS.has(w)) {
-      side = 'theirs';
-      i++;
-      continue;
-    }
-    if (MINE.has(w)) {
-      side = 'mine';
+    if (THEIRS.has(w) || MINE.has(w)) {
+      side = THEIRS.has(w) ? 'theirs' : 'mine';
+      told = meant = true;
       i++;
       continue;
     }
     if (current() === 'theirs') {
-      const cands = theirNames(env.fmt);
       const m = matchAt(words, i, cands, 0.72, 0.08, THEIRS_OPTS);
       if (m) {
-        if (!theirs.includes(m.value) && theirs.length < 6) {
-          theirs.push(m.value);
-          said.push(m.value);
-        }
+        takeTheirs(m.value);
+        if (side) meant = true;
         i += m.len;
         continue;
       }
@@ -223,14 +270,20 @@ export function readPreview(text: string, picks: Picks, env: PreviewEnv, side: S
         continue;
       }
     } else {
+      const t = matchAt(words, i, cands, 0.72, 0.08, THEIRS_OPTS);
       const m = matchAt(words, i, mineNames, 0.6, 0.12, MINE_OPTS);
-      if (m) {
-        mine ??= [];
-        if (!mine.includes(m.value) && mine.length < env.bring) {
-          mine.push(m.value);
-          said.push(`your ${mineLabel(m.value)}`);
-        }
-        i += m.len;
+      const slot = t ? mySlot.get(speciesOf(env.gen, t.value)) : undefined;
+      // A Pokémon that isn't on your team can only be theirs, "mine…" or not: "annihilate" is
+      // Annihilape, not a stretch for your Indeedee.
+      if (t && slot === undefined && (!m || t.score > m.score)) {
+        takeTheirs(t.value);
+        i += t.len;
+        continue;
+      }
+      if (m || (t && slot !== undefined)) {
+        takeMine(m ? m.value : slot!);
+        if (side) meant = true;
+        i += m ? m.len : t!.len;
         continue;
       }
       const ranked = rankAt(words, i, mineNames, MINE_OPTS).filter(r => !(mine ?? []).includes(r.value));
@@ -243,5 +296,5 @@ export function readPreview(text: string, picks: Picks, env: PreviewEnv, side: S
     }
     i++;
   }
-  return {picks: {theirs, mine}, said, unsure, battle, side};
+  return {picks: {theirs, mine, last}, said, notes, unsure, battle, side: meant ? side : null};
 }

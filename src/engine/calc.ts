@@ -1,6 +1,6 @@
 /** Thin adapter between our battle model and @smogon/calc. */
 import {Field, Move, Pokemon, calculate, type Result} from '@smogon/calc';
-import {getFinalSpeed} from '@smogon/calc/dist/mechanics/util';
+import {getFinalSpeed, getMoveEffectiveness} from '@smogon/calc/dist/mechanics/util';
 import {STAT_IDS, isSpreadMove, move as dexMove, toID, type Gen} from '../data/dex';
 import {moveFx} from './moves';
 import {NO_ITEM, OTHER_ITEM} from './prior';
@@ -112,20 +112,40 @@ export interface DamageOutcome {
   dist: Map<number, number>;
   /** Final move type after Weather Ball, -ate abilities, Tera Blast etc. */
   moveType: string;
+  /** The type multiplier the hit lands with (see landedEffectiveness). */
   effectiveness: number;
   maxHP: number;
 }
 
 export function runCalc(gen: Gen, attacker: Pokemon, defender: Pokemon, move: Move, field: Field): DamageOutcome {
   const res = calculate(gen, attacker, defender, move, field);
-  const moveType = res.move.type;
   return {
     dist: damageDistribution(res.damage),
-    moveType,
-    effectiveness: typeEffectiveness(gen, moveType, defender.teraType && defender.teraType !== ('Stellar' as never)
-      ? [defender.teraType] : defender.types),
+    moveType: res.move.type,
+    effectiveness: landedEffectiveness(gen, res),
     maxHP: defender.maxHP(),
   };
+}
+
+/**
+ * The type multiplier as the calc applies it (its gen 7–9 rules), not the chart alone: Scrappy and
+ * Mind's Eye hit Ghosts with Normal and Fighting moves (Mega Lopunny's Close Combat on Froslass is
+ * ×2, not ×0), Gravity and an Iron Ball ground, Ring Target, Thousand Arrows, Freeze-Dry, Flying
+ * Press, Strong Winds. For the move as it lands, on the defender as the calc had it.
+ */
+export function landedEffectiveness(gen: Gen, res: Result): number {
+  const {attacker, defender, move, field} = res;
+  const revealed = attacker.hasAbility('Scrappy') || attacker.hasAbility('Mind\'s Eye') || field.defenderSide.isForesight;
+  const ring = defender.hasItem('Ring Target') && !defender.hasAbility('Klutz');
+  const one = (type: string) => getMoveEffectiveness(gen, move, type as never, revealed, field.isGravity, ring);
+  let eff = defender.teraType && defender.teraType !== ('Stellar' as never)
+    ? one(defender.teraType)
+    : defender.types.reduce((e, t) => e * one(t), 1);
+  if (eff === 0 && move.hasType('Ground') && defender.hasItem('Iron Ball') && !defender.hasAbility('Klutz')) eff = 1;
+  if (eff === 0 && move.named('Thousand Arrows')) eff = 1;
+  const flying = (gen.types.get(toID(move.type))?.effectiveness as Record<string, number> | undefined)?.Flying ?? 1;
+  if (field.hasWeather('Strong Winds') && defender.hasType('Flying') && flying > 1) eff /= 2;
+  return eff;
 }
 
 export function typeEffectiveness(gen: Gen, moveType: string, defTypes: readonly string[]) {

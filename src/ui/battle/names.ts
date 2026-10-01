@@ -10,11 +10,14 @@ export function monLabel(battle: Battle, mons: (MonSummary | null)[] | undefined
   return oppSpecies(battle, mons, ref.slot, live);
 }
 
-/** The opponent's species to show: its Mega forme once it has Mega Evolved. */
+/**
+ * The opponent's species to show: its Mega forme once it has Mega Evolved, when it's known which (Mega Raichu X or Y
+ * not said nor told apart yet: just the species, not the likelier one).
+ */
 export function oppSpecies(battle: Battle, mons: (MonSummary | null)[] | undefined, slot: number, live: Snapshot = battle.live) {
   const m = mons?.[slot];
   if (m && live.mons[`opp${slot}`]?.mega) {
-    const mega = m.formes.find(f => f.p > 0.5 && /-Mega/.test(f.name));
+    const mega = m.formes.find(f => f.p > 0.95 && /-Mega/.test(f.name));
     if (mega) return mega.name;
   }
   return battle.oppPreview[slot];

@@ -202,7 +202,8 @@ function revealLikelihood(fmt: FormatData, space: MonSpace, ev: RevealEvent): Fl
         match = toID(forme.abilities[space.a[h]]) === want || (!!forme.megaAbility && toID(forme.megaAbility) === want);
         break;
       case 'forme':
-        match = toID(forme.species) === want;
+        // "Raichu-Mega": either Mega forme, X or Y not said.
+        match = toID(forme.species) === want || (want.endsWith('mega') && toID(forme.species).startsWith(want));
         break;
       default:
         return null;

@@ -47,6 +47,39 @@ fs.mkdirSync(audioDir, {recursive: true});
 // Last run's address is dead.
 fs.rmSync(qrFile, {force: true});
 
+/**
+ * The language-model speed test (.cache/llm, while it's being tried out), at /llm/: its page, the
+ * model and the lines to time, and ONNX Runtime Web. Isolated (COOP/COEP) so it can use several threads.
+ */
+function llmBench() {
+  const files = {
+    '': [path.join(cache, 'llm', 'bench', 'index.html'), 'text/html'],
+    'bench.js': [path.join(cache, 'llm', 'bench', 'bench.js'), 'text/javascript'],
+    'bench.json': [path.join(cache, 'llm', 'out', 'v1', 'onnx', 'bench.json'), 'application/json'],
+    'model_q8.onnx': [path.join(cache, 'llm', 'out', 'v1', 'onnx', 'model_q8.onnx'), 'application/octet-stream'],
+    'ort.wasm.bundle.min.mjs': [path.join(root, 'node_modules', 'onnxruntime-web', 'dist', 'ort.wasm.bundle.min.mjs'), 'text/javascript'],
+    'ort-wasm-simd-threaded.wasm': [path.join(root, 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.wasm'), 'application/wasm'],
+    'ort-wasm-simd-threaded.mjs': [path.join(root, 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.mjs'), 'text/javascript'],
+  };
+  return {
+    name: 'llm-bench',
+    configurePreviewServer(server) {
+      server.middlewares.use('/llm', (req, res, next) => {
+        const name = decodeURIComponent((req.url ?? '').split('?')[0].replace(/^\/+/, ''));
+        const hit = Object.hasOwn(files, name) ? files[name] : null;
+        if (!hit || !fs.existsSync(hit[0])) return next();
+        res.setHeader('Content-Type', hit[1]);
+        res.setHeader('Content-Length', String(fs.statSync(hit[0]).size));
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+        fs.createReadStream(hit[0]).pipe(res);
+      });
+    },
+  };
+}
+
 /** The QR code as an image too, for a terminal that can't draw it cleanly. */
 function qrSvg(text) {
   const qr = new QRCode(-1, QRErrorCorrectLevel.M);
@@ -65,28 +98,47 @@ function qrSvg(text) {
 const firstLine = s => String(s ?? '').split('\n')[0];
 
 /** One line in this terminal for the things worth seeing live. */
+/** The reader's part in a line: its answer (how sure of each line), what the check dropped, how long it took. */
+function readerNote(r) {
+  if (!r) return '';
+  const lines = (r.lines ?? []).map(l => `${l.text}${l.p < 0.6 ? ` (${Math.round(100 * l.p)}%)` : ''}`).join(' | ') || 'none';
+  const dropped = (r.dropped ?? []).map(d => `${d.line}: ${d.why}`).join('; ');
+  return `\n      reader: ${lines}${dropped ? ` · dropped ${dropped}` : ''} · ${r.ms} ms (${r.reused}/${r.tokens} tokens kept from before)`;
+}
+
 function summary(e) {
   switch (e.kind) {
     case 'start': return `phone connected: ${e.screen ?? ''}${e.installed ? ', installed app' : ''}`;
     case 'voice': {
       // What it logged; the move still open (it's logged when the next one starts) ends in "…".
-      const parts = [...(e.did ?? []), ...(e.draft ? [`${e.draft} …`] : [])];
-      return `heard “${e.heard?.[0] ?? ''}” → ${e.events?.length ? parts.join(' · ') || 'nothing to log' : "didn't understand"}`;
+      const parts = [...(e.reader?.undo ? ['took back the one before'] : []), ...(e.did ?? []), ...(e.draft ? [`${e.draft} …`] : [])];
+      return `heard “${e.heard?.[0] ?? ''}” → ${e.events?.length || e.reader?.undo ? parts.join(' · ') || 'nothing to log' : "didn't understand"}${readerNote(e.reader)}`;
     }
     case 'voice-preview': {
       const unsure = (e.unsure ?? []).map(u => `“${u.heard}”: ${u.options.join(' / ')}?`);
-      const did = e.said?.length || unsure.length ? [...(e.said ?? []), ...unsure].join(' · ')
+      const parts = [...(e.said ?? []), ...unsure, ...(e.notes ?? [])];
+      const did = parts.length ? parts.join(' · ')
         : e.battle ? 'the battle started' : e.side ? `(${e.side === 'mine' ? 'yours' : 'theirs'} next)` : "didn't understand";
-      return `team preview: heard “${e.heard?.[0] ?? ''}” → ${did}`;
+      return `team preview: heard “${e.heard?.[0] ?? ''}” → ${did}${readerNote(e.reader)}`;
     }
+    case 'voice-offer': return `✓ tapped the reader's guess: ${e.line}`;
+    case 'reader': return e.error ? `⚠ reader: ${e.error}` : `reader loaded in ${e.ms} ms (${e.threads} thread${e.threads === 1 ? '' : 's'})`;
     case 'voice-heard': {
       const spots = (e.spots ?? []).map(s => s.text);
       const ms = e.ms ? ` (${e.ms.audio} ms of speech, read in ${e.ms.features + e.ms.model + e.ms.read} ms)` : '';
       return `voice model: “${e.text}”${e.plain !== e.text ? ` (as heard: “${e.plain}”)` : ''}${spots.length ? ` · names: ${spots.join(', ')}` : ''}${ms}`;
     }
+    case 'voice-mic': return e.stuck
+      ? `⚠ voice: setting up stopped while ${e.stuck} (audio ${e.state ?? '?'})`
+      : `microphone on: ${e.device || 'default'}, ${e.rate} Hz${e.resampled ? ' (resampled)' : ''}, audio ${e.state}`;
+    case 'voice-level': return `mic: level ${(100 * e.rms).toFixed(1)}% (peak ${(100 * e.peak).toFixed(0)}%), speech detector up to ${Math.round(100 * e.speech)}%, ${e.batches} batches`;
     case 'voice-model': return e.installed ? `voice model downloaded (${Math.round(e.size / 1e6)} MB)` : `voice model loaded in ${e.ms} ms (${e.threads} thread${e.threads === 1 ? '' : 's'})`;
     case 'voice-discard': return `✕ threw away: ${e.draft}`;
     case 'voice-error': return `voice: ${e.error}`;
+    case 'llm-bench-stage': return `language model test: ${e.stage}${e.ms !== undefined ? ` in ${e.ms} ms` : ''}${e.done ? ` (${e.done} lines, ${e.lately} ms each lately)` : ''}${e.stage === 'page' ? ` (${/Firefox/.test(e.ua) ? 'Firefox' : /Chrome/.test(e.ua) ? 'Chrome' : 'browser'}, threads ${e.threads || '-'}, isolated ${e.isolated})` : ''}`;
+    case 'llm-bench': return e.error ? `⚠ language model test: ${e.error}`
+      : `language model, ${e.threads} thread${e.threads === 1 ? '' : 's'}: ${e.avg} ms a line (median ${e.median}, slowest ${e.slowest}), prompt ${e.prompt} ms; `
+        + `loaded in ${e.loadMs} ms; same answers as the PC ${e.same}/${e.lines}; ${e.cores} cores, ${e.memory ?? '?'} GB`;
     case 'undo': return `↶ undid ${e.undid ?? 'the last entry'}${e.narrated ? ' (logged by voice)' : ''}`;
     case 'error':
     case 'crash': return `⚠ ${e.kind === 'crash' ? 'crash screen' : 'error'}: ${firstLine(e.report?.error ?? e.error)}`;
@@ -197,7 +249,7 @@ const server = await preview({
   logLevel: 'warn',
   build: {outDir},
   preview: {port: PORT, host: '127.0.0.1'},
-  plugins: [phoneLog()],
+  plugins: [phoneLog(), llmBench()],
 });
 const localUrl = server.resolvedUrls?.local[0] ?? `http://127.0.0.1:${PORT}/`;
 

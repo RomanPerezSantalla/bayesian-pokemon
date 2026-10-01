@@ -31,8 +31,9 @@ export function VoiceOffer() {
           <button className="btn sm ghost" onClick={closeOffer} aria-label="Close">✕</button>
         </div>
         <p>
-          To understand Pokémon names, voice uses a speech model that runs on this device: {mb(total)}, downloaded
-          once and kept for next time. What you say never leaves the device, and it works offline.
+          To understand Pokémon names, voice uses a speech model that runs on this device, and a small language model
+          that turns what you say into what to log: {mb(total)}, downloaded once and kept for next time. What you say
+          never leaves the device, and it works offline.
         </p>
         <p className="note">Best on Wi-Fi. Everything else works without it; you can remove it from the Battles page.</p>
         {p && (

@@ -9,7 +9,7 @@ import {BREAK_COST, parseVocab, phraseGraph} from './vocab';
 
 // A vocabulary like the model's, small: pieces with "▁" start a word, the blank is last.
 const PIECES = ['<unk>', '▁r', 'ill', 'a', 'boom', '▁rail', '▁a', '▁boom', '▁used', '▁c', 'or', 'vi', 'kn', 'ight', '▁k', '▁g',
-  'rass', 'y', '▁gl', 'ide', '▁grass', 'l', 'i', 'o', 'm', 'b', '▁', '.', 'R', 'g', '<blk>'];
+  'rass', 'y', '▁gl', 'ide', '▁grass', 'l', 'i', 'o', 'm', 'b', '▁', '.', 'R', 'g', "'", 's', '<blk>'];
 const vocab = parseVocab(PIECES.map((p, i) => `${p} ${i}`).join('\n'));
 const id = (p: string) => PIECES.indexOf(p);
 
@@ -106,6 +106,11 @@ describe('reading the model with the names that can come up', () => {
     const toks = greedy(frames(['▁c', 'or', 'vi', '_', '▁k', 'ight', '_', '▁used']), vocab.blank);
     expect(tokensText(toks, vocab)).toBe('corvi kight used');
     expect(mergeSpots(toks, vocab, [{text: 'Corviknight', start: 0, end: 4, score: -3, pieces: 5}])).toBe('Corviknight used');
+  });
+
+  it("what ended the word goes on the name: Corviknight's, not Corviknight 's (\"Loani's attack\" in a real test)", () => {
+    const toks = greedy(frames(['▁c', 'or', 'vi', "'", 's', '_', '▁used']), vocab.blank);
+    expect(mergeSpots(toks, vocab, [{text: 'Corviknight', start: 0, end: 2, score: -3, pieces: 3}])).toBe("Corviknight's used");
   });
 
   it('phrase graphs are built once', () => {

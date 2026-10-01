@@ -8,6 +8,7 @@ import * as ort from 'onnxruntime-web/wasm';
 import {Endpointer, FRAME} from './endpoint';
 import {MELS, melFeatures, SAMPLE_RATE} from './features';
 import {PhraseCache, readLine, type Reading} from './read';
+import {isOrtThread} from './ortThread';
 import {readFile, type Manifest} from './store';
 import {parseVocab, type Vocab} from './vocab';
 
@@ -28,6 +29,8 @@ export type WorkerOut =
   | {type: 'speech'}
   | {type: 'silence'}
   | {type: 'reading'}
+  /** Test builds: what the microphone is giving (loudness, 0–1; the speech detector's highest confidence), now and then. */
+  | {type: 'level'; batches: number; rms: number; peak: number; speech: number}
   | {type: 'line'; id?: number; reading: Reading; ms: {audio: number; features: number; model: number; read: number}; audio?: Float32Array};
 
 const post = (m: WorkerOut, transfer: Transferable[] = []) => (self as DedicatedWorkerGlobalScope).postMessage(m, transfer);
@@ -54,6 +57,21 @@ let pending = new Float32Array(0);
 let endpointer = new Endpointer();
 /** Frames and lines are handled one at a time, in order. */
 let queue: Promise<void> = Promise.resolve();
+/** Test builds: the microphone's level since the last report. */
+const level = {batches: 0, sum: 0, n: 0, peak: 0, speech: 0, reports: 0};
+
+function noteLevel(chunk: Float32Array) {
+  level.batches++;
+  for (const v of chunk) {
+    level.sum += v * v;
+    level.peak = Math.max(level.peak, Math.abs(v));
+  }
+  level.n += chunk.length;
+  // The first after a second of audio, then every ten.
+  if (level.n < SAMPLE_RATE * (level.reports ? 10 : 1)) return;
+  post({type: 'level', batches: level.batches, rms: Math.sqrt(level.sum / level.n), peak: level.peak, speech: level.speech});
+  Object.assign(level, {sum: 0, n: 0, peak: 0, speech: 0, reports: level.reports + 1});
+}
 
 async function load(m: Manifest) {
   const t0 = performance.now();
@@ -123,6 +141,7 @@ async function read(samples: Float32Array, context: string[]) {
 }
 
 async function onAudio(chunk: Float32Array) {
+  if (keepAudio) noteLevel(chunk);
   if (!listening || !model) return;
   const joined = new Float32Array(pending.length + chunk.length);
   joined.set(pending);
@@ -132,7 +151,9 @@ async function onAudio(chunk: Float32Array) {
     const frame = joined.subarray(at, at + FRAME);
     for (let i = 0; i < FRAME; i++) ring[(written + i) % RING] = frame[i];
     written += FRAME;
-    for (const ev of endpointer.push(await speechProb(frame))) await onEvent(ev);
+    const p = await speechProb(frame);
+    level.speech = Math.max(level.speech, p);
+    for (const ev of endpointer.push(p)) await onEvent(ev);
   }
   pending = joined.slice(at);
 }
@@ -157,7 +178,8 @@ const run = (fn: () => Promise<void>) => {
   queue = queue.then(fn).catch(err => post({type: 'error', message: err instanceof Error ? err.message : String(err)}));
 };
 
-self.onmessage = (e: MessageEvent<WorkerIn>) => {
+// Not in the ONNX runtime's own threads, which run this file too (ortThread.ts).
+if (!isOrtThread()) self.onmessage = (e: MessageEvent<WorkerIn>) => {
   const m = e.data;
   switch (m.type) {
     case 'load':
@@ -174,6 +196,7 @@ self.onmessage = (e: MessageEvent<WorkerIn>) => {
         if (!m.on && listening) for (const ev of endpointer.flush()) await onEvent(ev);
         listening = m.on;
         keepAudio = !!m.keepAudio;
+        Object.assign(level, {batches: 0, sum: 0, n: 0, peak: 0, speech: 0, reports: 0});
         reset();
       });
       break;

@@ -10,10 +10,12 @@
  * The field starting and ending, statuses ending, items going and HP read outside a move keep the
  * board as the game shows it. Champions writes nothing between turns: the first end-of-turn line
  * (sandstorm, burn, a Leftovers pop-up, the rain stopping…) ends one, and so does what only a new
- * turn starts with (a switch chosen for it, Mega Evolution, a Pokémon's turn coming again).
+ * turn starts with (a switch chosen for it, Mega Evolution, a Pokémon's turn coming again, a move
+ * that can't come after one already made: Fake Out after an ordinary attack). What it heard goes
+ * with the entries it was about when they're taken back (undo on the screen).
  */
 import {isStatusMove, move as dexMove, STAT_LABELS, toID, type BoostID, type Gen} from '../../../data/dex';
-import {DROP_REACT} from '../../../engine/abilities';
+import {BLOCKERS, DROP_REACT} from '../../../engine/abilities';
 import {megaFormeOf} from '../../../engine/likelihood';
 import {moveFx} from '../../../engine/moves';
 import {maxHPOf, type StateCtx} from '../../../engine/state';
@@ -23,7 +25,7 @@ import {
   type Trigger,
 } from '../../../engine/types';
 import {
-  canMoveAction, editLive, endTurn, helpedThisTurn, logAction, logCheck, logMega, logReveal, logSwitch, moveAction, turnActions, undo,
+  canMoveAction, editLive, endTurn, helpedThisTurn, logAction, logCheck, logMega, logReveal, logSwitch, moveAction, setOrdered, turnActions, undo,
   type ActionDraft,
 } from '../actions';
 import {pendingChecks} from '../checks';
@@ -58,7 +60,14 @@ interface Row {
   healed?: boolean;
   /** Mentioned: for a single-target move, the one it hit. */
   said: boolean;
+  /** Its own Protect (Detect, Spiky Shield…) earlier this turn stopped the move: nothing more to hear about it. */
+  shielded?: boolean;
 }
+
+/** Moves that protect the user from others' moves for the turn. */
+const PROTECTS = new Set(['protect', 'detect', 'kingsshield', 'spikyshield', 'banefulbunker', 'silktrap', 'burningbulwark', 'obstruct']);
+/** Moves that get through Protect. */
+const THROUGH_PROTECT = new Set(['feint', 'shadowforce', 'phantomforce', 'hyperspacehole', 'hyperspacefury', 'hyperdrill', 'mightycleave']);
 
 /** A stat change the game showed, in stages. */
 interface Heard {
@@ -141,6 +150,10 @@ function applyEdit(live: Snapshot, e: Edit) {
   if (e.kind === 'hp') Object.assign(c, {hp: e.hp, hpUnknown: false, hpEstimated: false}, e.hp <= 0 ? {boosts: {}} : {});
 }
 
+declare const saved: unique symbol;
+/** What the narrator knew at one point (Narrator.save). */
+export type NarratorState = {readonly [saved]: true};
+
 export class Narrator {
   private draft: Draft | null = null;
   /** The last move logged, as it was while narrated: taken up again as it was if more about it comes. */
@@ -157,10 +170,106 @@ export class Narrator {
   private ending = false;
   /** Who the last end-of-turn or "couldn't move" line was about, for a number said after it. */
   private about?: MonRef;
-  /** Those whose turn came this turn but couldn't move: moving now means a new turn has begun. */
-  private couldnt = new Set<string>();
+  /** Those whose turn came but couldn't move, and the turn: moving in that turn means a new one has begun. */
+  private couldnt = new Map<string, number>();
+  /** The last entry in the log when the narrator last looked: gone means entries were taken back (undo). */
+  private anchor: string | undefined;
+  /** The turn this phrase has told of so far (a move said in it), for a move it brings up again. */
+  private phraseTurn: number | null = null;
+  /** A move told again: the targets said with it are the logged move's, not the open one's. */
+  private retelling = false;
+  /** The rest of the phrase, after what's being taken in now. */
+  private ahead: VoiceEvent[] = [];
 
   constructor(private io: VoiceIO) {}
+
+  /** Entries taken back since the narrator last looked: what it heard about them goes too. */
+  private sync() {
+    if (this.anchor && !this.io.battle().events.some(e => e.id === this.anchor)) {
+      this.couldnt.clear();
+      this.pending.clear();
+      this.quick.clear();
+      this.explained = [];
+      this.kept = null;
+      this.vacated = {};
+      this.sealed = false;
+      this.ending = false;
+      this.about = undefined;
+    }
+  }
+
+  private mark() {
+    this.anchor = this.io.battle().events.at(-1)?.id;
+  }
+
+  /** It couldn't move earlier this turn. */
+  private couldntNow(ref: MonRef) {
+    return this.couldnt.get(monKey(ref)) === this.io.battle().turn;
+  }
+
+  /**
+   * The move is one logged this turn told again: the last thing logged (said twice), or one this phrase brings up
+   * after telling of this turn ("…but Raichu had Protect"). Otherwise its Pokémon moving again is the next turn's.
+   */
+  private toldAgain(actor: MonRef, move: string) {
+    const b = this.io.battle();
+    const same = turnActions(b).find(a => sameMon(a.actor, actor) && a.move === move);
+    if (!same || !this.fits(same)) return false;
+    if (this.phraseTurn === b.turn) return true;
+    if (this.sealed) return false;
+    for (let k = b.events.length - 1; k >= 0; k--) {
+      const e = b.events[k];
+      if (e.kind === 'action' || e.kind === 'switch' || e.kind === 'endTurn') return e.id === same.id;
+    }
+    return false;
+  }
+
+  /** What the phrase says with the move fits the open one: a target it has or can have, no other HP for one said. */
+  private fitsOpen(d: Draft) {
+    if (d.status) return true;
+    const said = d.rows.filter(r => r.said);
+    for (const e of this.ahead) {
+      if (e.kind === 'use' || e.kind === 'endTurn') break;
+      const m = e.kind === 'target' ? e.mon : e.kind === 'hp' ? e.mon ?? d.lastRow : undefined;
+      if (!m || sameMon(m, d.actor)) continue;
+      const row = d.rows.find(r => sameMon(r.ref, m));
+      if (!row || (!d.spread && said.length && !row.said)) return false;
+      if (e.kind === 'hp' && row.value !== undefined && row.value !== e.value) return false;
+    }
+    return true;
+  }
+
+  /**
+   * What the phrase says with the move fits it as logged: no target it wasn't aimed at, no other HP for one it hit
+   * (Moonblast into Charizard, then Moonblast into Incineroar: a second one).
+   */
+  private fits(a: ActionEvent) {
+    const status = isStatusMove(this.io.gen, a.move);
+    const hit = (m: MonRef) => a.hits.find(h => sameMon(h.target, m));
+    // Also the ones it didn't reach (into a Protect, missed), as narrated, for the last move logged.
+    const rows = this.kept?.id === a.id ? this.kept.draft.rows.filter(r => r.said) : [];
+    const aimed = (m: MonRef) => !!hit(m) || [...(a.targetRefs ?? []), ...rows.map(r => r.ref)].some(r => sameMon(r, m));
+    for (const e of this.ahead) {
+      if (e.kind === 'use' || e.kind === 'endTurn') break;
+      if (e.kind === 'target' && !sameMon(e.mon, a.actor) && !aimed(e.mon)) return false;
+      if (e.kind === 'hp' && !status) {
+        const m = e.mon ?? (a.hits.length === 1 ? a.hits[0].target : undefined);
+        if (!m || sameMon(m, a.actor)) continue;
+        const h = hit(m);
+        if (h ? !h.unread && !h.fainted && h.hpAfter !== e.value : !aimed(m)) return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * A single-target move that could have hit more than one, with none said: "Incineroar / Bellibolt" (not a question:
+   * an HP or a faint said for one of them settles it, and nothing needs answering).
+   */
+  private whichOne(d: Draft): string | null {
+    if (d.spread || d.status || d.failed || d.rows.length < 2 || d.rows.some(r => r.said)) return null;
+    return d.rows.map(r => this.label(r.ref)).join(' / ');
+  }
 
   private label(r: MonRef) {
     return monLabel(this.io.battle(), this.io.mons(), r);
@@ -170,14 +279,27 @@ export class Narrator {
     return !!this.draft;
   }
 
+  /** What it knows now, to go back to if the phrase about to be fed is taken back ("scratch that"). */
+  save(): NarratorState {
+    const {draft, kept, vacated, quick, pending, explained, sealed, ending, about, couldnt, anchor} = this;
+    return structuredClone({draft, kept, vacated, quick, pending, explained, sealed, ending, about, couldnt, anchor}) as unknown as NarratorState;
+  }
+
+  /** Back to what it knew then; whoever takes the phrase back puts the battle back too. */
+  load(s: NarratorState) {
+    Object.assign(this, structuredClone(s));
+  }
+
   /** The move being narrated, for the screen. */
   describe(): string {
     const d = this.draft;
     if (!d) return '';
     if (d.failed) return `${this.label(d.actor)} · ${d.move} → failed`;
+    const which = this.whichOne(d);
+    if (which) return `${this.label(d.actor)} · ${d.move} → ${which}`;
     const shown = d.rows.filter(r => r.said || d.spread);
     const bits = shown.map(r => {
-      const what = r.missed ? 'missed' : r.fainted ? 'KO' : r.noEffect ? 'immune'
+      const what = r.missed ? (r.shielded ? 'protected' : 'missed') : r.fainted ? 'KO' : r.noEffect ? 'immune'
         : r.value !== undefined ? `${r.value}${r.ref.side === 'opp' ? '%' : ''}` : 'HP ?';
       return `${this.label(r.ref)} ${what}${r.crit ? ' crit' : ''}`;
     });
@@ -186,10 +308,16 @@ export class Narrator {
 
   /** Apply what was heard; returns short notes of what was done. */
   feed(events: VoiceEvent[]): string[] {
+    this.sync();
+    this.phraseTurn = null;
+    this.retelling = false;
     const notes: string[] = [];
-    for (const ev of events) {
+    for (const [k, ev] of events.entries()) {
+      this.ahead = events.slice(k + 1);
       for (const n of this.one(ev)) if (n) notes.push(n);
     }
+    this.ahead = [];
+    this.mark();
     return notes;
   }
 
@@ -209,10 +337,37 @@ export class Narrator {
     const wanted = this.pending.get(monKey(d.actor));
     this.pending.delete(monKey(d.actor));
     const moved = wanted ? this.reorder(d.actor, wanted.place, wanted.other) : '';
-    const hits = action.hits.map(h => `${this.label(h.target)} ${h.fainted ? 'KO' : h.noEffect ? 'immune' : h.unread ? 'HP skipped'
-      : `${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}`);
-    const done = `✓ ${this.label(d.actor)} · ${d.move}${d.failed ? ' → failed' : hits.length ? ` → ${hits.join(', ')}` : ''}`;
-    return moved ? `${done} · ${moved}` : done;
+    // Said after moves it must have come before (Fake Out after an ordinary attack): put in its place.
+    const placed = !wanted && logged?.kind === 'action' ? this.placeByPriority(logged.id, d.actor, d.move) : '';
+    const which = this.whichOne(d);
+    const hits = which ? [`${which} (not said): HP skipped`] : action.hits.map(h => `${this.label(h.target)} ${h.fainted ? 'KO' : h.noEffect ? 'immune'
+      : h.unread ? 'HP skipped' : `${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}`);
+    const missed = which ? [] : d.rows.filter(r => r.missed && (r.shielded || r.said)).map(r => `${this.label(r.ref)} ${r.shielded ? 'protected' : 'missed'}`);
+    const outcome = [...hits, ...missed];
+    const done = `✓ ${this.label(d.actor)} · ${d.move}${d.failed ? ' → failed' : outcome.length ? ` → ${outcome.join(', ')}` : ''}`;
+    this.mark();
+    return [done, moved, placed].filter(Boolean).join(' · ');
+  }
+
+  /**
+   * A move logged after ones it must have come before by priority (Fake Out, +3, said after an ordinary attack): it
+   * was said out of order, so it goes before them, and its place isn't taken as the turn's order (nothing about
+   * Speed is learned from where it was said).
+   */
+  private placeByPriority(id: string, actor: MonRef, move: string): string {
+    const acts = turnActions(this.io.battle());
+    const at = acts.findIndex(a => a.id === id);
+    const [lo] = this.priority(actor, move);
+    const goal = acts.findIndex((a, k) => k < at && this.priority(a.actor, a.move)[1] < lo);
+    if (at < 0 || goal < 0) return '';
+    for (let k = at; k > goal; k--) {
+      if (!canMoveAction(this.io.battle(), id, -1).ok) break;
+      this.io.apply((bb, c) => moveAction(c, bb, id, -1));
+    }
+    this.io.apply(bb => setOrdered(bb, id, false));
+    // Re-running the turn's moves rebuilt the board from them: what the game showed after the last goes on again.
+    if (this.kept) this.editNow([...this.kept.extra, ...this.kept.draft.later], false);
+    return `${this.label(actor)}'s ${move} goes first (priority), order otherwise unknown`;
   }
 
   /**
@@ -317,9 +472,23 @@ export class Narrator {
     const b = this.io.battle();
     switch (ev.kind) {
       case 'use': {
+        // The move told again: said twice ("Raichu Protect… Raichu Protect?"), or brought up again as a phrase goes on
+        // ("Fake Out into Raichu, but Raichu had Protect"). It's the one there is: not a second move, nor a new turn.
+        if (this.draft && sameMon(this.draft.actor, ev.actor) && this.draft.move === ev.move && this.fitsOpen(this.draft)) {
+          this.phraseTurn = b.turn;
+          return [];
+        }
+        if (this.toldAgain(ev.actor, ev.move)) {
+          this.retelling = true;
+          this.phraseTurn = b.turn;
+          return [`${this.label(ev.actor)} · ${ev.move}: logged already`];
+        }
+        this.retelling = false;
         const done = this.commit();
-        // It couldn't move earlier this turn, so this is the next turn's move.
-        const turned = this.couldnt.has(monKey(ev.actor)) ? this.newTurn() : [];
+        // It couldn't move earlier this turn: the next turn's. (One that moved already this turn starts the next as it's
+        // logged. A move said after ones it must have come before, Fake Out after an ordinary attack, is this turn's,
+        // said out of order: it goes in its place once logged.)
+        const turned = this.couldntNow(ev.actor) ? this.newTurn() : [];
         this.explained = [];
         this.sealed = false;
         this.ending = false;
@@ -327,16 +496,19 @@ export class Narrator {
           return [done, ...turned, `${this.label(ev.actor)} isn't on the field`];
         }
         this.draft = this.start(this.io.battle(), ev.actor, ev.move);
+        this.phraseTurn = this.io.battle().turn;
         // Protect, Tailwind, Trick Room…: nothing more to hear.
         if (this.draft.status && !this.draft.rows.length) return [done, ...turned, this.commit()];
         return [done, ...turned];
       }
       case 'target': {
         const d = this.draft;
-        if (!d || sameMon(ev.mon, d.actor)) return [];
+        if (!d || this.retelling || sameMon(ev.mon, d.actor)) return [];
         const row = this.row(d, ev.mon);
         if (row) {
           row.said = true;
+          // Into a Protect: nothing happened to it, and nothing more is needed (no HP).
+          if (this.shieldedFrom(ev.mon, d.move)) Object.assign(row, {missed: true, shielded: true});
           this.touch(d, row);
         }
         return [];
@@ -344,12 +516,13 @@ export class Narrator {
       case 'hp': {
         const d = this.draft ?? this.reopen(ev.mon);
         if (!d) {
-          // After the moves (the end of the turn, a switch-in, one that couldn't move): where it's at now.
-          const ref = ev.mon ?? this.about;
-          if (this.sealed && ref) return this.reading(ref, ev.value);
+          // After the moves (the end of the turn, a switch-in, one that couldn't move), or said of one no move can take
+          // it for any more ("Bellibolt 84" once another move has been logged since): where it's at now.
+          const ref = ev.mon ?? (this.sealed ? this.about : undefined);
+          if (ref) return this.reading(ref, ev.value);
           return [`HP ${ev.value} not placed (no move open)`];
         }
-        const ref = ev.mon ?? this.soleTarget(d);
+        const ref = ev.mon ?? this.hpTarget(d);
         if (!ref) return [`HP ${ev.value}: whose? Say the name with it`];
         const max = ref.side === 'opp' ? 100 : maxHPOf(this.io.ctx(b), b.live, ref);
         if (ev.value > max) return [`${this.label(ref)} ${ev.value}? Max is ${max}`];
@@ -359,13 +532,17 @@ export class Narrator {
           return [];
         }
         const row = this.row(d, ref);
-        if (!row) return [`${this.label(ref)} wasn't a target`];
+        // Not hit by this move ("Bellibolt 84" for the move before, once this one's open), or a single-target move
+        // whose target's been said already: where it's at now, not a second target.
+        const hitAnother = !d.spread && d.rows.some(r => r.said && !sameMon(r.ref, ref));
+        if (!row || (hitAnother && !row.said)) return this.reading(ref, ev.value);
         // Its HP read though the move missed it or it protected itself: unchanged, and no damage.
         if (row.missed) return [];
         if (row.triggers.includes('sitrus')) {
           // Said after its Sitrus Berry: what it settled on once healed. Said again after that: the same hit.
           if (row.value !== undefined) return [];
-          row.healed = true;
+          // Under a quarter it can only be before the berry, which heals a quarter ("1%, Sitrus Berry").
+          row.healed = ev.value > (ref.side === 'opp' ? 25 : Math.floor(max / 4));
         }
         Object.assign(row, {value: ev.value, fainted: false, said: true});
         this.touch(d, row);
@@ -428,7 +605,7 @@ export class Narrator {
           return [];
         }
         const row = this.row(d, ev.mon);
-        if (row) Object.assign(row, {missed: true, said: true});
+        if (row) Object.assign(row, {missed: true, said: true, ...(ev.shield ? {shielded: true} : {})});
         return [];
       }
       case 'immune': {
@@ -479,9 +656,9 @@ export class Narrator {
       case 'cant': {
         // Its turn came and went: the move before is over. Its turn coming again means a new turn.
         const done = this.commit();
-        const again = ev.mon && (this.couldnt.has(monKey(ev.mon)) || turnActions(this.io.battle()).some(a => sameMon(a.actor, ev.mon!)));
+        const again = ev.mon && (this.couldntNow(ev.mon) || turnActions(this.io.battle()).some(a => sameMon(a.actor, ev.mon!)));
         const turned = again ? this.newTurn() : [];
-        if (ev.mon) this.couldnt.add(monKey(ev.mon));
+        if (ev.mon) this.couldnt.set(monKey(ev.mon), this.io.battle().turn);
         this.sealed = true;
         this.about = ev.mon;
         const c = ev.mon ? this.io.battle().live.mons[monKey(ev.mon)] : undefined;
@@ -494,6 +671,8 @@ export class Narrator {
         return [`${this.label(ev.mon)}: status over`];
       case 'stat':
         return ev.mon ? this.stat(ev.mon, ev.boosts, ev.limit) : [];
+      case 'unchanged':
+        return this.unchanged(ev.mon, ev.stats);
       case 'field':
         return this.field(ev.news);
       case 'residual': {
@@ -595,6 +774,79 @@ export class Narrator {
   }
 
   /**
+   * A move of higher priority than one already made this turn could have had can't come after it:
+   * Protect or Fake Out after an ordinary attack starts the next turn. The ones made count as high
+   * as they might have gone (Prankster, Gale Wings, Triage, Grassy Glide), this one as its own.
+   */
+  private priority(ref: MonRef, move: string): [lo: number, hi: number] {
+    const gen = this.io.gen;
+    const m = dexMove(gen, move);
+    const base = m?.priority ?? 0;
+    const may = this.abilitiesOf(ref);
+    const status = isStatusMove(gen, move);
+    let hi = base;
+    if (may.has('Prankster') && status) hi = base + 1;
+    if (may.has('Gale Wings') && m?.type === 'Flying') hi = Math.max(hi, base + 1);
+    if (may.has('Triage') && (status || !!m?.drain)) hi = Math.max(hi, base + 3);
+    if (toID(move) === 'grassyglide') hi = Math.max(hi, base + 1);
+    return [base, hi];
+  }
+
+  /** The abilities it may have: yours as set (and its Mega's), theirs as far as possible (any, before it's known). */
+  private abilitiesOf(ref: MonRef): Set<string> {
+    const b = this.io.battle();
+    if (ref.side === 'me') {
+      const set = b.myTeam[ref.slot];
+      const mega = set && megaFormeOf(this.io.gen, set);
+      return new Set([set?.ability, ...Object.values(mega ? this.io.gen.species.get(toID(mega))?.abilities ?? {} : {})]
+        .filter((a): a is string => !!a));
+    }
+    const m = this.io.mons()?.[ref.slot];
+    if (!m) return new Set(['Prankster', 'Gale Wings', 'Triage']);
+    return new Set([...m.abilities.filter(a => a.p > 0).map(a => a.name), ...Object.values(m.megaAbilityOf ?? {})]);
+  }
+
+  /**
+   * "…'s Attack was not lowered!": an ability or item stopped the drop (Scrappy, Clear Body, Clear
+   * Amulet…). Said while the move is open, its drop comes off again once it's logged; said after,
+   * the latest drop logged this turn (the Intimidate it came in to, a move's) goes back. Nothing
+   * lowered: what was logged already.
+   */
+  private unchanged(mon: MonRef, stats: BoostID[]): string[] {
+    const b = this.io.battle();
+    const key = monKey(mon);
+    const c = b.live.mons[key];
+    if (!c || c.hp <= 0) return [];
+    const said = `${this.label(mon)}: ${stats.map(s => STAT_LABELS[s]).join(', ')} not lowered`;
+    const d = this.draft;
+    if (d && this.involves(d, mon) && !sameMon(d.actor, mon)) {
+      for (const stat of stats) d.later.push({kind: 'stage', key, stat, value: c.boosts[stat] ?? 0});
+      return [`${said} ✓`];
+    }
+    const back: BoostID[] = [];
+    for (const stat of stats) {
+      let drop = 0;
+      for (let k = b.events.length - 1; k >= 0 && !drop && b.events[k].turn === b.turn; k--) {
+        const before = b.events[k].undo?.live.mons[key]?.boosts[stat] ?? 0;
+        const after = (b.events[k + 1]?.undo?.live ?? b.live).mons[key]?.boosts[stat] ?? 0;
+        if (after < before) drop = before - after;
+      }
+      if (!drop) continue;
+      this.edit({kind: 'stage', key, stat, value: clamp6((c.boosts[stat] ?? 0) + drop)});
+      const at = this.explained.findIndex(x => x.key === key && x.stat === stat && x.sign < 0);
+      if (at >= 0) this.explained.splice(at, 1);
+      back.push(stat);
+    }
+    if (!back.length) return [`${said} ✓`];
+    // Yours stopped it though its ability as logged wouldn't: a Mega's that wasn't said (Mega Lopunny's Scrappy)?
+    const set = mon.side === 'me' ? b.myTeam[mon.slot] : undefined;
+    const mega = set && !c.mega ? megaFormeOf(this.io.gen, set) : undefined;
+    const megaAbility = mega ? Object.values(this.io.gen.species.get(toID(mega))?.abilities ?? {})[0] as string | undefined : undefined;
+    const hint = megaAbility && BLOCKERS.has(megaAbility) && !BLOCKERS.has(set!.ability ?? '') ? ` (has it Mega Evolved? ${megaAbility} would stop it)` : '';
+    return [`${said}: put back${hint}`];
+  }
+
+  /**
    * Champions writes nothing between turns: a new one shows by its switches, its Mega Evolution, or
    * a Pokémon's turn coming again. The turn logged so far ends then, unless its end came already.
    */
@@ -635,10 +887,16 @@ export class Narrator {
     else cands = foes;
     const quick = this.quick.get(monKey(actor));
     this.quick.delete(monKey(actor));
-    return {
-      actor, move, spread, status, rows: cands.map(ref => ({ref, triggers: [], said: false})), actorTriggers: [], quick,
-      heard: [], later: [],
-    };
+    // A spread move's targets that protected themselves this turn: untouched.
+    const rows: Row[] = cands.map(ref => ({ref, triggers: [], said: false,
+      ...(spread && this.shieldedFrom(ref, move) ? {missed: true, shielded: true} : {})}));
+    return {actor, move, spread, status, rows, actorTriggers: [], quick, heard: [], later: []};
+  }
+
+  /** It protected itself earlier this turn (Protect, Detect…), and this move doesn't get through that. */
+  private shieldedFrom(ref: MonRef, move: string): boolean {
+    if (THROUGH_PROTECT.has(toID(move))) return false;
+    return turnActions(this.io.battle()).some(a => sameMon(a.actor, ref) && PROTECTS.has(toID(a.move)) && !a.failed);
   }
 
   /** The row for a Pokémon in this move (an ally hit by a single-target move gets one too). */
@@ -702,6 +960,15 @@ export class Narrator {
   }
 
   /** The only Pokémon this move can be about, if there's just one (or one already named). */
+  /**
+   * Whose a bare HP is: the one said, unless the move hit others too and that one's HP is in already ("Lopunny 49,
+   * … 8": the 8 is someone else's, a name misheard), when it isn't guessed.
+   */
+  private hpTarget(d: Draft): MonRef | undefined {
+    const ref = this.soleTarget(d);
+    return ref && d.rows.length > 1 && this.row(d, ref)?.value !== undefined ? undefined : ref;
+  }
+
   private soleTarget(d: Draft): MonRef | undefined {
     const said = d.rows.filter(r => r.said);
     if (said.length === 1) return said[0].ref;
@@ -982,7 +1249,12 @@ export class Narrator {
     const b = this.io.battle();
     if (mon.side === 'me') return megaFormeOf(this.io.gen, b.myTeam[mon.slot]);
     const megas = (this.io.mons()?.[mon.slot]?.formes ?? []).filter(f => /-Mega/.test(f.name)).sort((x, y) => y.p - x.p);
-    return (suffix ? megas.find(f => f.name.endsWith(`-${suffix}`)) : undefined)?.name ?? megas[0]?.name;
+    const said = suffix ? megas.find(f => f.name.endsWith(`-${suffix}`)) : undefined;
+    if (said) return said.name;
+    // X or Y not said (and not known): just "Mega" ("Raichu-Mega"), which the damage it does will tell apart.
+    const known = megas.find(f => f.p >= 0.99);
+    if (megas.length > 1 && !known) return megas[0].name.replace(/-[XY]$/, '');
+    return megas[0]?.name;
   }
 
   private toAction(b: Battle, d: Draft): ActionDraft {

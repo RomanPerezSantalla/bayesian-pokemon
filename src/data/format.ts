@@ -23,6 +23,11 @@ export interface SpeciesStats {
   natures: Dist;
   /** P(teammate on the team | this Pokémon on the team). */
   teammates: Dist;
+  /**
+   * The same from the in-game Battle Data, which lists only its top ten teammates by rank: each
+   * rank's share is estimated (see RANK_SHARE in fuse.ts). Per species, where \`teammates\` is per forme.
+   */
+  partners?: Dist;
   tera?: Dist;
 }
 

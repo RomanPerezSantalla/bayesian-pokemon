@@ -83,6 +83,14 @@ const official = {
   },
 };
 
+/**
+ * Cross-origin isolation, so the voice models can use several threads (SharedArrayBuffer): the
+ * language model reads a line three times faster on four. "credentialless", not "require-corp":
+ * the Showdown sprites and item icons come from a site that doesn't send CORP headers. A deployed
+ * site sends the same (public/_headers).
+ */
+const ISOLATED = {'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'credentialless'};
+
 // `base: './'` keeps the build relocatable (any static host, any path).
 export default defineConfig({
   base: './',
@@ -90,8 +98,8 @@ export default defineConfig({
   // __TEST_LOG__ is turned on only by `npm run phone` (scripts/phone.mjs).
   define: {__APP_BUILD__: JSON.stringify(buildId()), __TEST_LOG__: 'false'},
   // Lets a Cloudflare quick tunnel reach the dev server (HTTPS on a phone, for voice).
-  server: {allowedHosts: ['.trycloudflare.com'], proxy: official},
-  preview: {proxy: official},
+  server: {allowedHosts: ['.trycloudflare.com'], proxy: official, headers: ISOLATED},
+  preview: {proxy: official, headers: ISOLATED},
   // Most of the bundle is @smogon/calc's data for every generation.
   build: {chunkSizeWarningLimit: 1200},
   // Module workers, like the inference one.

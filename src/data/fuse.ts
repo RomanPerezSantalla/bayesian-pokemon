@@ -1,14 +1,18 @@
 /**
- * Fuse the official in-game Battle Data (primary: it *is* the ladder you play)
- * with Smogon's Showdown stats (secondary: structure the in-game data lacks).
+ * Fuse the official in-game Battle Data (the ladder you play) with Smogon's Showdown stats, taking
+ * as little as possible from Showdown: teams cost nothing to build there, so players experiment far
+ * more than on the Switch ladder, and its shares aren't the ladder's.
  *
- * The in-game data is per base species with top-10 lists. Showdown's stats are per
- * Mega forme with full distributions and a joint alignment+spread table. So:
- *  - formes come from which Mega Stones are held (Charizardite Y 94% -> Mega Y 94%),
- *  - per-forme moves/spreads are the official ones tilted by how Showdown players of
- *    that forme differ from the species average,
- *  - each official spread gets alignments from Showdown's joint table when known,
- *    otherwise from the official alignment list filtered by what makes sense.
+ * The in-game data is per base species with top-10 lists. From it:
+ *  - formes, from which Mega Stones are held (Charizardite Y 94% -> Mega Y 94%);
+ *  - items, abilities, moves, stat alignments and spreads; each spread's alignment from the
+ *    alignment list, as far as it makes sense for the spread; the spreads past the top 10 sampled
+ *    (in prior.ts) from the top 10's own per-stat shares, and moves past it left to the move
+ *    model's stand-ins;
+ *  - teammates, by rank (their shares estimated, see RANK_SHARE).
+ * From Showdown, only what the in-game data can't say at all: how a Mega forme's moves and spreads
+ * differ from the base species' (it lists them pooled: a Mega X and a Mega Y fight differently),
+ * the share each teammate rank stands for, and species the in-game data doesn't list.
  */
 import {getGen, natureMods, toID, STAT_IDS, type Gen} from './dex';
 import type {Dist, FormatData, FormatInfo, SpeciesStats} from './format';
@@ -24,6 +28,12 @@ export interface Structure {
 }
 
 const ALIASES: Record<string, string> = {Aegislash: 'Aegislash-Shield'};
+
+/**
+ * How often the teammate at each rank of the in-game list is on the team: the median share at that
+ * rank across Showdown's Champions stats (which give both), since the in-game data gives only ranks.
+ */
+const RANK_SHARE = [0.58, 0.47, 0.41, 0.36, 0.29, 0.22, 0.19, 0.16, 0.14, 0.12];
 
 const spKey = (sp: ArrayLike<number>) => Array.from(sp).join('/');
 const norm = (list: Dist): Dist => {
@@ -103,23 +113,12 @@ function fuseEntry(
 
   const moves: Dist = e.move.map(([n, p]) => [known(gen.moves, n), share(p)] as [string | undefined, number])
     .filter((x): x is [string, number] => !!x[0]);
-  const minOfficialMove = moves.length ? Math.min(...moves.map(([, p]) => p)) : 0.05;
   const abilities: Dist = norm(e.ability.map(([n, p]) => [known(gen.abilities, n), share(p)] as [string | undefined, number])
     .filter((x): x is [string, number] => !!x[0]));
   const natures: Dist = norm(e.stat_alignment.map(([n, p]) => [n, share(p)]));
-
-  // Joint alignment+spread from Showdown for this species (all formes pooled).
-  const joint = new Map<string, Map<string, number>>();
-  for (const g of group) {
-    const sd = structure.species[g];
-    if (!sd) continue;
-    for (const [nature, sp, p] of sd.spreads) {
-      const m = joint.get(spKey(sp)) ?? new Map<string, number>();
-      m.set(nature, (m.get(nature) ?? 0) + p * sd.weight);
-      joint.set(spKey(sp), m);
-    }
-  }
   const officialSpreads = e.stat_points.filter(r => r.length >= 7).map(r => [r.slice(1, 7), r[0] / 100] as [number[], number]);
+  const partners: Dist = [...e.teammate].sort((a, b) => a[1] - b[1])
+    .map(([n], k) => [n, RANK_SHARE[Math.min(k, RANK_SHARE.length - 1)]] as [string, number]);
 
   const formes: [string, number][] = [[base, baseW], ...megas.map(([f, , p]) => [f, p] as [string, number])];
   const names: string[] = [];
@@ -131,9 +130,6 @@ function fuseEntry(
 
     const moveLift = lift(structure, group, forme, s => new Map(s.moves.map(([m, p]) => [m, p])));
     const fMoves: Dist = moves.map(([m, p]) => [m, Math.min(0.995, p * moveLift(m))]);
-    for (const [m, p] of sd?.moves ?? []) {
-      if (!fMoves.some(([x]) => x === m)) fMoves.push([m, Math.min(p, minOfficialMove) * 0.7]);
-    }
 
     const fItems: Dist = isMega
       ? [[megas.find(([f]) => f === forme)![1], 1]]
@@ -154,28 +150,15 @@ function fuseEntry(
     for (const [sp, p0] of officialSpreads) {
       const p = p0 * spreadLift(spKey(sp));
       covered += p;
-      const seen = joint.get(spKey(sp));
-      let pairs: Dist = seen && seen.size
-        ? [...seen.entries()]
-        : natures.map(([n, q]) => [n, (q + 0.001) * alignmentFit(gen, n, sp)]);
-      pairs = norm(pairs).filter(([, q]) => q >= 0.02);
+      // Its alignment: the in-game alignment shares, as far as they make sense for this spread.
+      const pairs = norm((natures.length ? natures : [['Hardy', 1]] as Dist).map(([n, q]) => [n, (q + 0.001) * alignmentFit(gen, n, sp)] as [string, number]))
+        .filter(([, q]) => q >= 0.02);
       for (const [n, q] of norm(pairs)) spreads.push([n, sp, p * q]);
     }
     // Rescale so the head keeps the official share of the whole distribution.
     const headShare = officialSpreads.reduce((s, [, p]) => s + p, 0);
     const scale = covered > 0 ? headShare / covered : 1;
     for (const s of spreads) s[2] *= scale;
-    // The official list stops at 10; Showdown's fuller list shapes most of the rest.
-    let extraMass = 0;
-    const pool = sd ? [sd] : group.map(g => structure.species[g]).filter((x): x is SpeciesStats => !!x);
-    const seen = new Set(spreads.map(([n, sp]) => `${n}:${spKey(sp)}`));
-    const extra = pool.flatMap(x => x.spreads).filter(([n, sp]) => !seen.has(`${n}:${spKey(sp)}`));
-    const extraTotal = extra.reduce((t, [, , p]) => t + p, 0);
-    if (officialSpreads.length && extraTotal > 0) {
-      extraMass = (1 - headShare) * 0.75;
-      for (const [n, sp, p] of extra) spreads.push([n, sp, (p / extraTotal) * extraMass]);
-    }
-
     const useOfficialSpreads = officialSpreads.length > 0 || !sd;
     out[forme] = {
       usage: 1 / e.position,
@@ -185,10 +168,13 @@ function fuseEntry(
       itemsOther,
       moves: fMoves,
       spreads: useOfficialSpreads ? spreads : sd!.spreads,
-      spreadsCovered: useOfficialSpreads ? Math.min(0.98, headShare + extraMass) : sd!.spreadsCovered,
-      statMarginals: sd?.statMarginals ?? officialStatMarginals(spreads),
+      // Past the top 10: sampled from the in-game spreads' own per-stat shares.
+      spreadsCovered: useOfficialSpreads ? Math.min(0.98, headShare) : sd!.spreadsCovered,
+      statMarginals: useOfficialSpreads ? officialStatMarginals(spreads) : sd!.statMarginals,
       natures: natures.length ? natures.map(([n, p]) => [n, p] as [string, number]) : sd?.natures ?? [],
-      teammates: sd?.teammates ?? [],
+      // Teammates come from the in-game list (partners), not Showdown's per-forme ones.
+      teammates: [],
+      partners,
     };
     names.push(forme);
   }

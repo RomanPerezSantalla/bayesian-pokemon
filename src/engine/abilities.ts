@@ -22,7 +22,8 @@ export const INTIMIDATE_REACT_ITEMS = new Set(['Clear Amulet', 'White Herb', 'Ad
 export const DROP_REACT = new Set(['Defiant', 'Competitive', 'Clear Body', 'White Smoke', 'Full Metal Body', 'Mirror Armor']);
 export const DROP_REACT_ITEMS = new Set(['Clear Amulet', 'White Herb']);
 
-const BLOCKERS = new Set([
+/** Stop an Intimidate or a foe's move lowering the Pokémon's stats. */
+export const BLOCKERS = new Set([
   'Clear Body', 'White Smoke', 'Full Metal Body', 'Hyper Cutter', 'Mirror Armor', 'Oblivious', 'Own Tempo',
   'Inner Focus', 'Scrappy', 'Clear Amulet',
 ]);

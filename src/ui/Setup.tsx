@@ -3,11 +3,15 @@ import {species as dexSpecies, toID, type Gen} from '../data/dex';
 import {previewNamesByUsage, type FormatData} from '../data/format';
 import {parseTeam, type PokemonSet} from '../data/paste';
 import {createBattle} from '../engine/battle';
+import {loadReader, readerReady, readWith} from '../speech/reader';
+import {installedManifest} from '../speech/store';
 import {useStore} from '../state/store';
-import {testLog} from '../testlog';
+import {testLog, testLogOn} from '../testlog';
 import {logLeads, stateCtx} from './battle/actions';
-import {ACTIVITY} from './battle/VoiceBar';
-import {previewPhrases, readPreview, type Picks, type Side, type Unsure} from './battle/voice/preview';
+import {ACTIVITY, BEFORE_MS, MicMeter, missed, SURE} from './battle/VoiceBar';
+import {namesPutBack} from './battle/voice/heard';
+import {applyPreview, modelInput, previewContext, readPreviewAnswer, startSaid, yesSaid} from './battle/voice/lm';
+import {addTheirs, previewPhrases, readPreview, type Picks, type PreviewRead, type Side, type Unsure} from './battle/voice/preview';
 import {speech, useSpeech} from './battle/voice/useSpeech';
 import {Sprite, useFormat, useFormatIndex} from './common';
 import {useWakeLock} from './wake';
@@ -44,8 +48,8 @@ function PreviewVoice({voice, heard, hint, unsure, label, onPick}: {
   return (
     <div className="voice-panel">
       {voice.error && <div className="note alert">{voice.error}</div>}
-      {voice.listening && (voice.interim ? <div className="voice-live">…{voice.interim}</div>
-        : <div className={voice.activity ? 'voice-live' : 'voice-line'}>{voice.activity ? ACTIVITY[voice.activity] : hint}</div>)}
+      {voice.listening && (voice.interim ? <div className="voice-live"><MicMeter />…{voice.interim}</div>
+        : <div className={voice.activity ? 'voice-live' : 'voice-line'}><MicMeter />{voice.activity ? ACTIVITY[voice.activity] : hint}</div>)}
       {heard && <div className={`voice-line${heard.bad ? ' bad' : ''}`}>{heard.text}</div>}
       {unsure.map((u, k) => (
         <div key={k} className="voice-unsure">
@@ -115,14 +119,34 @@ export function Setup({teamId}: {teamId?: string}) {
   // By voice (battle/voice/preview.ts): their six, then yours in pick order. The session carries on into the battle.
   const [heard, setHeard] = useState<{text: string; bad?: boolean} | null>(null);
   const [unsure, setUnsure] = useState<Unsure[]>([]);
+  // The same, for a "yes" heard before the next render.
+  const unsureNow = useRef<Unsure[]>([]);
+  unsureNow.current = unsure;
   const picks = useRef<Picks>({theirs: opp, mine: brought});
-  /** "I brought…", a pause, then the names: the side said carries on for a moment. */
+  /** Whose was picked last, said or tapped, for "scratch that". */
+  const lastPick = useRef<Side | undefined>(undefined);
+  /** "I brought…", a pause, then the names: the side said carries on for a moment (not for good). */
   const lastSide = useRef<{side: Side | null; at: number}>({side: null, at: 0});
-  picks.current = {theirs: opp, mine: brought};
+  /** By the language model: phrases one at a time, and what the last one did (for "scratch that", "I meant…"). */
+  const reading = useRef<Promise<void>>(Promise.resolve());
+  const lastRead = useRef<{lines: string[]; at: number} | null>(null);
+  picks.current = {theirs: opp, mine: brought, last: lastPick.current};
   const onVoice = useRef<(alternatives: string[]) => void>(() => {});
   const phrases = useRef<() => string[]>(() => []);
   const voice = useSpeech(alternatives => onVoice.current(alternatives), () => phrases.current());
   useWakeLock(voice.listening);
+  // Development and test builds: team preview by text too (window.__narrate("…")), as in a battle.
+  useEffect(() => {
+    if (!import.meta.env.DEV && !testLogOn) return;
+    const w = window as unknown as {__narrate?: (t: string) => void; __reader?: () => Promise<boolean>};
+    w.__narrate = t => onVoice.current([t]);
+    // The language model without the microphone: loaded from the installed pack.
+    w.__reader = () => installedManifest().then(m => (m ? loadReader(m) : false));
+    return () => {
+      delete w.__narrate;
+      delete w.__reader;
+    };
+  }, []);
 
   if (!teams.length) {
     return (
@@ -138,7 +162,9 @@ export function Setup({teamId}: {teamId?: string}) {
     ? ranked.filter(n => toID(n).includes(toID(query))).slice(0, 30)
     : ranked.slice(0, 48);
   const togglePick = (name: string) => {
-    setOpp(o => (o.includes(name) ? o.filter(x => x !== name) : o.length < 6 ? [...o, name] : o));
+    if (!opp.includes(name)) lastPick.current = 'theirs';
+    // Another forme of one of theirs replaces it (one of each species), as by voice.
+    setOpp(o => (o.includes(name) ? o.filter(x => x !== name) : gen ? addTheirs(o, name, gen).theirs : o.length < 6 ? [...o, name] : o));
     setQuery('');
     advanceOnSix.current = true;
   };
@@ -161,7 +187,29 @@ export function Setup({teamId}: {teamId?: string}) {
   };
 
   phrases.current = () => (fmt && gen && team ? previewPhrases({fmt, gen, team: team.sets, bring}) : []);
-  onVoice.current = alternatives => {
+  onVoice.current = heard => {
+    if (!fmt || !gen || !team) return;
+    // Names as the recogniser has been heard to spell them ("Right to" for Raichu), put back.
+    const alternatives = heard.map(t => namesPutBack(t, [...Object.keys(fmt.preview), ...team.sets.map(s => s.species)]));
+    // "Yes" to the first thing offered to tap.
+    const offered = unsureNow.current[0];
+    if (offered && yesSaid(alternatives[0])) {
+      unsureNow.current = [];
+      testLog('voice-preview', {heard: alternatives, used: 0, said: [], notes: [], unsure: [], picks: picks.current, yes: offered});
+      pickUnsure(offered, offered.options[0]);
+      return;
+    }
+    if (readerReady()) {
+      reading.current = reading.current.then(() => byModel(alternatives)).catch(err => {
+        testLog('voice-error', {error: `reader: ${err instanceof Error ? err.message : String(err)}`});
+        byRules(alternatives);
+      });
+      return;
+    }
+    byRules(alternatives);
+  };
+
+  const byRules = (alternatives: string[]) => {
     if (!fmt || !gen || !team) return;
     const env = {fmt, gen, team: team.sets, bring};
     const now = picks.current;
@@ -173,10 +221,45 @@ export function Setup({teamId}: {teamId?: string}) {
       const r = readPreview(alt, now, env, side);
       if (r.said.length > read.said.length) [read, used] = [r, k + 1];
     });
-    testLog('voice-preview', {heard: alternatives, used, said: read.said, unsure: read.unsure, side: read.side, battle: read.battle, picks: read.picks});
+    testLog('voice-preview', {heard: alternatives, used, said: read.said, notes: read.notes, unsure: read.unsure, side: read.side, battle: read.battle, picks: read.picks});
+    // Only when this phrase said it or named one of theirs / yours: otherwise it runs out.
+    if (read.side) lastSide.current = {side: read.side, at: Date.now()};
+    // "Start the battle" however it's heard ("start butter"), when nothing else was made of it.
+    const command = !read.said.length && !read.unsure.length && !read.battle && startSaid(alternatives[0]);
+    if (command) read.battle = true;
+    applyRead(read, alternatives, now, command);
+  };
+
+  /** By the language model (speech/reader.ts): the picks and what was said before, and the phrase. */
+  const byModel = async (alternatives: string[]) => {
+    if (!fmt || !gen || !team) return;
+    const env = {fmt, gen, team: team.sets, bring};
+    const asked = picks.current;
+    const last = lastRead.current;
+    const before = last && Date.now() - last.at < BEFORE_MS ? last.lines : [];
+    const input = modelInput(previewContext(team.sets.map(s => s.species), bring, (asked.mine ?? []).map(s => team.sets[s].species), asked.theirs, before), alternatives[0]);
+    const answer = await readWith(input);
+    const now = picks.current;
+    const sure = readPreviewAnswer(env, now, answer.lines.filter(l => l.p >= SURE).map(l => l.text).join('\n'));
+    const unsure = readPreviewAnswer(env, now, answer.lines.filter(l => l.p < SURE).map(l => l.text).join('\n'));
+    const read = applyPreview(env, now, sure.ops);
+    // "Start the battle" however it's heard ("start butter"), when the model made nothing of it.
+    const command = !sure.ops.length && !unsure.ops.length && startSaid(alternatives[0]);
+    if (command) read.battle = true;
+    // Adding one of theirs or picking one of yours the model wasn't sure of: offered to tap.
+    read.unsure = unsure.ops.flatMap((op): Unsure[] => op.kind === 'add' ? [{heard: alternatives[0], side: 'theirs', options: [op.name]}]
+      : op.kind === 'bring' ? [{heard: alternatives[0], side: 'mine', options: [op.slot]}] : []);
+    if (sure.lines.length) lastRead.current = {lines: sure.lines, at: Date.now()};
+    testLog('voice-preview', {heard: alternatives, used: 0, said: read.said, notes: read.notes, unsure: read.unsure, battle: read.battle, picks: read.picks,
+      reader: {lines: answer.lines, ms: answer.ms, tokens: answer.tokens, reused: answer.reused, before, dropped: [...sure.dropped, ...unsure.dropped]}});
+    applyRead(read, alternatives, now, command);
+  };
+
+  /** What a phrase did, onto the screen (by either reading). `command`: "start the battle" (not the battle's first line). */
+  const applyRead = (read: PreviewRead, alternatives: string[], now: Picks, command = false) => {
     const next = read.picks;
     picks.current = next;
-    lastSide.current = {side: read.side, at: Date.now()};
+    lastPick.current = next.last;
     if (next.theirs.join() !== now.theirs.join()) {
       advanceOnSix.current = true;
       setOpp(next.theirs);
@@ -189,7 +272,7 @@ export function Setup({teamId}: {teamId?: string}) {
     if (read.battle) {
       if (next.theirs.length) {
         // The battle's first line: start it, and hand the line to the battle's narrator (it sets the leads).
-        speech.passOn(alternatives);
+        if (!command) speech.passOn(alternatives);
         start(next.theirs, mine ?? pool, mine ? mine.slice(0, positions) : myLeads);
         return;
       }
@@ -197,29 +280,39 @@ export function Setup({teamId}: {teamId?: string}) {
       return;
     }
     setUnsure(read.unsure);
-    if (read.said.length) setHeard({text: read.said.join(' · ')});
+    // What it did, and why a Pokémon heard changed nothing ("Froslass is in already").
+    const did = [...read.said, ...read.notes];
+    if (did.length) setHeard({text: did.join(' · ')});
     else if (read.unsure.length) setHeard(null);
     // "I brought…" on its own: the names come next.
-    else if (read.side && read.side !== side) setHeard({text: read.side === 'mine' ? 'Yours next…' : 'Theirs next…'});
-    else setHeard({text: `didn’t catch: “${alternatives[0].trim()}”`, bad: true});
+    else if (read.side) setHeard({text: read.side === 'mine' ? 'Yours next…' : 'Theirs next…'});
+    else setHeard({text: missed(alternatives[0]), bad: true});
   };
 
   const labelOf = (option: string | number) =>
     typeof option === 'number' ? team?.sets[option]?.nickname || team?.sets[option]?.species || '?' : option;
   const pickUnsure = (u: Unsure, option: string | number) => {
     const now = picks.current;
-    if (u.side === 'theirs' && typeof option === 'string' && !now.theirs.includes(option) && now.theirs.length < 6) {
-      picks.current = {...now, theirs: [...now.theirs, option]};
-      advanceOnSix.current = true;
-      setOpp(picks.current.theirs);
+    let note: string | undefined;
+    if (u.side === 'theirs' && typeof option === 'string' && gen) {
+      // A forme of one of theirs replaces it (tapping "Goodra-Hisui" after "Goodra").
+      const r = addTheirs(now.theirs, option, gen);
+      note = r.note;
+      if (r.said) {
+        lastPick.current = 'theirs';
+        picks.current = {...now, theirs: r.theirs, last: 'theirs'};
+        advanceOnSix.current = true;
+        setOpp(r.theirs);
+      }
     } else if (u.side === 'mine' && typeof option === 'number' && !(now.mine ?? []).includes(option)) {
       const mine = [...(now.mine ?? []), option].slice(0, bring);
-      picks.current = {...now, mine};
+      lastPick.current = 'mine';
+      picks.current = {...now, mine, last: 'mine'};
       setBrought(mine);
       setMyLeads(mine.slice(0, positions));
     }
     setUnsure(list => list.filter(x => x !== u));
-    setHeard({text: `${labelOf(option)} ✓`});
+    setHeard({text: note ?? `${labelOf(option)} ✓`});
   };
   const voicePanel = (hint: string) => (
     <PreviewVoice voice={voice} heard={heard} hint={hint} unsure={unsure} label={labelOf} onPick={pickUnsure} />
@@ -325,6 +418,7 @@ export function Setup({teamId}: {teamId?: string}) {
             {team.sets.map((s, i) => (
               <div key={i} className={`slot filled${pool.includes(i) ? ' lead' : ''}`} style={{opacity: pool.includes(i) ? 1 : 0.4}}
                 onClick={() => {
+                  if (!pool.includes(i)) lastPick.current = 'mine';
                   const next = toggleIn(pool, i, bring).sort((a, b) => a - b);
                   setBrought(next);
                   setMyLeads(l => l.filter(x => next.includes(x)));

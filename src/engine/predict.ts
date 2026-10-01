@@ -6,52 +6,101 @@ import {defaultCondition, hpCandidates, hypView, megaFormeOf, mySpec, oppOrderKe
 import {DAMAGE_NOT_FROM_STATS} from './moves';
 import {WEATHER_ABILITY} from './state';
 import type {MonBelief} from './posterior';
-import type {Battle, Snapshot} from './types';
+import {sameMon, type Battle, type MonRef, type Snapshot} from './types';
+
+/** An opponent that can still Mega Evolve, and whether predictions count it as doing so this turn. */
+export interface MegaCount {
+  /** Its likeliest Mega. */
+  forme: string;
+  /** How likely it holds a Mega Stone at all. */
+  p: number;
+  counted: boolean;
+  /** The turn it moved without Mega Evolving, though its side still could. */
+  passed?: number;
+  /** Counted the way you said, not the way it would be. */
+  chosen?: boolean;
+}
 
 export interface PredictionField {
   snap: Snapshot;
-  /** This opponent is counted as Mega Evolving (its likeliest Mega, and how likely it has one). */
-  asMega?: {forme: string; p: number};
-  /** Your Pokémon counted as Mega Evolving. */
+  /** This opponent, if it can still Mega Evolve. */
+  mega?: MegaCount;
+  /** Yours counted as Mega Evolving. */
   myMegas: number[];
+  /** Yours on the field that could Mega Evolve this turn, counted or not. */
+  myCan: number[];
+}
+
+/**
+ * The turn this Pokémon moved without Mega Evolving though its side still could have, if it did
+ * and hasn't since: Mega Evolution comes before a turn's moves, so it chose not to then (keeping
+ * it for another, or for later).
+ */
+export function passedUpMega(battle: Battle, ref: MonRef): number | undefined {
+  let used = false;
+  let passed: number | undefined;
+  for (const e of battle.events) {
+    if (e.kind === 'reveal' && e.what === 'forme' && !e.negate && e.mon.side === ref.side) {
+      if (sameMon(e.mon, ref)) return undefined;
+      used = true;
+    } else if (e.kind === 'action' && !used && passed === undefined && sameMon(e.actor, ref)) passed = e.turn;
+  }
+  return passed;
 }
 
 /**
  * The field predictions are made on. A Pokémon that can still Mega Evolve is counted as
- * evolving, yours and theirs: it happens before anyone moves, so its Mega's stats, ability and
- * Speed are what this turn's hits and turn order come from (a weather-setting Mega brings its
- * weather). A side that has used its Mega can't again.
+ * evolving: it happens before anyone moves, so its Mega's stats, ability and Speed are what this
+ * turn's hits and turn order come from (a weather-setting Mega brings its weather). Not once it
+ * has let a turn go by without it (the stone may be kept for another, or it has none), nor once
+ * its side has used its one Mega. Of yours on the field only one can: the first that hasn't let a
+ * turn go by. `battle.megaPlan` says otherwise where you did.
  */
 export function predictionSnapshot(gen: Gen, battle: Battle, snap: Snapshot, belief: MonBelief): PredictionField {
   const out = structuredClone(snap);
+  const plan = battle.megaPlan ?? {};
   const usedBy = (side: 'me' | 'opp') => Object.entries(snap.mons).some(([k, c]) => k.startsWith(side) && c.mega);
   const setWeather = (ability: string | undefined) => {
     const w = ability ? WEATHER_ABILITY[ability] : undefined;
     if (w) out.field = {...out.field, weather: w};
   };
 
-  let asMega: PredictionField['asMega'];
+  let mega: MegaCount | undefined;
   const cond = out.mons[`opp${belief.slot}`];
   const megas = belief.formes.filter(f => f.p > 0 && belief.megaAbilityOf[f.name]).sort((a, b) => b.p - a.p);
   if (cond && !cond.mega && !usedBy('opp') && megas.length) {
-    cond.mega = true;
-    asMega = {forme: megas[0].name, p: megas.reduce((t, f) => t + f.p, 0)};
-    if (megas[0].p > 0.5) setWeather(belief.megaAbilityOf[megas[0].name]);
+    const passed = passedUpMega(battle, {side: 'opp', slot: belief.slot});
+    const chosen = plan.opp?.[belief.slot];
+    const counted = chosen ?? passed === undefined;
+    mega = {forme: megas[0].name, p: megas.reduce((t, f) => t + f.p, 0), counted, passed, chosen: chosen !== undefined || undefined};
+    if (counted) {
+      cond.mega = true;
+      if (megas[0].p > 0.5) setWeather(belief.megaAbilityOf[megas[0].name]);
+    }
   }
 
   const myMegas: number[] = [];
+  const myCan: number[] = [];
   if (!usedBy('me')) {
-    battle.myTeam.forEach((set, slot) => {
+    const can = (slot: number) => {
       const c = out.mons[`me${slot}`];
-      const forme = megaFormeOf(gen, set);
-      if (!c || c.mega || !forme) return;
-      c.mega = true;
+      return !!c && !c.mega && c.hp > 0 && !!megaFormeOf(gen, battle.myTeam[slot]);
+    };
+    const fresh = (slot: number) => passedUpMega(battle, {side: 'me', slot}) === undefined;
+    myCan.push(...out.active.me.filter((s): s is number => s !== null && can(s)));
+    const pick = plan.me !== undefined ? plan.me : myCan.find(fresh) ?? null;
+    battle.myTeam.forEach((set, slot) => {
+      // On the bench, each as if it came in and did (for its Speed against this one), unless you said.
+      const counted = myCan.includes(slot) || plan.me !== undefined ? slot === pick : fresh(slot);
+      if (!can(slot) || !counted) return;
+      out.mons[`me${slot}`].mega = true;
       myMegas.push(slot);
       // Only one on the field changes the weather now.
+      const forme = megaFormeOf(gen, set)!;
       if (out.active.me.includes(slot)) setWeather(Object.values(gen.species.get(toID(forme))?.abilities ?? {})[0] as string | undefined);
     });
   }
-  return {snap: out, asMega, myMegas};
+  return {snap: out, mega, myMegas, myCan};
 }
 
 /** Hypotheses below this posterior mass are skipped in predictions. */

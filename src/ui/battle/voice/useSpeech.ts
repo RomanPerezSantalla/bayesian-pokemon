@@ -37,6 +37,8 @@ export interface Recognizer {
   /** Names and moves that can come up right now, for a recogniser that listens out for them. */
   context?: () => string[];
   onactivity?: ((a: Activity) => void) | null;
+  /** How loud the microphone is right now, 0 to 1, for a meter. None when the audio isn't ours to see (the browser's recogniser). */
+  level?: () => number;
   start(): void;
   stop(): void;
   abort(): void;
@@ -362,6 +364,9 @@ export class SpeechSession {
     this.set({listening: true, error: null});
     this.begin(r);
   };
+
+  /** The microphone's level now (0 to 1), or null when the recogniser doesn't show it. */
+  readonly level = (): number | null => (this.state.listening && this.rec?.level ? this.rec.level() : null);
 
   readonly stop = () => {
     this.want = false;

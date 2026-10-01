@@ -9,6 +9,9 @@
  *     the sherpa-onnx project's release;
  *   - the speech detector: Silero VAD (MIT);
  *   - the ONNX runtime's WebAssembly, from node_modules (onnxruntime-web, MIT).
+ * And the reader, which reads what's said into the app's actions: FunctionGemma 270M fine-tuned for
+ * it, 8-bit, with its tokenizer (built in .cache/llm: `READER=v4` picks the run). It's a Gemma Model
+ * Derivative, so its notice goes with it (reader-NOTICE.txt).
  */
 import {spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
@@ -20,7 +23,16 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const src = path.join(root, '.cache', 'voice');
 const out = path.resolve(root, process.argv[2] ?? path.join('.cache', 'voice', 'pack'));
 const PART = 16 << 20;
-const MODEL_ID = 'parakeet-tdt-ctc-110m-int8';
+const MODEL_ID = 'parakeet-tdt-ctc-110m-int8+reader-1';
+const READER = path.join(root, '.cache', 'llm');
+const READER_RUN = process.env.READER ?? 'v4';
+const NOTICE = `The reader (reader.onnx, reader.json) is a Model Derivative of Gemma: FunctionGemma 270M, fine-tuned
+by the Bayesian Battle Analyzer project to read battle narration into the app's actions, then cut down
+(its vocabulary) and stored with 8-bit weights. It was modified from the original.
+
+Gemma is provided under and subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms.
+Its use is subject to the Gemma Prohibited Use Policy at ai.google.dev/gemma/prohibited_use_policy.
+`;
 
 const MODEL_DIR = 'sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8';
 const SOURCES = {
@@ -71,11 +83,22 @@ const vad = await source(SOURCES.vad);
 const ortDir = path.join(root, 'node_modules', 'onnxruntime-web');
 const ortVersion = JSON.parse(fs.readFileSync(path.join(ortDir, 'package.json'), 'utf8')).version;
 
+const readerModel = path.join(READER, 'out', READER_RUN, 'onnx', 'model_q8.onnx');
+const readerVocab = path.join(READER, 'vocab', 'tokenizer.json');
+for (const f of [readerModel, readerVocab]) if (!fs.existsSync(f)) throw new Error(`The reader isn't built: no ${rel(f)} (see .cache/llm)`);
+// Its tokenizer, without Gemma's own ids (only needed to build it).
+const {ids: _ids, ...vocab} = JSON.parse(fs.readFileSync(readerVocab, 'utf8'));
+fs.writeFileSync(path.join(src, 'reader.json'), JSON.stringify(vocab));
+fs.writeFileSync(path.join(src, 'reader-NOTICE.txt'), NOTICE);
+
 const files = [
   ['model.int8.onnx', path.join(dir, 'model.int8.onnx')],
   ['tokens.txt', path.join(dir, 'tokens.txt')],
   ['silero_vad.onnx', vad],
   ['ort-wasm-simd-threaded.wasm', path.join(ortDir, 'dist', 'ort-wasm-simd-threaded.wasm')],
+  ['reader.onnx', readerModel],
+  ['reader.json', path.join(src, 'reader.json')],
+  ['reader-NOTICE.txt', path.join(src, 'reader-NOTICE.txt')],
 ];
 
 fs.rmSync(out, {recursive: true, force: true});

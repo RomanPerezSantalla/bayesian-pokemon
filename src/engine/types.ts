@@ -238,4 +238,10 @@ export interface Battle {
   live: Snapshot;
   turn: number;
   settings: BattleSettings;
+  /**
+   * Who predictions count as Mega Evolving where you said otherwise than they would (the switch
+   * on the Mega note and your cards): theirs by slot (true: as Mega, false: as it is); yours, the
+   * slot, or null for none.
+   */
+  megaPlan?: {opp?: Record<number, boolean>; me?: number | null};
 }
