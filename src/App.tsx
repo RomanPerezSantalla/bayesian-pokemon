@@ -4,8 +4,8 @@ import {BattleScreen} from './ui/battle/BattleScreen';
 import {BattlesPage} from './ui/BattlesPage';
 import {ErrorBanner, ErrorBoundary} from './ui/Crash';
 import {Setup} from './ui/Setup';
+import {ScreenButton, ScreenPanel} from './ui/ScreenCapture';
 import {TeamsPage} from './ui/TeamsPage';
-import {VoiceOffer} from './ui/VoiceSetup';
 
 const COFFEE_URL = 'https://buymeacoffee.com/romanps';
 
@@ -32,7 +32,7 @@ export function App() {
   const storageError = useStore(s => s.storageError);
   const battles = useStore(s => s.battles);
   const current = view.page === 'battle' ? battles.find(b => b.id === view.battleId) : undefined;
-  // No pull-to-refresh on a battle: a stray pull mid-turn reloads it (all saved, but the open sheet and voice stop).
+  // No pull-to-refresh on a battle: a stray pull mid-turn reloads it (all saved, but the open sheet closes).
   useEffect(() => {
     document.documentElement.classList.toggle('no-pull', view.page === 'battle');
   }, [view.page]);
@@ -56,6 +56,7 @@ export function App() {
           {current && <button className="on">{current.label}</button>}
         </nav>
         <div className="topbar-end">
+          <ScreenButton />
           <a className="coffee-link" href={COFFEE_URL} target="_blank" rel="noreferrer" title="Buy me a coffee">
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
               <path d="M4 6h12v6.5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5V6zM17 7.4h1.6a2.9 2.9 0 0 1 0 5.8H17v-2h1.6a.9.9 0 0 0 0-1.8H17v-2zM3 19h14v2H3z" fill="currentColor" />
@@ -76,7 +77,7 @@ export function App() {
           {view.page === 'battle' && <BattleScreen key={view.battleId} battleId={view.battleId} />}
         </ErrorBoundary>
       </main>
-      <VoiceOffer />
+      <ScreenPanel />
     </div>
   );
 }

@@ -3,7 +3,7 @@
  * does with a move: its data (type, category, power, priority), the damage the calc gives, which
  * stats that damage depends on (the inference groups hypotheses by them), what logging it does to
  * the battle (stat stages, statuses, weather, terrain, screens, rooms, hazards, HP, items), how
- * the action sheet asks for its targets and hits, and voice reading it.
+ * the action sheet asks for its targets and hits, and reading it from the battle text.
  *
  * The calc's list is longer than what can be used: 15 of its moves no Pokémon in Champions learns
  * (Anchor Shot, Astral Barrage, Blood Moon, Bolt Beak, Dragon Hammer, Fishious Rend, Gear Grind,
@@ -25,7 +25,7 @@ import {DAMAGE_NOT_FROM_STATS, moveFx} from './moves';
 import {applyAction, type StateCtx} from './state';
 import type {ActionEvent, Boosts, FieldCondition, MonRef, Snapshot, Status} from './types';
 import {hitChoices, targetPlan} from '../ui/battle/targets';
-import {parseNarration} from '../ui/battle/voice/parse';
+import {parseNarration} from '../ui/battle/narration/parse';
 
 const gen = getGen(0);
 const dex = Dex.forGen(9);
@@ -134,7 +134,7 @@ describe("every move in the calc's Champions data", () => {
       expect(hitChoices(name).length > 0).toBe(varies);
     });
 
-    it('is read by voice, with "used" or without', () => {
+    it('is read from the battle text, with "used" or without', () => {
       const {battle} = setup();
       battle.live.active = {me: [0, 1], opp: [0, 1]};
       for (const line of [`The opposing Metagross used ${name}!`, `Metagross ${name}`]) {

@@ -16,8 +16,8 @@ import {computeBeliefs} from '../../../engine/posterior';
 import type {Battle, SideID} from '../../../engine/types';
 import type {MonSummary} from '../../../engine/worker';
 import {turnActions, undo} from '../actions';
-import {Narrator, type VoiceIO} from './narrator';
-import {narrationPhrases, parseNarration} from './parse';
+import {Narrator, type NarratorIO} from './narrator';
+import {parseNarration} from './parse';
 
 const data = (f: string) => JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../../../public/data', f), 'utf8'));
 const infos = data('formats.json').formats as FormatInfo[];
@@ -69,7 +69,7 @@ function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEI
   b.live.active = active;
   let cache: {n: number; mons: MonSummary[]} | null = null;
   const asked: [SideID, number][] = [];
-  const io: VoiceIO = {
+  const io: NarratorIO = {
     gen,
     battle: () => b,
     mons: () => {
@@ -97,7 +97,7 @@ function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEI
     undo: () => {
       b = undo(b);
     },
-    /** The battle put back as it was (a phrase taken back by voice). */
+    /** The battle put back as it was (a phrase taken back). */
     restore: (to: Battle) => {
       b = to;
     },
@@ -435,7 +435,7 @@ describe('a turn read out in order', () => {
   });
 });
 
-describe('as the recogniser writes it', () => {
+describe('written loosely', () => {
   it('lower case, no punctuation, "Sp. Atk" said out loud, lines run together', () => {
     const r = rig({me: [0, 1], opp: [0, 3]});
     r.read(
@@ -571,7 +571,7 @@ Ability: Trace
 
   it('the turns stay in place: turn 1 taken back and read again, the switch, Parabolic Charge, then Fake Out starting turn 3', () => {
     const r = start();
-    // As the voice model heard it (the Mega, said plainly), with the target named straight after the move.
+    // The Mega written plainly, with the target named straight after the move.
     r.read('Lopunny mega.', 'Froslass Protect Lopunny Fake Out Bellibolt.', 'Dragonite Dragon Dance.', 'Bellibolt flinched.');
     expect(r.b.live.mons.me2.mega).toBe(true);
     expect(turnActions(r.b).find(a => a.move === 'Fake Out')?.hits.map(h => h.target)).toEqual([{side: 'opp', slot: 4}]);
@@ -612,13 +612,6 @@ Ability: Trace
       'Lopunny: Atk not lowered: put back (has it Mega Evolved? Scrappy would stop it)',
       'Dragonite: Atk not lowered ✓',
     ]);
-  });
-
-  it('listens out for their likely items, not the "(other)" row ("other" is said all the time)', () => {
-    const b = start().b;
-    const phrases = narrationPhrases({battle: b, gen, mons: computeBeliefs(doublesFmt, b).mons as unknown as MonSummary[]});
-    expect(phrases).toEqual(expect.arrayContaining(['Froslassite', 'Mega Evolved']));
-    expect(phrases.filter(p => p.startsWith('('))).toEqual([]);
   });
 
   it('a Pokémon named straight after a move aimed at one is its target, unless it moves next', () => {
@@ -722,14 +715,16 @@ describe('a Sitrus Berry and the HP said about it', () => {
   });
 });
 
-describe('a turn said out of order (30 Sep): what priority settles, and nothing about Speed from the rest', () => {
-  it('Fake Out said after an ordinary attack: this turn, first, its place not taken as the order', () => {
-    const r = rig({me: [1, 2], opp: [0, 1]});
-    r.read('The opposing Kingambit used Kowtow Cleave on Garchomp!', 'Garchomp 100');
-    r.read('Incineroar used Fake Out on the opposing Salamence!', 'The opposing Salamence 90');
+describe('a turn as the game writes it', () => {
+  it('a Protect read after ordinary moves (an Encore made it so, 2 Oct): in the order read, and "But it failed!" its own', () => {
+    const r = rig({me: [1, 2], opp: [0, 3]});
+    r.read('The opposing Salamence used Dragon Claw on Garchomp!', 'Garchomp 80', 'The opposing Clefable used Encore!', 'Garchomp must do an encore!',
+      'Garchomp used Protect!', 'But it failed!');
     r.n.commit();
     expect(r.b.turn).toBe(1);
-    expect(turnActions(r.b).map(a => [a.move, a.ordered])).toEqual([['Fake Out', false], ['Kowtow Cleave', true]]);
+    // The Protect goes at the priority of the move chosen before the Encore: its place says nothing of Speed.
+    expect(turnActions(r.b).map(a => [a.move, a.ordered, !!a.failed])).toEqual([['Dragon Claw', true, false], ['Encore', true, false], ['Protect', false, true]]);
+    expect(turnActions(r.b).find(a => a.move === 'Encore')?.targetRefs).toEqual([{side: 'me', slot: 2}]);
   });
 
   it('into a Protect made this turn: nothing happened to it, and no HP is waited for', () => {
@@ -786,5 +781,43 @@ describe('a move told again (30 Sep): the one there is, not a second move, nor a
     r.read('The opposing Kingambit used Kowtow Cleave on Incineroar!');
     r.n.commit();
     expect(r.b.turn).toBe(3);
+  });
+});
+
+describe('the game\'s text as read off the screen (2 Oct)', () => {
+  it('one coming in after its side\'s Parting Shot, Baton Pass…, with no "…, come back!" (chosen on the party screen): in for it', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('Incineroar used Parting Shot on the opposing Salamence!', 'Go! Metagross!');
+    expect(r.b.live.active.me).toEqual([3, 2]);
+  });
+
+  it('"…had its HP restored." ends the turn (Leftovers, Grassy Terrain), but straight after a Sitrus Berry is part of the move', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Salamence used Dragon Claw on Garchomp!', 'The opposing Kingambit had its HP restored.');
+    expect(r.b.events.at(-1)?.kind).toBe('endTurn');
+    const s = rig({me: [1, 2], opp: [0, 1]});
+    s.read('The opposing Salamence used Dragon Claw on Incineroar!', "Incineroar's Sitrus Berry", 'Incineroar had its HP restored.');
+    expect(s.b.events.some(e => e.kind === 'endTurn')).toBe(false);
+  });
+
+  it('"…flinched and couldn\'t move!" straight after a Fake Out with no target said: whom it hit', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('Incineroar used Fake Out!', "The opposing Kingambit flinched and couldn't move!");
+    expect(turnActions(r.b).find(a => a.move === 'Fake Out')?.hits.map(h => h.target)).toEqual([{side: 'opp', slot: 1}]);
+  });
+
+  it('the battle over: the move still being told is logged; 0 read for one it hit is a KO', () => {
+    const r = rig({me: [1, 2], opp: [0, 1]});
+    r.read('The opposing Kingambit used Kowtow Cleave on Garchomp!');
+    r.n.feed([{kind: 'hp', mon: {side: 'me', slot: 2}, value: 0}]);
+    r.read('The battle has ended due to a forfeit.');
+    expect(turnActions(r.b, 1).map(a => [a.move, a.hits.map(h => h.fainted)])).toEqual([['Kowtow Cleave', [true]]]);
+    // "You lost to …!" names a trainer, not a Pokémon.
+    expect(events('You lost to Brylo!').map(e => e.kind)).toEqual(['battleEnd']);
+  });
+
+  it("a ribbon's title after the name isn't another Pokémon", () => {
+    const kinds = events('Kim sent out Salamence the Alola Champion and Kingambit!', {me: [null, null], opp: [null, null]});
+    expect(kinds).toEqual([{kind: 'sendOut', mon: {side: 'opp', slot: 0}}, {kind: 'sendOut', mon: {side: 'opp', slot: 1}}]);
   });
 });

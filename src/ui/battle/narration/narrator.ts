@@ -31,9 +31,9 @@ import {
 import {pendingChecks} from '../checks';
 import {monLabel} from '../names';
 import {applyNews, fieldAgrees, type FieldNews} from './messages';
-import type {VoiceEvent} from './parse';
+import type {NarrationEvent} from './parse';
 
-export interface VoiceIO {
+export interface NarratorIO {
   gen: Gen;
   /** The battle as it is now (after everything applied so far). */
   battle(): Battle;
@@ -68,6 +68,10 @@ interface Row {
 const PROTECTS = new Set(['protect', 'detect', 'kingsshield', 'spikyshield', 'banefulbunker', 'silktrap', 'burningbulwark', 'obstruct']);
 /** Moves that get through Protect. */
 const THROUGH_PROTECT = new Set(['feint', 'shadowforce', 'phantomforce', 'hyperspacehole', 'hyperspacefury', 'hyperdrill', 'mightycleave']);
+/** Moves that switch their user out. */
+const PIVOTS = new Set(['uturn', 'voltswitch', 'flipturn', 'partingshot', 'batonpass', 'teleport', 'shedtail', 'chillyreception']);
+/** Berries that restore HP when eaten mid-move ("…had its HP restored." after their pop-up). */
+const HEALING_BERRIES = new Set(['Sitrus Berry', 'Oran Berry', 'Figy Berry', 'Wiki Berry', 'Mago Berry', 'Aguav Berry', 'Iapapa Berry']);
 
 /** A stat change the game showed, in stages. */
 interface Heard {
@@ -179,14 +183,19 @@ export class Narrator {
   /** A move told again: the targets said with it are the logged move's, not the open one's. */
   private retelling = false;
   /** The rest of the phrase, after what's being taken in now. */
-  private ahead: VoiceEvent[] = [];
+  private ahead: NarrationEvent[] = [];
+  /** The last thing taken in, if it was an item's pop-up: whose, and the item. */
+  private popped: {key: string; item: string} | null = null;
+  /** Made by an Encore to use its last move this turn ("…must do an encore!"): that move goes at the priority of the one chosen. */
+  private encored = new Set<string>();
 
-  constructor(private io: VoiceIO) {}
+  constructor(private io: NarratorIO) {}
 
   /** Entries taken back since the narrator last looked: what it heard about them goes too. */
   private sync() {
     if (this.anchor && !this.io.battle().events.some(e => e.id === this.anchor)) {
       this.couldnt.clear();
+      this.encored.clear();
       this.pending.clear();
       this.quick.clear();
       this.explained = [];
@@ -307,7 +316,7 @@ export class Narrator {
   }
 
   /** Apply what was heard; returns short notes of what was done. */
-  feed(events: VoiceEvent[]): string[] {
+  feed(events: NarrationEvent[]): string[] {
     this.sync();
     this.phraseTurn = null;
     this.retelling = false;
@@ -337,8 +346,8 @@ export class Narrator {
     const wanted = this.pending.get(monKey(d.actor));
     this.pending.delete(monKey(d.actor));
     const moved = wanted ? this.reorder(d.actor, wanted.place, wanted.other) : '';
-    // Said after moves it must have come before (Fake Out after an ordinary attack): put in its place.
-    const placed = !wanted && logged?.kind === 'action' ? this.placeByPriority(logged.id, d.actor, d.move) : '';
+    // Its priority isn't its own (an Encore made it): its place in the turn says nothing of its Speed.
+    if (logged?.kind === 'action' && this.encored.has(monKey(d.actor))) this.io.apply(bb => setOrdered(bb, logged.id, false));
     const which = this.whichOne(d);
     const hits = which ? [`${which} (not said): HP skipped`] : action.hits.map(h => `${this.label(h.target)} ${h.fainted ? 'KO' : h.noEffect ? 'immune'
       : h.unread ? 'HP skipped' : `${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}`);
@@ -346,28 +355,7 @@ export class Narrator {
     const outcome = [...hits, ...missed];
     const done = `✓ ${this.label(d.actor)} · ${d.move}${d.failed ? ' → failed' : outcome.length ? ` → ${outcome.join(', ')}` : ''}`;
     this.mark();
-    return [done, moved, placed].filter(Boolean).join(' · ');
-  }
-
-  /**
-   * A move logged after ones it must have come before by priority (Fake Out, +3, said after an ordinary attack): it
-   * was said out of order, so it goes before them, and its place isn't taken as the turn's order (nothing about
-   * Speed is learned from where it was said).
-   */
-  private placeByPriority(id: string, actor: MonRef, move: string): string {
-    const acts = turnActions(this.io.battle());
-    const at = acts.findIndex(a => a.id === id);
-    const [lo] = this.priority(actor, move);
-    const goal = acts.findIndex((a, k) => k < at && this.priority(a.actor, a.move)[1] < lo);
-    if (at < 0 || goal < 0) return '';
-    for (let k = at; k > goal; k--) {
-      if (!canMoveAction(this.io.battle(), id, -1).ok) break;
-      this.io.apply((bb, c) => moveAction(c, bb, id, -1));
-    }
-    this.io.apply(bb => setOrdered(bb, id, false));
-    // Re-running the turn's moves rebuilt the board from them: what the game showed after the last goes on again.
-    if (this.kept) this.editNow([...this.kept.extra, ...this.kept.draft.later], false);
-    return `${this.label(actor)}'s ${move} goes first (priority), order otherwise unknown`;
+    return [done, moved].filter(Boolean).join(' · ');
   }
 
   /**
@@ -468,8 +456,11 @@ export class Narrator {
     this.draft = null;
   }
 
-  private one(ev: VoiceEvent): (string | null)[] {
+  private one(ev: NarrationEvent): (string | null)[] {
     const b = this.io.battle();
+    // The pop-up just before this, if it was an item's (a Sitrus Berry's "…had its HP restored." follows it).
+    const popped = this.popped;
+    this.popped = ev.kind === 'item' && ev.mon ? {key: monKey(ev.mon), item: ev.item} : null;
     switch (ev.kind) {
       case 'use': {
         // The move told again: said twice ("Raichu Protect… Raichu Protect?"), or brought up again as a phrase goes on
@@ -544,7 +535,10 @@ export class Narrator {
           // Under a quarter it can only be before the berry, which heals a quarter ("1%, Sitrus Berry").
           row.healed = ev.value > (ref.side === 'opp' ? 25 : Math.floor(max / 4));
         }
-        Object.assign(row, {value: ev.value, fainted: false, said: true});
+        // Higher than this move left it, read already: healed since (Leftovers, Grassy Terrain): where it's at now.
+        if (row.value !== undefined && ev.value > row.value && !row.triggers.includes('sitrus')) return this.reading(ref, ev.value);
+        // 0 is a KO: a fainted one's box shows 0 before "…fainted!" (or without it, the battle over).
+        Object.assign(row, ev.value === 0 ? {value: undefined, fainted: true, said: true} : {value: ev.value, fainted: false, said: true});
         this.touch(d, row);
         return [];
       }
@@ -571,7 +565,7 @@ export class Narrator {
       }
       case 'crit': {
         const d = this.draft ?? this.reopen(ev.mon, true);
-        if (!d) return ['A crit: on which move? Say it with the move'];
+        if (!d) return ['A crit, but no move it could be on'];
         const on = ev.mon ? this.row(d, ev.mon) : null;
         if (on) {
           Object.assign(on, {crit: true, said: true});
@@ -654,6 +648,11 @@ export class Narrator {
         return [];
       }
       case 'cant': {
+        // "…flinched and couldn't move!" straight after a Fake Out with no target said: whom it hit.
+        if (ev.flinch && ev.mon && this.draft && !this.draft.spread && !this.draft.rows.some(r => r.said)) {
+          const row = this.row(this.draft, ev.mon);
+          if (row) row.said = true;
+        }
         // Its turn came and went: the move before is over. Its turn coming again means a new turn.
         const done = this.commit();
         const again = ev.mon && (this.couldntNow(ev.mon) || turnActions(this.io.battle()).some(a => sameMon(a.actor, ev.mon!)));
@@ -675,7 +674,26 @@ export class Narrator {
         return this.unchanged(ev.mon, ev.stats);
       case 'field':
         return this.field(ev.news);
+      case 'battleEnd':
+        // "The battle has ended due to a forfeit.", "You lost to …!": the move still being told is logged.
+        return this.endPhase();
+      case 'encored': {
+        // "…must do an encore!": whom the Encore being told was aimed at; its move this turn says nothing of its Speed.
+        const d = this.draft;
+        const row = d && ev.mon && toID(d.move) === 'encore' ? this.row(d, ev.mon) : null;
+        if (row) row.said = true;
+        if (ev.mon) this.encored.add(monKey(ev.mon));
+        return [];
+      }
       case 'residual': {
+        // "…had its HP restored." straight after a healing berry of one in the move being told: part of the move. (After
+        // anything else it's Leftovers or Grassy Terrain: the end of the turn.)
+        const d = this.draft;
+        const berry = !!popped && HEALING_BERRIES.has(popped.item) && !!ev.mon && popped.key === monKey(ev.mon);
+        if (ev.heal && berry && d && ev.mon && (sameMon(d.actor, ev.mon) || d.rows.some(r => r.said && sameMon(r.ref, ev.mon!)))) {
+          this.about = ev.mon;
+          return [];
+        }
         const notes = this.endPhase();
         this.about = ev.mon;
         if (ev.sand) notes.push(...this.field({what: 'weather', value: 'Sand', upkeep: true}));
@@ -748,7 +766,7 @@ export class Narrator {
         const fainted = active.findIndex(s => s === null || (now.live.mons[`${side}${s}`]?.hp ?? 1) <= 0);
         // Dragged out: in for the one the last move hit (Roar, Dragon Tail, Red Card).
         const hit = ev.kind === 'dragged' ? this.lastHit(side) : -1;
-        const pos = hit >= 0 ? hit : this.vacated[side] ?? (fainted >= 0 ? fainted : active.length === 1 ? 0 : -1);
+        const pos = hit >= 0 ? hit : this.vacated[side] ?? (fainted >= 0 ? fainted : active.length === 1 ? 0 : this.pivoted(side));
         delete this.vacated[side];
         if (pos < 0) {
           this.io.askSwitch(side, slot);
@@ -761,6 +779,7 @@ export class Narrator {
         const done = this.commit();
         this.pending.clear();
         this.couldnt.clear();
+        this.encored.clear();
         this.sealed = true;
         // The turn already ended with its first end-of-turn line.
         if (this.ending) return [done];
@@ -774,36 +793,20 @@ export class Narrator {
   }
 
   /**
-   * A move of higher priority than one already made this turn could have had can't come after it:
-   * Protect or Fake Out after an ordinary attack starts the next turn. The ones made count as high
-   * as they might have gone (Prankster, Gale Wings, Triage, Grassy Glide), this one as its own.
+   * Where one coming in goes with no place free: the place of the last of that side, still out, to use a move
+   * that switches it out this turn (Baton Pass, U-turn, Parting Shot…). Yours choose who comes in on the party
+   * screen, so the game writes no "…, come back!" for them.
    */
-  private priority(ref: MonRef, move: string): [lo: number, hi: number] {
-    const gen = this.io.gen;
-    const m = dexMove(gen, move);
-    const base = m?.priority ?? 0;
-    const may = this.abilitiesOf(ref);
-    const status = isStatusMove(gen, move);
-    let hi = base;
-    if (may.has('Prankster') && status) hi = base + 1;
-    if (may.has('Gale Wings') && m?.type === 'Flying') hi = Math.max(hi, base + 1);
-    if (may.has('Triage') && (status || !!m?.drain)) hi = Math.max(hi, base + 3);
-    if (toID(move) === 'grassyglide') hi = Math.max(hi, base + 1);
-    return [base, hi];
-  }
-
-  /** The abilities it may have: yours as set (and its Mega's), theirs as far as possible (any, before it's known). */
-  private abilitiesOf(ref: MonRef): Set<string> {
+  private pivoted(side: SideID): number {
     const b = this.io.battle();
-    if (ref.side === 'me') {
-      const set = b.myTeam[ref.slot];
-      const mega = set && megaFormeOf(this.io.gen, set);
-      return new Set([set?.ability, ...Object.values(mega ? this.io.gen.species.get(toID(mega))?.abilities ?? {} : {})]
-        .filter((a): a is string => !!a));
+    const acts = turnActions(b);
+    for (let k = acts.length - 1; k >= 0; k--) {
+      const a = acts[k];
+      if (a.actor.side !== side || a.failed || !PIVOTS.has(toID(a.move))) continue;
+      const pos = b.live.active[side].indexOf(a.actor.slot);
+      if (pos >= 0) return pos;
     }
-    const m = this.io.mons()?.[ref.slot];
-    if (!m) return new Set(['Prankster', 'Gale Wings', 'Triage']);
-    return new Set([...m.abilities.filter(a => a.p > 0).map(a => a.name), ...Object.values(m.megaAbilityOf ?? {})]);
+    return -1;
   }
 
   /**
@@ -863,6 +866,7 @@ export class Narrator {
     this.sealed = true;
     this.pending.clear();
     this.couldnt.clear();
+    this.encored.clear();
     const now = this.io.battle();
     if (!turnActions(now).length) return [done];
     this.log((bb, c) => endTurn(c, bb));

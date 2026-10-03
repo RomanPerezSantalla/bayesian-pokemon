@@ -1,8 +1,8 @@
 /**
  * Every item in Pokémon Champions, one test each: it's either one the app handles (Mega Stones,
  * resist berries, type boosts, status berries and the rest, each checked for what it does) or
- * listed below as not modelled, with why, so a new item can't slip by unexamined. And voice reads
- * each one.
+ * listed below as not modelled, with why, so a new item can't slip by unexamined. And the battle
+ * text naming each one is read.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,7 +18,7 @@ import {finalSpeed, makeField, makeMove, makePokemon, quickChances, runCalc, typ
 import {berryApplies, megaFormeOf, myHitLikelihood, usesInARow} from './likelihood';
 import {applyAction, applyEndTurn, CURES, type StateCtx} from './state';
 import type {ActionEvent, Battle, HitResult, MonRef, Status} from './types';
-import {parseNarration} from '../ui/battle/voice/parse';
+import {parseNarration} from '../ui/battle/narration/parse';
 
 const gen = getGen(0);
 const dex = Dex.forGen(9);
@@ -259,7 +259,7 @@ describe('every item in Champions', () => {
 
     it.runIf(!!HANDLED[item])('does what it does', () => HANDLED[item]());
 
-    it('is read by voice', () => {
+    it('is read from the battle text', () => {
       const {b} = battleWith('Leftovers');
       const got = parseNarration(`The opposing Metagross's ${item}`, {battle: b, gen, mons: undefined}).find(e => e.kind === 'item');
       expect(got && 'item' in got ? got.item : undefined).toBe(item);

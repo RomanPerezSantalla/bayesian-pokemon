@@ -20,9 +20,9 @@ import {
   turnActions, undo, type ActionDraft,
 } from '../ui/battle/actions';
 import {valueComplete} from '../ui/battle/Keypad';
-import {Narrator, type VoiceIO} from '../ui/battle/voice/narrator';
-import {parseNarration} from '../ui/battle/voice/parse';
-import {matchAt, numberAt, norm, squash} from '../ui/battle/voice/text';
+import {Narrator, type NarratorIO} from '../ui/battle/narration/narrator';
+import {parseNarration} from '../ui/battle/narration/parse';
+import {matchAt, numberAt, norm, squash} from '../ui/battle/narration/text';
 import type {MonSummary} from './worker';
 import {nextToMove} from '../ui/battle/order';
 import type {InferResult} from './worker';
@@ -756,7 +756,7 @@ describe('damage and speed readings', () => {
   });
 });
 
-describe('voice narration', () => {
+describe('narration', () => {
   const TEAM = parseTeam(`Charizard @ Charizardite Y
 Ability: Solar Power
 EVs: 2 HP / 32 SpA / 32 Spe
@@ -790,7 +790,7 @@ Careful Nature
     b.live.active = active;
     let cache: {n: number; mons: MonSummary[]} | null = null;
     const asked: [SideID, number][] = [];
-    const io: VoiceIO = {
+    const io: NarratorIO = {
       gen,
       battle: () => b,
       mons: () => {
@@ -858,7 +858,7 @@ Careful Nature
     expect(r.b.live.mons.me0.hpUnknown).toBe(true);
   });
 
-  it('copes with how names come out of the recogniser', () => {
+  it('copes with names written a little wrong', () => {
     const r = doubles();
     r.say('the opposing rilla boom used grassy glide garchomp one fifty');
     r.n.commit();
@@ -911,11 +911,12 @@ Careful Nature
       const r = doubles();
       r.say('The opposing Salamence used Dragon Claw! Charizard 45');
       r.say('Garchomp used Protect');
-      // Said after it, but Protect comes first in a turn and Garchomp hadn't moved: this turn's, said out of order. It
-      // goes first, its place not taken as the turn's order; Dragon Claw is the last move logged again.
+      // Read after it (an Encore can make it so), and Garchomp hadn't moved: this turn's, in the order read. A crit
+      // now is about the last move, the Protect, which hit nothing: nothing to put it on.
       expect(r.b.events.filter(e => e.kind === 'action').map(a => [a.turn, a.kind === 'action' && a.move, a.kind === 'action' && a.ordered]))
-        .toEqual([[1, 'Protect', false], [1, 'Dragon Claw', true]]);
-      expect(r.say('it crit')).toEqual([]);
+        .toEqual([[1, 'Dragon Claw', true], [1, 'Protect', true]]);
+      expect(r.say('it crit')).toEqual(['A crit, but no move it could be on']);
+      expect(r.b.events.some(e => e.kind === 'action' && e.hits.some(h => h.crit))).toBe(false);
       // No move can take Rillaboom's HP (it wasn't in Dragon Claw): it's where Rillaboom is at now, not damage.
       expect(r.say('The opposing Rillaboom 50')).toEqual(['Rillaboom 50%']);
       expect(r.b.events.filter(e => e.kind === 'action').flatMap(a => (a.kind === 'action' ? a.hits.map(h => h.hpAfter) : []))).not.toContain(50);

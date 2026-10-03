@@ -1,6 +1,5 @@
 import {useStore} from '../state/store';
 import {BackupPanel} from './Backup';
-import {VoicePanel} from './VoiceSetup';
 
 export function BattlesPage() {
   const battles = useStore(s => s.battles);
@@ -32,7 +31,6 @@ export function BattlesPage() {
         </div>
       )}
       <BackupPanel />
-      <VoicePanel />
     </div>
   );
 }

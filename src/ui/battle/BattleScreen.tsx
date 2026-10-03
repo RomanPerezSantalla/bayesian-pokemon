@@ -19,10 +19,10 @@ import {
 } from './actions';
 import {pendingChecks} from './checks';
 import {nextToMove} from './order';
-import {VoiceBar} from './VoiceBar';
 import {SpeedOrder} from './visuals';
 import {headline, Intel} from './Intel';
 import {monLabel, oppSpecies} from './names';
+import {ScreenFeed} from './ScreenFeed';
 
 type Update = (fn: (b: Battle) => Battle) => void;
 const STATUS_LABEL: Record<string, string> = {brn: 'BRN', par: 'PAR', psn: 'PSN', tox: 'TOX', slp: 'SLP', frz: 'FRZ'};
@@ -479,10 +479,10 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
             tick();
           }}>End turn</button>
           <button className="btn sm" disabled={!battle.events.length} onClick={undoLast} title="Undo the last entry">↶ Undo</button>
-          <VoiceBar battleId={battle.id} gen={gen} result={result} run={run} ctxFor={b => stateCtx(fmt, gen, b, result?.mons)}
-            onAskSwitch={(side, slot) => setBenchPick({side, slot})} onLogged={tick} />
           <Pills battle={battle} update={update} />
         </div>
+        <ScreenFeed battleId={battle.id} gen={gen} result={result} run={run} ctxFor={b => stateCtx(fmt, gen, b, result?.mons)}
+          onAskSwitch={(side, slot) => setBenchPick({side, slot})} onLogged={tick} />
 
         <ChecksPanel battle={battle} result={result} ctx={ctx} run={run} />
 

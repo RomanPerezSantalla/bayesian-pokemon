@@ -1,13 +1,12 @@
 /**
- * `npm run phone`: the app on your phone, over HTTPS so voice works, served from this PC.
+ * `npm run phone`: a test copy of the app, served from this PC to your phone (over HTTPS) or to this PC.
  *
  * Builds a test copy of the app (rebuilt whenever a source file changes: reload the page on the
  * phone to get it), serves it, opens a free Cloudflare quick tunnel to it and prints a QR code to
- * scan. The test copy reports back what happens on the phone: .cache/phone-log.jsonl gets each
- * voice phrase (what was heard and what it did), undos and errors; .cache/phone-battles/ gets each
- * battle as it's saved; .cache/phone-audio/ each line the voice model heard. So a test can be gone
- * through afterwards. It also serves the voice model (scripts/voice-pack.mjs, prepared on the first
- * run) for the phone to download when voice is first turned on.
+ * scan. The test copy reports back what happens on the phone: .cache/phone-log.jsonl gets undos,
+ * errors and the screen capture's starts and stops; .cache/phone-battles/ gets each battle as it's
+ * saved; .cache/screen-frames/ the frames of the game's screen while it's captured (a folder for
+ * each capture). So a test can be gone through afterwards.
  *
  * The tunnel's address changes every run, and a phone keeps each address's data apart: keep this
  * running for a whole test session, or carry teams and battles over with a backup file.
@@ -31,11 +30,13 @@ const cache = path.join(root, '.cache');
 const outDir = path.join(cache, 'phone-dist');
 const logFile = path.join(cache, 'phone-log.jsonl');
 const battleDir = path.join(cache, 'phone-battles');
-const audioDir = path.join(cache, 'phone-audio');
+const frameDir = path.join(cache, 'screen-frames');
 const qrFile = path.join(cache, 'phone-qr.svg');
 const PORT = 4180;
 /** A bug report with a long battle is ~100 KB. */
 const MAX_BODY = 1 << 20;
+/** A frame of the game's screen, as a JPEG: a few hundred KB at 1080p. */
+const MAX_FRAME = 8 << 20;
 const MAX_LOG = 50 << 20;
 const CLOUDFLARED = 'cloudflared@0.7.3';
 const localOnly = process.argv.includes('--local');
@@ -43,42 +44,8 @@ const win = process.platform === 'win32';
 const rel = p => path.relative(root, p).replaceAll('\\', '/');
 
 fs.mkdirSync(battleDir, {recursive: true});
-fs.mkdirSync(audioDir, {recursive: true});
 // Last run's address is dead.
 fs.rmSync(qrFile, {force: true});
-
-/**
- * The language-model speed test (.cache/llm, while it's being tried out), at /llm/: its page, the
- * model and the lines to time, and ONNX Runtime Web. Isolated (COOP/COEP) so it can use several threads.
- */
-function llmBench() {
-  const files = {
-    '': [path.join(cache, 'llm', 'bench', 'index.html'), 'text/html'],
-    'bench.js': [path.join(cache, 'llm', 'bench', 'bench.js'), 'text/javascript'],
-    'bench.json': [path.join(cache, 'llm', 'out', 'v1', 'onnx', 'bench.json'), 'application/json'],
-    'model_q8.onnx': [path.join(cache, 'llm', 'out', 'v1', 'onnx', 'model_q8.onnx'), 'application/octet-stream'],
-    'ort.wasm.bundle.min.mjs': [path.join(root, 'node_modules', 'onnxruntime-web', 'dist', 'ort.wasm.bundle.min.mjs'), 'text/javascript'],
-    'ort-wasm-simd-threaded.wasm': [path.join(root, 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.wasm'), 'application/wasm'],
-    'ort-wasm-simd-threaded.mjs': [path.join(root, 'node_modules', 'onnxruntime-web', 'dist', 'ort-wasm-simd-threaded.mjs'), 'text/javascript'],
-  };
-  return {
-    name: 'llm-bench',
-    configurePreviewServer(server) {
-      server.middlewares.use('/llm', (req, res, next) => {
-        const name = decodeURIComponent((req.url ?? '').split('?')[0].replace(/^\/+/, ''));
-        const hit = Object.hasOwn(files, name) ? files[name] : null;
-        if (!hit || !fs.existsSync(hit[0])) return next();
-        res.setHeader('Content-Type', hit[1]);
-        res.setHeader('Content-Length', String(fs.statSync(hit[0]).size));
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
-        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-        fs.createReadStream(hit[0]).pipe(res);
-      });
-    },
-  };
-}
 
 /** The QR code as an image too, for a terminal that can't draw it cleanly. */
 function qrSvg(text) {
@@ -98,48 +65,16 @@ function qrSvg(text) {
 const firstLine = s => String(s ?? '').split('\n')[0];
 
 /** One line in this terminal for the things worth seeing live. */
-/** The reader's part in a line: its answer (how sure of each line), what the check dropped, how long it took. */
-function readerNote(r) {
-  if (!r) return '';
-  const lines = (r.lines ?? []).map(l => `${l.text}${l.p < 0.6 ? ` (${Math.round(100 * l.p)}%)` : ''}`).join(' | ') || 'none';
-  const dropped = (r.dropped ?? []).map(d => `${d.line}: ${d.why}`).join('; ');
-  return `\n      reader: ${lines}${dropped ? ` · dropped ${dropped}` : ''} · ${r.ms} ms (${r.reused}/${r.tokens} tokens kept from before)`;
-}
-
 function summary(e) {
   switch (e.kind) {
     case 'start': return `phone connected: ${e.screen ?? ''}${e.installed ? ', installed app' : ''}`;
-    case 'voice': {
-      // What it logged; the move still open (it's logged when the next one starts) ends in "…".
-      const parts = [...(e.reader?.undo ? ['took back the one before'] : []), ...(e.did ?? []), ...(e.draft ? [`${e.draft} …`] : [])];
-      return `heard “${e.heard?.[0] ?? ''}” → ${e.events?.length || e.reader?.undo ? parts.join(' · ') || 'nothing to log' : "didn't understand"}${readerNote(e.reader)}`;
-    }
-    case 'voice-preview': {
-      const unsure = (e.unsure ?? []).map(u => `“${u.heard}”: ${u.options.join(' / ')}?`);
-      const parts = [...(e.said ?? []), ...unsure, ...(e.notes ?? [])];
-      const did = parts.length ? parts.join(' · ')
-        : e.battle ? 'the battle started' : e.side ? `(${e.side === 'mine' ? 'yours' : 'theirs'} next)` : "didn't understand";
-      return `team preview: heard “${e.heard?.[0] ?? ''}” → ${did}${readerNote(e.reader)}`;
-    }
-    case 'voice-offer': return `✓ tapped the reader's guess: ${e.line}`;
-    case 'reader': return e.error ? `⚠ reader: ${e.error}` : `reader loaded in ${e.ms} ms (${e.threads} thread${e.threads === 1 ? '' : 's'})`;
-    case 'voice-heard': {
-      const spots = (e.spots ?? []).map(s => s.text);
-      const ms = e.ms ? ` (${e.ms.audio} ms of speech, read in ${e.ms.features + e.ms.model + e.ms.read} ms)` : '';
-      return `voice model: “${e.text}”${e.plain !== e.text ? ` (as heard: “${e.plain}”)` : ''}${spots.length ? ` · names: ${spots.join(', ')}` : ''}${ms}`;
-    }
-    case 'voice-mic': return e.stuck
-      ? `⚠ voice: setting up stopped while ${e.stuck} (audio ${e.state ?? '?'})`
-      : `microphone on: ${e.device || 'default'}, ${e.rate} Hz${e.resampled ? ' (resampled)' : ''}, audio ${e.state}`;
-    case 'voice-level': return `mic: level ${(100 * e.rms).toFixed(1)}% (peak ${(100 * e.peak).toFixed(0)}%), speech detector up to ${Math.round(100 * e.speech)}%, ${e.batches} batches`;
-    case 'voice-model': return e.installed ? `voice model downloaded (${Math.round(e.size / 1e6)} MB)` : `voice model loaded in ${e.ms} ms (${e.threads} thread${e.threads === 1 ? '' : 's'})`;
-    case 'voice-discard': return `✕ threw away: ${e.draft}`;
-    case 'voice-error': return `voice: ${e.error}`;
-    case 'llm-bench-stage': return `language model test: ${e.stage}${e.ms !== undefined ? ` in ${e.ms} ms` : ''}${e.done ? ` (${e.done} lines, ${e.lately} ms each lately)` : ''}${e.stage === 'page' ? ` (${/Firefox/.test(e.ua) ? 'Firefox' : /Chrome/.test(e.ua) ? 'Chrome' : 'browser'}, threads ${e.threads || '-'}, isolated ${e.isolated})` : ''}`;
-    case 'llm-bench': return e.error ? `⚠ language model test: ${e.error}`
-      : `language model, ${e.threads} thread${e.threads === 1 ? '' : 's'}: ${e.avg} ms a line (median ${e.median}, slowest ${e.slowest}), prompt ${e.prompt} ms; `
-        + `loaded in ${e.loadMs} ms; same answers as the PC ${e.same}/${e.lines}; ${e.cores} cores, ${e.memory ?? '?'} GB`;
-    case 'undo': return `↶ undid ${e.undid ?? 'the last entry'}${e.narrated ? ' (logged by voice)' : ''}`;
+    case 'screen': return e.stopped
+      ? `screen capture stopped${e.reason && e.reason !== 'stopped' ? ` (${e.reason})` : ''}: ${e.saved} frames saved of ${e.frames}`
+      : `capturing “${e.source || 'the screen'}”, ${e.width}×${e.height}${e.saving ? `: frames to ${rel(frameDir)}/${e.session}/` : ''}`;
+    case 'screen-change': return e.hidden !== undefined
+      ? `screen capture: the app's page is ${e.hidden ? 'hidden (minimised, or another tab)' : 'showing again'}`
+      : `screen capture: ${e.black ? '⚠ the picture is all black' : 'the game shows again'}`;
+    case 'undo': return `↶ undid ${e.undid ?? 'the last entry'}${e.narrated ? ' (logged from the battle text)' : ''}`;
     case 'error':
     case 'crash': return `⚠ ${e.kind === 'crash' ? 'crash screen' : 'error'}: ${firstLine(e.report?.error ?? e.error)}`;
     default: return null;
@@ -177,18 +112,22 @@ function phoneLog() {
         }
         const chunks = [];
         let size = 0;
+        const max = req.url?.startsWith('/frame') ? MAX_FRAME : MAX_BODY;
         req.on('data', chunk => {
           size += chunk.length;
-          if (size <= MAX_BODY) chunks.push(chunk);
+          if (size <= max) chunks.push(chunk);
         });
         req.on('end', () => {
           try {
-            if (size > MAX_BODY) throw Object.assign(new Error('too big'), {status: 413});
-            if (req.url?.startsWith('/audio')) {
-              // A line the voice model heard (src/testlog.ts testLogAudio).
-              const id = new URL(req.url, 'http://x').searchParams.get('id') ?? '';
-              if (!/^[\w-]{1,80}$/.test(id)) throw new Error('bad id');
-              fs.writeFileSync(path.join(audioDir, `${id}.wav`), Buffer.concat(chunks));
+            if (size > max) throw Object.assign(new Error('too big'), {status: 413});
+            if (req.url?.startsWith('/frame')) {
+              // A frame of the game's screen (src/screen/capture.ts), to build the screen reader on.
+              const q = new URL(req.url, 'http://x').searchParams;
+              const session = q.get('session') ?? '';
+              const id = q.get('id') ?? '';
+              if (!/^[\w-]{1,80}$/.test(session) || !/^[\w-]{1,80}$/.test(id)) throw new Error('bad id');
+              fs.mkdirSync(path.join(frameDir, session), {recursive: true});
+              fs.writeFileSync(path.join(frameDir, session, `${id}.jpg`), Buffer.concat(chunks));
               res.statusCode = 204;
               res.end();
               return;
@@ -208,13 +147,6 @@ function phoneLog() {
 }
 
 // --- build (and rebuild), serve ----------------------------------------------------------------
-
-// The voice model, for the phone to download when voice is first turned on (served at /voice/ by vite.config.ts).
-if (!fs.existsSync(path.join(cache, 'voice', 'pack', 'manifest.json'))) {
-  console.log('\n  Preparing the voice model (the first time, it downloads ~106 MB)…');
-  const r = spawnSync(process.execPath, [path.join(root, 'scripts', 'voice-pack.mjs')], {stdio: 'inherit'});
-  if (r.status !== 0) console.error('  The voice model couldn’t be prepared: voice will offer the browser’s recogniser only.');
-}
 
 console.log('\n  Building the test copy…');
 const watcher = await build({
@@ -249,7 +181,7 @@ const server = await preview({
   logLevel: 'warn',
   build: {outDir},
   preview: {port: PORT, host: '127.0.0.1'},
-  plugins: [phoneLog(), llmBench()],
+  plugins: [phoneLog()],
 });
 const localUrl = server.resolvedUrls?.local[0] ?? `http://127.0.0.1:${PORT}/`;
 
@@ -271,7 +203,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => v
 
 const footer = () => {
   console.log(`  Reload the page on the phone after a rebuild (pull down on any page but a battle, or the browser menu).`);
-  console.log(`  Test log: ${rel(logFile)}   Battles: ${rel(battleDir)}/   Voice lines: ${rel(audioDir)}/`);
+  console.log(`  Test log: ${rel(logFile)}   Battles: ${rel(battleDir)}/   Screen frames: ${rel(frameDir)}/`);
   console.log('  Ctrl+C stops everything.\n');
 };
 

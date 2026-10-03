@@ -201,7 +201,7 @@ const CHANGES: [string[], number, boolean?][] = ([
   ['wont go any higher', 1, true], ['wont go any lower', -1, true],
   // Unchanged: "…'s Attack was not lowered!", "…'s stats were not lowered!" (Clear Body and the like).
   ['was not lowered', 0], ['were not lowered', 0],
-  // How the recogniser can hear them.
+  // Misheard or misread forms.
   ['rows', 1], ['rose sharp', 2], ['harsh fell', -2], ['harshly fall', -2], ['fall', -1], ['felt', -1],
   ['won t go any higher', 1, true], ['won t go any lower', -1, true], ['wont go higher', 1, true], ['wont go lower', -1, true],
 ] as [string, number, boolean?][])

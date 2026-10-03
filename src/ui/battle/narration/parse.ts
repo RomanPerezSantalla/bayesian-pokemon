@@ -1,23 +1,20 @@
 /**
- * Reads narrated battle text into events. The narration is mostly the game's own lines, read out
- * as they come, worded as Pokémon Champions writes them ("The opposing Salamence used Draco Meteor!",
- * "A critical hit!", "It doesn't affect the opposing Salamence...", "Charizard and Incineroar's
- * Attack fell!", "Charizard fainted!", "The rain stopped.", "Kim sent out Kingambit!", and the
- * pop-ups: "Salamence's Intimidate") plus HP where it's known ("Charizard 45": yours in HP, theirs in
- * %). Anything it can't place is skipped.
+ * Reads battle text into events: the game's own lines, worded as Pokémon Champions writes them
+ * ("The opposing Salamence used Draco Meteor!", "A critical hit!", "It doesn't affect the opposing
+ * Salamence...", "Charizard and Incineroar's Attack fell!", "Charizard fainted!", "The rain stopped.",
+ * "Kim sent out Kingambit!", and the pop-ups: "Salamence's Intimidate"), plus HP where it's known
+ * ("Charizard 45": yours in HP, theirs in %). Anything it can't place is skipped.
  */
 import {allAbilities, allItems, allMoves, move as dexMove, toID, type BoostID, type Gen} from '../../../data/dex';
 import {megaFormeOf} from '../../../engine/likelihood';
 import {moveFx} from '../../../engine/moves';
-import {NO_ITEM, OTHER_ITEM} from '../../../engine/prior';
 import type {MonSummary} from '../../../engine/worker';
 import type {Battle, Boosts, MonRef, SideID, Status} from '../../../engine/types';
 import {spokenName} from '../names';
 import {fieldAt, statAt, type FieldNews, type SideNews} from './messages';
-import {spokenNames} from './preview';
 import {COMMON_WORDS, matchAt, norm, numberAt, similarity, squash, type Match, type MatchOptions, type Named} from './text';
 
-export type VoiceEvent =
+export type NarrationEvent =
   | {kind: 'use'; actor: MonRef; move: string}
   /** "…used Dragon Claw on Charizard": who it was aimed at. */
   | {kind: 'target'; mon: MonRef}
@@ -36,7 +33,7 @@ export type VoiceEvent =
   | {kind: 'hits'; n: number}
   | {kind: 'status'; mon?: MonRef; status: Status}
   /** Its turn came and it couldn't move: flinched, fully paralyzed, fast asleep, frozen, recharging… */
-  | {kind: 'cant'; mon?: MonRef; status?: Status}
+  | {kind: 'cant'; mon?: MonRef; status?: Status; flinch?: boolean}
   /** Its status ended: "…woke up!", "…'s Lum Berry cured its paralysis!". */
   | {kind: 'cure'; mon?: MonRef}
   /** "…'s Attack rose sharply!": how far each stat went. `limit`: "…won't go any higher!", so it's at ±6. */
@@ -46,7 +43,11 @@ export type VoiceEvent =
   /** Weather, terrain, a room, or one side's Tailwind, screens or hazards starting, carrying on or ending. */
   | {kind: 'field'; news: FieldNews}
   /** End-of-turn damage or healing (sandstorm, burn, poison, Leftovers…): the turn's moves are over. */
-  | {kind: 'residual'; mon?: MonRef; sand?: boolean}
+  | {kind: 'residual'; mon?: MonRef; sand?: boolean; heal?: boolean}
+  /** "…must do an encore!" */
+  | {kind: 'encored'; mon?: MonRef}
+  /** "The battle has ended due to a forfeit.", "You lost to …!", "You defeated …!" */
+  | {kind: 'battleEnd'}
   /** "…lost some of its HP!": Life Orb recoil. */
   | {kind: 'recoil'; mon?: MonRef}
   /** An item the game named. `gone`: it's gone now (popped, knocked off, eaten, flung…). */
@@ -70,7 +71,7 @@ export interface ParseEnv {
 
 type Phrase = 'crit' | 'faint' | 'miss' | 'missAfter' | 'shield' | 'immune' | 'immuneAfter' | 'recoil' | 'status' | 'sendOut'
   | 'lead' | 'go' | 'withdraw' | 'withdrawAfter' | 'mega' | 'endTurn' | 'first' | 'last' | 'effective' | 'fail' | 'hits' | 'cant'
-  | 'cure' | 'residual' | 'knockOff' | 'steal' | 'itemGone' | 'seen' | 'whiteHerb' | 'popped' | 'obtained' | 'dragged' | 'reacting'
+  | 'cure' | 'encored' | 'battleEnd' | 'residual' | 'knockOff' | 'steal' | 'itemGone' | 'seen' | 'whiteHerb' | 'popped' | 'obtained' | 'dragged' | 'reacting'
   | 'substitute' | 'blewAway' | 'quickDraw' | 'maxAttack' | 'unaffected' | 'unaffectedBy' | 'targetsItem' | 'skip' | 'skipMove'
   | 'skipCount';
 
@@ -105,6 +106,9 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['burned itself out', 'skip'], ['levitated with electromagnetism', 'skip'], ['electromagnetism wore off', 'skip'],
   ['moves have been electrified', 'skip'], ['no longer protected', 'skip'], ['will faint in three turns', 'skip'],
   ['during the next turn', 'skip'], ['one of the moves', 'skip'], ['already has a substitute', 'skip'], ['stockpiled', 'skipCount'],
+  // Encore taking hold (its move is logged from "…used Encore!"), and the battle over.
+  ['must do an encore', 'encored'], ['has ended due to', 'battleEnd'], ['you lost to', 'battleEnd'], ['you defeated', 'battleEnd'],
+  ['won the battle', 'battleEnd'],
   ['but it failed', 'fail'], ['it failed', 'fail'], ['does not have enough hp', 'fail'], ['but nothing happened', 'fail'],
   ['pokemon was hit', 'hits'], ['was hit', 'hits'],
   ['lost some of its hp', 'recoil'], ['lost some hp', 'recoil'], ['lost some', 'recoil'],
@@ -114,7 +118,7 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['paralyzed', 'status', 'par'], ['fell asleep', 'status', 'slp'], ['was frozen solid', 'status', 'frz'], ['frozen', 'status', 'frz'],
   ['couldnt move because its paralyzed', 'cant', 'par'], ['is fast asleep', 'cant', 'slp'], ['fast asleep', 'cant', 'slp'],
   ['is frozen solid', 'cant', 'frz'],
-  ['flinched and couldnt move', 'cant'], ['flinched', 'cant'], ['must recharge', 'cant'], ['lost its focus and couldnt move', 'cant'],
+  ['flinched and couldnt move', 'cant', 'flinch'], ['flinched', 'cant', 'flinch'], ['must recharge', 'cant'], ['lost its focus and couldnt move', 'cant'],
   ['lost its focus', 'cant'], ['hurt itself in its confusion', 'cant'], ['immobilized by love', 'cant'], ['cant use', 'cant'],
   ['cannot use', 'cant'], ['couldnt move', 'cant'], ['cant move', 'cant'], ['cannot move', 'cant'],
   ['woke up', 'cure'], ['woke it up', 'cure'], ['snap fully awake', 'cure'], ['thawed out', 'cure'], ['defrosted it', 'cure'],
@@ -123,6 +127,8 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['buffeted by the sandstorm', 'residual', 'sand'], ['hurt by its burn', 'residual'], ['hurt by its poisoning', 'residual'],
   ['sapped by leech seed', 'residual'], ['is hurt by', 'residual'], ['afflicted by the curse', 'residual'],
   ['perish count fell to', 'residual'],
+  // Grassy Terrain, Leftovers (a Sitrus Berry too, mid-move: see the narrator).
+  ['had its hp restored', 'residual', 'heal'],
   // Items coming and going.
   ['knocked off', 'knockOff'], ['corroded', 'knockOff'], ['stole and ate its targets', 'targetsItem'], ['stole', 'steal'],
   ['flung its', 'itemGone'],
@@ -200,6 +206,30 @@ const refOf = (key: string): MonRef => (key.startsWith('me')
   ? {side: 'me', slot: Number(key.slice(2))}
   : {side: 'opp', slot: Number(key.slice(3))});
 
+const REGION: Record<string, [string, string]> = {
+  Alola: ['alolan', 'alola'], Galar: ['galarian', 'galar'], Hisui: ['hisuian', 'hisui'], Paldea: ['paldean', 'paldea'],
+};
+const GENDER: Record<string, string[]> = {F: ['female'], M: ['male']};
+
+/** The ways a preview name can be written: "Ninetales-Alola" is "Alolan Ninetales" or "Ninetales Alola". */
+function spokenNames(name: string): string[] {
+  const [base, ...rest] = name.split('-');
+  // "Kommo-o": the dash is part of the name.
+  if (!rest.length || rest.every(r => r.length === 1 && !GENDER[r])) return [name];
+  const words = rest.map(r => REGION[r] ?? GENDER[r] ?? [r.toLowerCase()]);
+  // Nobody writes "Basculegion F" (a letter off plain Basculegion); "Ninetales Alola", yes.
+  const out = new Set(rest.some(r => GENDER[r]) ? [] : [name]);
+  out.add(`${words.map(w => w[0]).join(' ')} ${base}`);
+  out.add(`${base} ${words.map(w => w[w.length - 1]).join(' ')}`);
+  // "Aqua Tauros" for Tauros-Paldea-Aqua: the last part alone, either side.
+  const last = words[words.length - 1];
+  for (const w of last) {
+    out.add(`${w} ${base}`);
+    out.add(`${base} ${w}`);
+  }
+  return [...out];
+}
+
 /** Every Pokémon on a side, by the names narration may use: species, nickname, base species, "Mega X". */
 function monNames(env: ParseEnv, side: SideID): (Named<string> & {said: string})[] {
   const out: (Named<string> & {said: string})[] = [];
@@ -225,32 +255,6 @@ function monNames(env: ParseEnv, side: SideID): (Named<string> & {said: string})
   return out;
 }
 
-/**
- * What can be said in this battle, for the voice model to listen out for: every name of the
- * Pokémon in it, your moves, items and abilities, and theirs as far as they're likely.
- */
-export function narrationPhrases(env: ParseEnv): string[] {
-  const out = new Set<string>();
-  for (const side of ['me', 'opp'] as const) for (const n of monNames(env, side)) out.add(n.said);
-  // "Lopunny has Mega Evolved…" said quickly comes out "Lopunny meega evolved", "Lopunny Mga Wt".
-  out.add('Mega Evolved');
-  for (const set of env.battle.myTeam) {
-    for (const m of set.moves) out.add(m);
-    if (set.item) out.add(set.item);
-    if (set.ability) out.add(set.ability);
-  }
-  for (const m of env.mons ?? []) {
-    if (!m) continue;
-    const likely = <T extends {name: string; p: number}>(xs: T[], min: number) => xs.filter(x => x.p >= min).map(x => x.name);
-    for (const x of likely(m.moves, 0.02)) out.add(x);
-    // Not the "(other)" and "(none)" rows: no item's name, and "other" is said all the time ("… (other) (other).").
-    for (const x of likely(m.items, 0.05)) if (x !== OTHER_ITEM && x !== NO_ITEM) out.add(x);
-    for (const x of likely(m.abilities, 0.05)) out.add(x);
-    for (const a of Object.values(m.megaAbilityOf ?? {})) out.add(a);
-  }
-  return [...out];
-}
-
 const listCache = new WeakMap<Gen, Record<string, Named<string>[]>>();
 function every(gen: Gen, what: 'moves' | 'items' | 'abilities'): Named<string>[] {
   let c = listCache.get(gen);
@@ -262,10 +266,10 @@ function every(gen: Gen, what: 'moves' | 'items' | 'abilities'): Named<string>[]
   return c[what];
 }
 
-export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
+export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
   const words = norm(text).split(' ').filter(Boolean);
   const names = {me: monNames(env, 'me'), opp: monNames(env, 'opp')};
-  const out: VoiceEvent[] = [];
+  const out: NarrationEvent[] = [];
   let last: MonRef | undefined;
   /** Where the words naming `last` ended: a line straight after is about it ("Salamence, come back!"). */
   let lastEnd = -1;
@@ -360,7 +364,7 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
    * "The opposing Salamence's Intimidate", "Rillaboom's Sitrus Berry": its ability or item, whichever
    * fits better (the longer when both do: "Damp Rock" over Damp).
    */
-  const abilityOrItemAt = (i: number, ref: MonRef): {event: VoiceEvent; len: number} | null => {
+  const abilityOrItemAt = (i: number, ref: MonRef): {event: NarrationEvent; len: number} | null => {
     const ab = abilityAt(i, ref);
     const it = itemAt(i, ref);
     if (it && (!ab || it.score > ab.score || (it.score === ab.score && it.len > ab.len))) {
@@ -491,14 +495,21 @@ export function parseNarration(text: string, env: ParseEnv): VoiceEvent[] {
           break;
         }
         case 'cant':
-          out.push({kind: 'cant', mon: last, status: ph.extra as Status | undefined});
+          out.push(ph.extra === 'flinch' ? {kind: 'cant', mon: last, flinch: true} : {kind: 'cant', mon: last, status: ph.extra as Status | undefined});
           break;
         case 'cure':
           out.push({kind: 'cure', mon: last});
           break;
+        case 'encored':
+          out.push({kind: 'encored', mon: last});
+          break;
+        case 'battleEnd':
+          out.push({kind: 'battleEnd'});
+          i = words.length;
+          break;
         case 'residual': {
-          out.push({kind: 'residual', mon: last, sand: ph.extra === 'sand' || undefined});
-          if (ph.extra && ph.extra !== 'sand') out.push({kind: 'status', mon: last, status: ph.extra as Status});
+          out.push({kind: 'residual', mon: last, sand: ph.extra === 'sand' || undefined, heal: ph.extra === 'heal' || undefined});
+          if (ph.extra && ph.extra !== 'sand' && ph.extra !== 'heal') out.push({kind: 'status', mon: last, status: ph.extra as Status});
           // "…'s perish count fell to 2!", "…is hurt by Fire Spin!"
           const n = words[start] === 'perish' ? numberAt(words, i) : null;
           if (n) i += n.len;

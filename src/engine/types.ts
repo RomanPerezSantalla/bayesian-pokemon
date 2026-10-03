@@ -148,8 +148,8 @@ export interface ActionEvent {
    */
   quick?: 'Quick Claw' | 'Quick Draw' | null;
   /**
-   * Logged by voice: only the messages said count. Nothing was checked off, so a message not
-   * mentioned (Life Orb recoil, a berry…) is no evidence that it didn't appear.
+   * Logged from the battle text: only the messages read count. Nothing was checked off, so a
+   * message not read (Life Orb recoil, a berry…) is no evidence that it didn't appear.
    */
   narrated?: boolean;
 }

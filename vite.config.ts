@@ -38,34 +38,34 @@ function buildId() {
 }
 
 /**
- * The voice model's files (scripts/voice-pack.mjs), at /voice/ for `npm run dev`, `npm run preview`
- * and `npm run phone`. A deployed site has them in the build instead (dist/voice).
+ * The screen reader's recogniser at /ocr/ for `npm run dev`, `npm run preview` and `npm run phone`: PP-OCRv5's English
+ * model and its characters (from .cache/ocr) and ONNX Runtime's WebAssembly (from node_modules).
  */
-function voicePack(): Plugin {
-  const dir = path.resolve('.cache/voice/pack');
+function ocrFiles(): Plugin {
+  const files: Record<string, [string, string]> = {
+    'rec.onnx': [path.resolve('.cache/ocr/rec.onnx'), 'application/octet-stream'],
+    'dict.txt': [path.resolve('.cache/ocr/dict.txt'), 'text/plain; charset=utf-8'],
+    'ort-wasm-simd-threaded.wasm': [path.resolve('node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm'), 'application/wasm'],
+  };
   const serve: Connect.NextHandleFunction = (req, res, next) => {
-    const name = decodeURIComponent((req.url ?? '').split('?')[0].replace(/^\//, ''));
-    const file = path.join(dir, name);
-    if (!/^[\w.-]+$/.test(name) || !fs.existsSync(file)) return next();
-    res.setHeader('Content-Type', name.endsWith('.json') ? 'application/json' : name.endsWith('.txt') ? 'text/plain' : 'application/octet-stream');
-    res.setHeader('Content-Length', String(fs.statSync(file).size));
+    const hit = files[decodeURIComponent((req.url ?? '').split('?')[0].replace(/^\//, ''))];
+    if (!hit || !fs.existsSync(hit[0])) return next();
+    res.setHeader('Content-Type', hit[1]);
+    res.setHeader('Content-Length', String(fs.statSync(hit[0]).size));
     res.setHeader('Cache-Control', 'no-cache');
-    fs.createReadStream(file).pipe(res);
+    fs.createReadStream(hit[0]).pipe(res);
   };
   return {
-    name: 'voice-pack',
-    configureServer: server => void server.middlewares.use('/voice', serve),
-    configurePreviewServer: server => void server.middlewares.use('/voice', serve),
+    name: 'ocr-files',
+    configureServer: server => void server.middlewares.use('/ocr', serve),
+    configurePreviewServer: server => void server.middlewares.use('/ocr', serve),
   };
 }
 
-/**
- * The voice worker gives onnxruntime its WebAssembly from the voice model's download, so the copy
- * its bundle points at (14 MB) isn't put in the build.
- */
-function ortWasmFromPack(): Plugin {
+/** The reading worker hands ONNX Runtime its WebAssembly from /ocr/, so the copy its bundle points at (14 MB) isn't built in. */
+function ortWasmServed(): Plugin {
   return {
-    name: 'ort-wasm-from-pack',
+    name: 'ort-wasm-served',
     enforce: 'pre',
     transform(code, id) {
       if (!/onnxruntime-web[\\/]dist[\\/]ort\.wasm\.bundle/.test(id)) return;
@@ -83,27 +83,19 @@ const official = {
   },
 };
 
-/**
- * Cross-origin isolation, so the voice models can use several threads (SharedArrayBuffer): the
- * language model reads a line three times faster on four. "credentialless", not "require-corp":
- * the Showdown sprites and item icons come from a site that doesn't send CORP headers. A deployed
- * site sends the same (public/_headers).
- */
-const ISOLATED = {'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'credentialless'};
-
 // `base: './'` keeps the build relocatable (any static host, any path).
 export default defineConfig({
   base: './',
-  plugins: [react(), linkPreview(), voicePack()],
+  plugins: [react(), linkPreview(), ocrFiles()],
   // __TEST_LOG__ is turned on only by `npm run phone` (scripts/phone.mjs).
   define: {__APP_BUILD__: JSON.stringify(buildId()), __TEST_LOG__: 'false'},
-  // Lets a Cloudflare quick tunnel reach the dev server (HTTPS on a phone, for voice).
-  server: {allowedHosts: ['.trycloudflare.com'], proxy: official, headers: ISOLATED},
-  preview: {proxy: official, headers: ISOLATED},
+  // Lets a Cloudflare quick tunnel reach the dev server (HTTPS on a phone).
+  server: {allowedHosts: ['.trycloudflare.com'], proxy: official},
+  preview: {proxy: official},
   // Most of the bundle is @smogon/calc's data for every generation.
   build: {chunkSizeWarningLimit: 1200},
   // Module workers, like the inference one.
-  worker: {format: 'es', plugins: () => [ortWasmFromPack()]},
+  worker: {format: 'es', plugins: () => [ortWasmServed()]},
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],

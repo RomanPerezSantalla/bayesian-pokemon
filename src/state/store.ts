@@ -133,7 +133,7 @@ export const useStore = create<State>((set, get) => ({
     const view = get().view;
     if (b && view.page === 'battle' && view.battleId === id && get().current?.id !== id) set({current: b});
   },
-  // Synchronous on purpose: voice and auto-advance read the result right after.
+  // Synchronous on purpose: the narrator and auto-advance read the result right after.
   updateBattle: (id, fn) => {
     const cur = get().current;
     if (cur?.id !== id) return;

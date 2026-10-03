@@ -1,6 +1,6 @@
 /**
  * Keeping a phone's screen on during a battle. Phones lock after half a minute or so untouched,
- * which is often while the eyes are on the Switch, and voice stops with them.
+ * which is often while the eyes are on the game.
  */
 import {useEffect, useRef, useState} from 'react';
 
@@ -33,7 +33,7 @@ export function useWakeLock(on: boolean) {
 
 /**
  * Whether something happened in the last `ms`: a tap or key anywhere, or a change of `bump` (a
- * move logged by voice). After a while of nothing the battle's likely over, and the screen can sleep.
+ * move logged without a tap). After a while of nothing the battle's likely over, and the screen can sleep.
  */
 export function useRecentActivity(ms: number, bump: unknown): boolean {
   const [recent, setRecent] = useState(true);

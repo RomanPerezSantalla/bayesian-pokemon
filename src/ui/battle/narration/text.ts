@@ -1,7 +1,7 @@
 /**
- * Text helpers for narration: normalising what the speech recogniser heard, matching the
- * Pokémon, moves, items and abilities in it (it mangles names: "rilla boom", "king gambit"),
- * and reading spoken numbers ("45", "forty five", "one fifty").
+ * Text helpers for narration: normalising battle text, matching the Pokémon, moves, items and
+ * abilities in it even a little misspelt ("rilla boom", "king gambit"), and reading numbers
+ * ("45", "forty five", "one fifty").
  */
 
 /** Lowercase words, no accents, punctuation or apostrophes ("Salamence's" → "salamences"). */
@@ -14,7 +14,7 @@ export function norm(s: string): string {
     .trim();
 }
 
-/** A name as one run of letters, for matching however the recogniser split it. */
+/** A name as one run of letters, for matching however its words were split. */
 export const squash = (s: string) => norm(s).replace(/\s/g, '');
 
 export function levenshtein(a: string, b: string): number {
@@ -35,8 +35,8 @@ export function levenshtein(a: string, b: string): number {
 export const similarity = (a: string, b: string) => 1 - levenshtein(a, b) / Math.max(a.length, b.length, 1);
 
 /**
- * A rough sound-alike form of a squash()ed name, so that spellings the recogniser picks for the
- * same sounds come out alike: "sneezler" and "sneasler", "fairy giraffe" and "farigiraf", "whimsy
+ * A rough sound-alike form of a squash()ed name, so that different spellings of the same sounds
+ * come out alike: "sneezler" and "sneasler", "fairy giraffe" and "farigiraf", "whimsy
  * cot" and "whimsicott".
  */
 export function sound(s: string): string {
@@ -53,9 +53,9 @@ const CONSONANT: Record<string, number> = {
 };
 
 /**
- * The consonant sounds of a squash()ed name, in order (Soundex's classes, never cut short). The
- * recogniser gets vowels and word breaks wrong far more than consonants, so "carbonite" and
- * "corviknight" come out nearly alike, "really boom" and "rillaboom" exactly.
+ * The consonant sounds of a squash()ed name, in order (Soundex's classes, never cut short).
+ * Vowels and word breaks go wrong far more than consonants, so "carbonite" and "corviknight"
+ * come out nearly alike, "really boom" and "rillaboom" exactly.
  */
 export function consonants(s: string): string {
   s = s.replace(/^gh/, 'g').replace(/gh/g, '').replace(/ph/g, 'f').replace(/dg/g, 'j').replace(/^kn/, 'n').replace(/^wr/, 'r');

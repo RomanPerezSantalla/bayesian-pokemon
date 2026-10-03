@@ -1,8 +1,9 @@
 # Bayesian Battle Analyzer
 
-A phone-first companion for **Pokémon Champions ranked battles** (Singles and Doubles) on the
-Switch. You tap in what happens on screen; it keeps the battle state and infers each opponent's
-forme, item, ability, moves and stat spread as the battle goes.
+A companion for **Pokémon Champions ranked battles** (Singles and Doubles), on a phone or a PC beside
+the game. You tap in what happens on screen; it keeps the battle state and infers each opponent's
+forme, item, ability, moves and stat spread as the battle goes. Reading the battle off the game's
+window by itself is in the works (see *Reading the game's screen*).
 
 - Priors come from the **official in-game ranked Battle Data**, refreshed daily.
 - Hard logic where the game is deterministic: outspeeding a 189-Speed Sneasler with no speed
@@ -16,8 +17,7 @@ npm install
 npm run dev          # http://localhost:5173  (add `-- --host` to open it from your phone on the same Wi-Fi)
 npm test             # every move and item the calc has for Champions has its own test (src/engine/moves.test.ts, items.test.ts)
 npm run build        # static site in dist/
-npm run phone        # the app on your phone over HTTPS (voice included), with a test log; see below
-npm run voice-pack   # the voice model's files (~280 MB: fetched once into .cache/voice/, the reader from .cache/llm); see "By voice"
+npm run phone        # a test copy with a test log, on your phone over HTTPS (or this PC: -- --local); see below
 npm run data         # refresh the Showdown structure data + move/ability tables (monthly)
 npm run data:tables  # just the move/ability tables (no download)
 ```
@@ -25,11 +25,8 @@ npm run data:tables  # just the move/ability tables (no download)
 ## Deploying, and your phone
 
 It's a static site: `npm run build` puts everything in `dist/`, with relative paths, so any static
-host and any path work. On **Cloudflare Pages**, connect the repo with build command
-`npm run build && npm run voice-pack -- dist/voice` and output directory `dist`; every push to `main`
-then publishes. The second half puts the voice model on the site, in parts under Pages' 25 MiB limit
-(it fetches it from its sources during the build and checks every file's SHA-256); without it the app
-still works, and voice offers only the browser's recogniser. Open the URL on your phone and
+host and any path work. On **Cloudflare Pages**, connect the repo with build command `npm run build`
+and output directory `dist`; every push to `main` then publishes. Open the URL on your phone and
 "Add to Home Screen": it installs as an app and works offline once loaded. (GitHub only runs the
 tests and a build on each push, `.github/workflows/ci.yml`; it doesn't deploy anything.)
 
@@ -47,20 +44,17 @@ tests and a build on each push, `.github/workflows/ci.yml`; it doesn't deploy an
 ### Testing on your phone before deploying
 
 `npm run phone` builds a test copy of the app, serves it from your PC and opens a free Cloudflare quick
-tunnel to it (HTTPS, which voice and the offline install need; no account, works on mobile data too).
+tunnel to it (HTTPS, which the offline install needs; no account, works on mobile data too).
 Scan the QR code it prints with the phone's camera. The first run downloads `cloudflared` through npx
-(or install it: `winget install --id Cloudflare.cloudflared`), and the voice model into `.cache/voice/`.
-The first time you turn voice on, the phone downloads the model from your PC through the tunnel (about
-150 MB, as fast as your PC's upload); after that it's on the phone.
+(or install it: `winget install --id Cloudflare.cloudflared`).
 
 - The test copy is rebuilt whenever a source file changes: reload the page on the phone to get it (pull
   down on any page but a battle, where pull-to-refresh is off so a stray pull can't reload mid-turn).
-- It reports back to the PC: each voice phrase (what the recogniser heard, its alternatives, and what it
-  logged) with undos and errors, in `.cache/phone-log.jsonl`, with a line in the terminal as they
-  happen; each battle as it's saved, in `.cache/phone-battles/`. With the voice model, each line's audio
-  goes to `.cache/phone-audio/` too (it stays on your PC), with what the model heard and how long it took
-  in the log, so the reading can be tuned on your voice. A test can be gone through afterwards from
-  those. Normal builds have none of this.
+- It reports back to the PC: undos, errors and the screen capture's starts and stops in
+  `.cache/phone-log.jsonl`, with a line in the terminal as they happen; each battle as it's saved, in
+  `.cache/phone-battles/`; and while the game's screen is captured, its frames (twice a second, when
+  something changed) in `.cache/screen-frames/`, a folder for each capture. It all stays on your PC, and a
+  test can be gone through afterwards from it. Normal builds have none of this.
 - The tunnel's address changes every run, and the phone keeps each address's data apart: keep it running
   for a whole test session, or carry teams and battles over with a backup file.
 - The QR code shows only once the address works. Opened sooner, a Wi-Fi router can take the address for
@@ -69,13 +63,10 @@ The first time you turn voice on, the phone downloads the model from your PC thr
 - Anyone with the address can open it while it runs; Ctrl+C stops everything.
 - `npm run phone -- --local` skips the tunnel (this PC only, at http://localhost:4180).
 
-`npm run dev -- --host` on the same Wi-Fi also works for everything but voice.
+`npm run dev -- --host` on the same Wi-Fi also works, without the offline install.
 
-**On a phone, during a battle:** the screen stays on while a battle is open (until five minutes pass with
-nothing logged or tapped) and while voice is listening, since phones lock after half a minute untouched.
-Voice lets go of the microphone when the screen locks or you switch apps, and picks up again on return
-(if the phone wants a fresh tap, it says so). With the game's sound on speakers, use headphones, so the
-microphone hears you rather than the game.
+**On a phone, during a battle:** the screen stays on while a battle is open, until five minutes pass with
+nothing logged or tapped, since phones lock after half a minute untouched.
 
 ## Logging a turn fast
 
@@ -93,124 +84,6 @@ microphone hears you rather than the game.
    to move one tap away; it closes when everyone has moved and *End turn* pulses (a Fake Out flinch counts).
    Tapping someone who already moved this turn, or who came in this turn, starts the next turn for you.
    A short vibration confirms each entry (Android).
-
-**By voice:** tap **🎙 Voice** and read the battle text as it appears, adding HP where you have it: "The
-opposing Salamence used Draco Meteor! Charizard 45", "Garchomp used Earthquake! It doesn't affect the
-opposing Salamence… the opposing Rillaboom 60", "A critical hit!", "Charizard fainted!", "Kim sent out
-Kingambit!", "Go! Incineroar!", "Charizard has Mega Evolved into Mega Charizard Y!" (or just "Charizard
-mega", "mega Charizard"). The ability and item pop-ups ("Salamence's Intimidate", "Rillaboom's
-Leftovers", or said "Intimidate from Salamence") answer the *What did the game show?* questions. Said
-your way, a Pokémon named straight after a move aimed at one is its target ("Lopunny Fake Out
-Bellibolt"), unless it's the next to move ("…Bellibolt Thunderbolt"). Each move is logged when the next
-one starts or after a short pause; HP left out is logged as skipped (a single-target move with no target
-said is one of them, "Incineroar or Bellibolt?", and both are marked unread), and a message not said
-(Life Orb recoil, a berry) is never taken as not having happened. The leads can come the same way: start
-the battle without them and read the opening lines ("Kim sent out Salamence and Rillaboom!", "Go!
-Incineroar and Sneasler!"), or say them your way ("opponent sent Rillaboom and Corviknight", "opponent
-leads with…", or just the names while their places are empty). A species both sides have is the side
-just talked about ("opponent… Altaria"), else yours; for a pop-up, which names no side, the one it fits.
-
-Details said after a move was logged (after the pause, or once the next line started) go with it:
-"…it crit", "Dragapult 40", "it missed", "Charizard fainted", "Sitrus Berry" reopen the last move logged,
-if it's about who was in it, and log it again with that added. The turn's order can be said in words
-too: "Rillaboom moved first", "Kingambit went last", "Rillaboom outsped Dragapult", "Gholdengo moved
-before Kingambit" move a logged move as the log's *It went earlier / later* does (refused, with why,
-when the HP typed in only fits the order logged); said before that Pokémon's move, it's placed there
-once it's logged.
-
-The rest of the game's lines can be read out as they come, in order, and are taken as the game means
-them. They're worded as Champions has them (its own English battle text, as dumped in
-[projectpokemon/champout](https://github.com/projectpokemon/champout)); every one of its battle lines
-was checked to read as what it says, and `src/ui/battle/voice/turns.test.ts` reads whole turns:
-
-- **Stat changes** ("The opposing Garchomp's Attack harshly fell!", "Charizard and Incineroar's Attack
-  fell!", "…won't go any higher!") are checked against what logging already did (a move's own boosts and
-  drops, Intimidate on the way in, Sticky Web, a Defiant answered), so nothing counts twice; "…'s Attack
-  was not lowered!" takes back the drop logged for it this turn (and asks, for one of yours whose Mega's
-  ability would have stopped it, whether it Mega Evolved). A chance one goes with its move (Moonblast's
-  Sp. Atk drop, Meteor Mash's Attack) and, like any stat change on a target, says whom a single-target
-  move hit (Parting Shot's target); "Attack rose sharply!" after a drop, from one that may have Defiant,
-  is its Defiant. What nothing logged explains (Moxie, Speed Boost, a seed) goes onto the board, after
-  the move.
-- **Hits**: "A critical hit on the opposing Kingambit!", "It's super effective on the opposing Kingambit
-  and Salamence!", "…protected itself!", "But it failed to affect…", "The Pokémon was hit 4 times!", "But
-  it failed!", "Occa Berry weakened Heat Wave's power!" (the berry of whoever it hit), "…knocked off the
-  opposing Salamence's Life Orb!", "…'s Air Balloon popped!"; the user's HP said after its move ("…was
-  damaged by the recoil! Incineroar 150") sets its HP. HP read after a Sitrus Berry's pop-up is the HP it
-  settled on once healed.
-- **Couldn't move**: "…flinched and couldn't move!", "…couldn't move because it's paralyzed!", "…is fast
-  asleep." log no move (and no status on the move before); "…woke up!", "…'s Lum Berry cured its
-  paralysis!" end it; "…cannot be poisoned!", "…is already asleep!" mean the move didn't take.
-- **The field** as the game describes it (weather, terrain, the rooms, Gravity, Tailwind, screens and
-  hazards starting or ending: "It started to rain!", "The twisted dimensions returned to normal!", "A
-  tailwind started blowing on the opposing side!", "Your side's tailwind petered out!", "Pointed stones
-  float in the air on the opposing side!", "…blew away Stealth Rock!") puts the board right wherever it
-  differs.
-- **Turns**: Champions writes nothing between turns (the weather stays on the field panel, with no "Rain
-  continues to fall."), so a turn's end is told by what comes: its first end-of-turn line ("The rain
-  stopped.", "…is buffeted by the sandstorm!", "…was hurt by its burn!", "…was hurt by its poisoning!",
-  a Leftovers or Speed Boost pop-up, a tailwind or screen running out) ends it, with its residual damage
-  and timers, and HP read after that is where that Pokémon is now, not part of a move. Otherwise the
-  next turn shows itself: its switches ("…, come back!", "Kim withdrew…"), its Mega Evolution, a Pokémon
-  moving again (including one that couldn't move before, or one that came in this turn), or a move that
-  can't come after one already made (Protect or Fake Out after an ordinary attack: priority, counting
-  the Prankster, Gale Wings or Triage the earlier ones may have had). "Next turn" (or "end turn") said
-  out loud ends one too. Entries taken back on the screen take what was heard about them with them: a
-  turn undone and read again isn't split by the "…flinched" heard the first time.
-- Trainer names ("…went back to Roman!", "…is reacting to Roman's Omni Ring!") are read past.
-
-*Team preview* takes voice too: tap 🎙 Voice there and say their six as you see them ("Rillaboom,
-Sneasler, Salamence…"; formes the way you'd say them: "Alolan Ninetales", "Wash Rotom", "Aqua Tauros"),
-then "mine" (or "I brought…") and yours in the order you pick them on the Switch, which gives the ones
-you bring and your leads. "Mine" holds over a pause, not for good: it runs out ten seconds after it was
-said or one of yours named, and a Pokémon that isn't on your team is theirs whatever was said (a stray
-"I" heard once sent the rest of their team to yours). A Pokémon with a female forme too (Indeedee,
-Basculegion) is said plain for whichever is used more; say "female" or "male" for the other. Another
-forme of one already in replaces it, said or tapped ("Goodra", then "Hisuian Goodra", or back): one of
-each species.
-"Scratch that" (or "not that") takes back the last one picked, "clear" starts over, and a Pokémon heard
-that changes nothing says why ("Froslass is in already"). When it can't tell which Pokémon a word was,
-it offers the likeliest few to tap. The microphone stays on into the battle: reading or saying its first
-line ("…sent out…", "opponent sent…") starts it and sets their leads.
-
-**The voice model.** Voice runs a speech model on the device: the first time you turn it on, it offers a
-one-time download (about 280 MB: NVIDIA's Parakeet TDT-CTC 110M, an 8-bit ONNX copy of its CTC half, a
-speech detector, the reader below and the ONNX runtime), kept in the browser's Cache Storage and
-removable from the Battles page. Nothing leaves the device, it works offline, and in any browser (Chrome,
-Safari, Firefox). It listens out for what can be said right now: in a battle, the dozen Pokémon in it,
-your moves, items and abilities and their likely ones; at team preview, every Pokémon in the format, and
-"scratch that" and "not that" (not "clear", "mine" or "theirs": short words, which it found in lines
-without them). A general recogniser writes names it doesn't know the way they sounded ("Corvy Kight",
-"King Ambot", "Rail a boom"); here each name that can come up is also lined up against the sound itself
-(`src/speech/ctc.ts`, word spotting as in NVIDIA's CTC-WS), and one that fits nearly as well as what was
-heard replaces it. That's what holds up for accents: names are compared on the sound, among the few
-possible, not on spelling. On synthetic voices, an American one and a Spanish one reading English, it
-gets 98 of 106 names and moves with nothing false, also on lines with no names in them. The speech
-detector finds where each line ends (a pause of 0.7 s), and the line is read in a fraction of a second on
-a PC, a second or so on a phone.
-
-**The reader.** What was heard then goes to a small language model on the device (Google's FunctionGemma
-270M, fine-tuned for this, 130 MB in 8-bit, in the same download), which turns it into the app's actions:
-it's shown the battle (who's out, who has Mega Evolved) or team preview, what the phrase before did, and
-the phrase, and answers one action a line ("use me:Lopunny Fake Out > opp:Bellibolt", "hp opp:Bellibolt
-84", "add opp:Froslass"). So it takes however you say it ("Froslass out, Incineroar in", "Intimidate from
-Incineroar", "Dragonite's attack wasn't lowered"), and puts the phrase before right: "no, 74", "I meant
-Triple Axel", "scratch that", "my bad, Froslass not Volcarona". It only interprets; the rules are the
-app's. Each line is checked before it's used (a Pokémon on the field or the team, a move in your set or
-one theirs can learn or has been seen with, an ability or item it can have, a field effect there is), and
-anything else is dropped; a line it wasn't sure of is offered to tap instead. On the lines from real
-battles and team previews it wasn't trained on, it gets 90 of 95 battle lines, 30 of 34 team preview
-lines, and all 32 corrections written for them; a line takes about half a second on a phone (four
-threads: the site is cross-origin isolated for that), less when the field is the same as the last line's.
-Until it's loaded, voice reads by its rules as before.
-
-The browser's own recogniser (Chrome, Safari) is still there for anyone who'd rather not download: the
-offer has a link for it, and the Battles page switches between the two. It sends the audio away (Chrome
-to Google), needs a connection, and mangles names ("carbonite" for Corviknight, "dragon ball" for
-Dragapult, "Celtic" for Milotic); names are then matched among the few that can be meant, by their
-consonant sounds as well, which rescues many, and Chrome on Android's phrases in pieces ("King",
-" Gambit") are put together. Either way, English game text, and with the game audio on speakers, use
-headphones.
 
 **On a PC, the keyboard does it all:** Q W open their Pokémon and A S yours (left to right), 1–9 pick a
 move or target, typing a letter searches every move, ← → switch Pokémon; then type the HP, Tab for the
@@ -283,6 +156,87 @@ Final Gambit or Healing Wish; Helping Hand from a partner; end-of-turn Leftovers
 Grassy Terrain. A move that drains or recoils changes its user's HP by a share of damage only known in %:
 its HP shows `?` until it's read again (type it as the "before" to keep the next hit as evidence).
 Everything is undoable (`↶`), exactly.
+
+## Reading the game's screen (in progress)
+
+The game writes down everything that happens: every move, the ability and item pop-ups, stat changes,
+faints, the weather. Tapping it in mid-battle takes the time that playing needs, so the app is to read it
+off the game's window by itself (Champions in an Android emulator such as BlueStacks, on the same PC) and
+have the battle logged whenever you look.
+
+**▣ Capture game** in the top bar (in development and test copies for now) captures the window you pick in
+the browser's share dialog, with a small preview in the corner to show it's the right one (if it stays black,
+the browser can't capture that window: share the whole screen, or use Edge or Chrome). Start the battle in
+the app at team preview (their six tapped in, leads not needed: the game's first lines set them), and it's
+logged from then on; the battle screen shows what was read and what it logged. Recorded on BlueStacks at
+1920×1080, two whole ranked battles read back right, turn by turn.
+
+What it reads (`src/screen/`), a few times a second, off the main thread:
+
+- **The message line**: the line that starts at its fixed margin, read once two readings agree (a line fading
+  in over a moving scene never stands pixel-still), or, if it never settles, its likeliest reading as it goes.
+- **Pop-ups** ("Raichu's" over "Electric Surge"): two lines aligned to the owner's side, theirs prefixed
+  "The opposing" (both sides can have a Raichu).
+- **HP boxes**: theirs in %, yours in HP (the digits left of the slash), read once the count stops, or what
+  they last showed as they go; a grey box (fainted) is 0, a KO. Whose box it is: the name read in it, else
+  where it's shown (theirs face you, so their first is on the right). HP comes only from here, never from text.
+- **The move-select screen** ("MOVE TIME"): the turn is over.
+
+Text is read by PaddleOCR's PP-OCRv5 English recogniser (Apache 2.0, about 8 MB) on the device, with ONNX
+Runtime's WebAssembly (one thread), fetched the first time a capture starts; `npm run dev` and `npm run phone`
+serve both from `.cache/ocr/` and `node_modules`. Not yet: their six read at team preview (tapped for now),
+nicknames in other alphabets (the recogniser reads English), and a public build of the reader.
+
+What's read goes through the battle-text reader (`src/ui/battle/narration/`). It takes the game's own lines,
+worded as Champions has them (its English battle text, as dumped in
+[projectpokemon/champout](https://github.com/projectpokemon/champout): every one of its battle lines was
+checked to read as what it says, and `turns.test.ts` reads whole turns), plus HP ("Charizard 45": yours in
+HP, theirs in %), in the order the game shows them:
+
+- **Moves**: "The opposing Salamence used Draco Meteor!", "Kim sent out Kingambit!", "Go! Incineroar!",
+  "Charizard has Mega Evolved into Mega Charizard Y!" (a Mega's X or Y only when the line says which;
+  otherwise both stay open). Each move is logged when the next one starts, and HP or a detail read just
+  after goes with it; HP not read is logged as skipped, and a message not read (Life Orb recoil, a berry)
+  is never taken as not having happened. One into a Protect made this turn is logged as protected, with no
+  HP to wait for; the same move read twice is one move; one an Encore made it use ("…must do an encore!")
+  went at the priority of the move chosen before, so its place says nothing of Speed. A Pokémon sent in after
+  its side's Baton Pass, U-turn or Parting Shot takes that one's place (yours are picked on the party screen,
+  with no "…, come back!").
+- **Hits**: "A critical hit on the opposing Kingambit!", "It's super effective on the opposing Kingambit
+  and Salamence!", "…protected itself!", "But it failed to affect…", "The Pokémon was hit 4 times!", "But
+  it failed!", "Occa Berry weakened Heat Wave's power!" (the berry of whoever it hit), "…knocked off the
+  opposing Salamence's Life Orb!", "…'s Air Balloon popped!"; the user's HP read after its move ("…was
+  damaged by the recoil! Incineroar 150") sets its HP. HP read after a Sitrus Berry's pop-up is the HP it
+  settled on once healed.
+- **Stat changes** ("The opposing Garchomp's Attack harshly fell!", "Charizard and Incineroar's Attack
+  fell!", "…won't go any higher!") are checked against what logging already did (a move's own boosts and
+  drops, Intimidate on the way in, Sticky Web, a Defiant answered), so nothing counts twice; "…'s Attack
+  was not lowered!" takes back the drop logged for it this turn (and asks, for one of yours whose Mega's
+  ability would have stopped it, whether it Mega Evolved). A chance one goes with its move (Moonblast's
+  Sp. Atk drop, Meteor Mash's Attack) and, like any stat change on a target, says whom a single-target
+  move hit (Parting Shot's target); "Attack rose sharply!" after a drop, from one that may have Defiant,
+  is its Defiant. What nothing logged explains (Moxie, Speed Boost, a seed) goes onto the board, after
+  the move.
+- **Couldn't move**: "…flinched and couldn't move!", "…couldn't move because it's paralyzed!", "…is fast
+  asleep." log no move (and no status on the move before); "…woke up!", "…'s Lum Berry cured its
+  paralysis!" end it; "…cannot be poisoned!", "…is already asleep!" mean the move didn't take.
+- **The field** as the game describes it (weather, terrain, the rooms, Gravity, Tailwind, screens and
+  hazards starting or ending: "It started to rain!", "The twisted dimensions returned to normal!", "A
+  tailwind started blowing on the opposing side!", "Your side's tailwind petered out!", "Pointed stones
+  float in the air on the opposing side!", "…blew away Stealth Rock!") puts the board right wherever it
+  differs.
+- **Turns**: Champions writes nothing between turns (the weather stays on the field panel, with no "Rain
+  continues to fall."), so a turn's end is told by what comes: its first end-of-turn line ("The rain
+  stopped.", "…is buffeted by the sandstorm!", "…was hurt by its burn!", "…was hurt by its poisoning!",
+  a Leftovers or Speed Boost pop-up, "…had its HP restored." from Grassy Terrain or Leftovers, a tailwind or
+  screen running out) ends it, with its residual damage and timers, and HP read after that is where that
+  Pokémon is now, not part of a move (straight after a Sitrus Berry's pop-up, "…had its HP restored." is part
+  of the move). Otherwise the next turn shows itself: its switches ("…, come back!", "Kim withdrew…"), its
+  Mega Evolution, or a Pokémon moving again (including one that couldn't move before, or one that came in
+  this turn); off the screen, the move-select screen ends it for certain. Entries
+  undone take what was read about them with them: a turn undone and read again isn't split by the
+  "…flinched" read the first time.
+- Trainer names ("…went back to Roman!", "…is reacting to Roman's Omni Ring!") are read past.
 
 ## Your data
 
@@ -380,18 +334,11 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
   unticked reads as the Pokémon being faster (a Scarf, more Speed) or, where that can't be, as a
   flagged conflict.
 - Illusion and Transform aren't modelled.
-- The voice reader learned from made-up battles and phrasings: a badly misheard name, or a phrase unlike
-  any it saw, can still come out wrong (checked, so never as something that can't be; offered to tap
-  when it wasn't sure). It puts right only the phrase just before (within a minute); older mistakes are
-  for Undo. Moves new in Champions are checked against the ladder data, not a learnset.
+- Reading the game's screen is new (see *Reading the game's screen*): team preview is still tapped in, and
+  the reader is in development and test copies only.
 
 Credits: in-game Battle Data via championsbattledata.com (not affiliated with Nintendo, Game Freak or The
 Pokémon Company), Smogon usage stats, `@smogon/calc`, `@pkmn/dex`, Showdown sprites and item icons, type
-symbols recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT). Voice:
-[Parakeet TDT-CTC 110M](https://huggingface.co/nvidia/parakeet-tdt_ctc-110m) by NVIDIA and Suno.ai ([CC
-BY 4.0](https://creativecommons.org/licenses/by/4.0/)), used as the CTC half converted to 8-bit ONNX by
-[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx); [Silero
-VAD](https://github.com/snakers4/silero-vad) (MIT); [ONNX Runtime Web](https://onnxruntime.ai) (MIT). The
-reader is a fine-tuned [FunctionGemma 270M](https://huggingface.co/google/functiongemma-270m-it): Gemma
-is provided under and subject to the Gemma Terms of Use found at
-[ai.google.dev/gemma/terms](https://ai.google.dev/gemma/terms).
+symbols recreated by [partywhale](https://github.com/partywhale/pokemon-type-icons) (MIT). Screen reading:
+[PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)'s PP-OCRv5 English recogniser (Apache 2.0), as converted to
+ONNX in [monkt/paddleocr-onnx](https://huggingface.co/monkt/paddleocr-onnx); [ONNX Runtime Web](https://onnxruntime.ai) (MIT).

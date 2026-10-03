@@ -164,36 +164,6 @@ function buildAbilities() {
   return out;
 }
 
-/**
- * What each species can learn, for checking what the voice reader heard (src/ui/battle/voice/lm.ts):
- * any generation's learnset (Champions has its own; this is the closest there is), with what it
- * learned before evolving (Lopunny's Fake Out is Buneary's), only moves in Champions, as indices into
- * `moves`. Formes learn their base's too. Moves new in Champions are missing; the check takes any move
- * seen on the ladder as well.
- */
-async function buildLearnsets() {
-  const d = Dex.forGen(9);
-  const moves = [...gen.moves].map(m => m.id).filter(id => id !== 'nomove').sort();
-  const index = new Map(moves.map((m, i) => [m, i]));
-  const learnable = async id => {
-    const out = new Set();
-    for (let sp = d.species.get(id); sp?.exists && !out.has(`#${sp.id}`); sp = sp.prevo ? d.species.get(sp.prevo) : undefined) {
-      out.add(`#${sp.id}`);
-      for (const m of Object.keys((await d.learnsets.get(sp.id))?.learnset ?? {})) if (index.has(m)) out.add(m);
-    }
-    return [...out].filter(m => !m.startsWith('#'));
-  };
-  const species = {};
-  for (const sp of gen.species) {
-    const tries = [sp.id, d.species.get(sp.id)?.baseSpecies, d.species.get(sp.id)?.changesFrom, sp.baseSpecies, sp.name.split('-')[0]].filter(Boolean);
-    // A forme's own (Rotom-Wash: Hydro Pump) and its base's.
-    const list = new Set();
-    for (const t of new Set(tries.map(toID))) for (const m of await learnable(t)) list.add(m);
-    if (list.size) species[sp.id] = [...list].map(m => index.get(m)).sort((a, b) => a - b);
-  }
-  return {moves, species};
-}
-
 // --- Smogon structure --------------------------------------------------------
 
 async function listChaosFiles(month) {
@@ -396,11 +366,6 @@ async function main() {
   const args = process.argv.slice(2);
   const tablesOnly = args.includes('--tables');
   fs.mkdirSync(OUT_DIR, {recursive: true});
-  const learnsets = await buildLearnsets();
-  fs.writeFileSync(path.join(OUT_DIR, 'learnsets.json'), JSON.stringify(learnsets));
-  console.log(`Learnsets: ${Object.keys(learnsets.species).length} species`);
-  // `--learnsets` rebuilds just that (nothing fetched).
-  if (args.includes('--learnsets')) return;
   const moves = buildMoves();
   fs.writeFileSync(path.join(ROOT, 'src', 'data', 'moves.gen.json'), JSON.stringify(moves));
   console.log(`Move effects: ${Object.keys(moves).length} moves`);
