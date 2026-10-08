@@ -70,12 +70,22 @@ export function stoneForme(gen: Gen, species: string, item: string): string | un
   return megas[species] ?? (base?.baseSpecies ? megas[base.baseSpecies] : undefined) ?? Object.values(megas)[0];
 }
 
+/**
+ * The species before Mega Evolution: the Mega's own, where the team names the Mega itself ("Slowbro-Mega @
+ * Slowbronite"). On 5 Oct such a Slowbro was taken as Mega in every battle, those its Garchomp-Mega-Z partner Mega
+ * Evolved in too (180 Defense for 110, so every hit on it looked too strong).
+ */
+export function preMegaSpecies(gen: Gen, species: string): string {
+  const sp = gen.species.get(toID(species));
+  return sp?.baseSpecies && /-Mega(-|$)/.test(sp.name) ? sp.baseSpecies : species;
+}
+
 /** My Pokémon as a calc spec, honouring Mega Evolution. */
 export function mySpec(gen: Gen, fmt: FormatData, set: PokemonSet, cond?: MonCondition): MonSpec {
   const mega = cond?.mega ? megaFormeOf(gen, set) : undefined;
   const megaDex = mega ? gen.species.get(toID(mega)) : undefined;
   return {
-    species: megaDex?.name ?? set.species,
+    species: megaDex?.name ?? preMegaSpecies(gen, set.species),
     level: set.level ?? fmt.level,
     nature: set.nature,
     evs: set.evs,

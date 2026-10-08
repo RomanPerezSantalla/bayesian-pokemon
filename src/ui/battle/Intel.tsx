@@ -8,7 +8,7 @@ import type {MegaCount} from '../../engine/predict';
 import type {InferResult, MonSummary} from '../../engine/worker';
 import type {Battle} from '../../engine/types';
 import {DistBars, DistRow, ItemIcon, Sprite, TypeTab, pct} from '../common';
-import {megaFormeOf} from '../../engine/likelihood';
+import {megaFormeOf, preMegaSpecies} from '../../engine/likelihood';
 import {oppSpecies, spokenName} from './names';
 import {MatchupCards, SpeedVerdicts, type Card} from './visuals';
 
@@ -133,8 +133,8 @@ export function Intel({fmt, gen, battle, result, slot, onMegaPlan}: {
       const counted = mu.myMegas.includes(s);
       return {
         slot: s,
-        name: set.nickname || set.species,
-        species: c?.mega || counted ? megaFormeOf(gen, set) ?? set.species : set.species,
+        name: set.nickname || (c?.mega ? set.species : preMegaSpecies(gen, set.species)),
+        species: c?.mega || counted ? megaFormeOf(gen, set) ?? set.species : preMegaSpecies(gen, set.species),
         mega: counted ? 'counted' : mu.myCan.includes(s) ? 'can' : undefined,
         hp: (100 * hp) / max,
         hpText: `${hp}/${max}`,

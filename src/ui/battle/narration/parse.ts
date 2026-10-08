@@ -148,7 +148,7 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['absorbed light', 'charge', 'Solar Beam'], ['burrowed its way under the ground', 'charge', 'Dig'], ['flew up high', 'charge', 'Fly'],
   ['hid underwater', 'charge', 'Dive'], ['vanished instantly', 'charge', 'Phantom Force'], ['sprang up', 'charge', 'Bounce'],
   ['became cloaked in a harsh light', 'charge', 'Sky Attack'],
-  ['won the battle', 'battleEnd'],
+  ['won the battle', 'battleEnd'], ['battled to a draw', 'battleEnd'], ['time has run out', 'battleEnd'],
   ['but it failed', 'fail'], ['it failed', 'fail'], ['does not have enough hp', 'fail'], ['but nothing happened', 'fail'],
   ['pokemon was hit', 'hits'], ['was hit', 'hits'],
   ['lost some of its hp', 'recoil'], ['lost some hp', 'recoil'], ['lost some', 'recoil'],
@@ -163,6 +163,8 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['cannot use', 'cant'], ['couldnt move', 'cant'], ['cant move', 'cant'], ['cannot move', 'cant'],
   ['woke up', 'cure'], ['woke it up', 'cure'], ['snap fully awake', 'cure'], ['thawed out', 'cure'], ['defrosted it', 'cure'],
   ['was cured of', 'cure'], ['cured its', 'cure'], ['burn was cured', 'cure'], ['status returned to normal', 'cure'],
+  // "…'s Matcha Gotcha melted the ice!": a frozen one's move thawing it.
+  ['melted the ice', 'cure', 'thaw'],
   // Binding moves, Leech Seed, Salt Cure taking hold; a binding move letting go.
   ['has been afflicted with an infestation', 'trapped'], ['became trapped in the fiery vortex', 'trapped'],
   ['became trapped in the vortex', 'trapped'], ['became trapped by the quicksand', 'trapped'], ['was wrapped by', 'trapped'],
@@ -328,8 +330,60 @@ function every(gen: Gen, what: 'moves' | 'items' | 'abilities'): Named<string>[]
   return c[what];
 }
 
+/** The words the game's lines are made of (the phrases', and common ones). */
+let lineWords: ReadonlySet<string> | undefined;
+const isLineWord = (w: string) => (lineWords ??= new Set([...PHRASES.flatMap(([p]) => p), ...HAZARDS.flatMap(([p]) => p), ...COMMON_WORDS])).has(w);
+/** Words that follow a name, run into it by the reader: a trainer's ("tenkiwithdrew Whimsicott!"). */
+const AFTER_A_NAME = ['withdrew', 'used', 'fainted'];
+
+const nameCache = new WeakMap<Gen, Set<string>>();
+/** A species', move's, item's or ability's name, run together (never taken apart). */
+function isName(gen: Gen, w: string): boolean {
+  let names = nameCache.get(gen);
+  if (!names) {
+    names = new Set([...every(gen, 'moves'), ...every(gen, 'items'), ...every(gen, 'abilities')].map(n => n.key));
+    for (const sp of gen.species) names.add(squash(sp.name));
+    nameCache.set(gen, names);
+  }
+  return names.has(squash(w));
+}
+
+/** The fewest words of the game's lines (two letters at least) this is made of, if it's made of nothing else. */
+function lineWordsIn(w: string): string[] | null {
+  const best: (string[] | null)[] = [[]];
+  for (let end = 1; end <= w.length; end++) {
+    best[end] = null;
+    for (let start = Math.max(0, end - 16); start <= end - 2; start++) {
+      const before = best[start];
+      if (before && isLineWord(w.slice(start, end)) && (!best[end] || before.length + 1 < best[end]!.length)) {
+        best[end] = [...before, w.slice(start, end)];
+      }
+    }
+  }
+  const parts = best[w.length];
+  return parts && parts.length > 1 ? parts : null;
+}
+
+/**
+ * Words the reader ran together, taken apart: "Butit failed!", "…had its HPrestored." (6 Oct: neither was taken in), a
+ * trainer's name run into "withdrew". Only into words the game's lines use: a name stays whole (Moonblast, Overheat).
+ */
+function unmerged(gen: Gen, words: string[]): string[] {
+  const out: string[] = [];
+  for (const w of words) {
+    const parts = w.length < 4 || isLineWord(w) || isName(gen, w) ? null : lineWordsIn(w);
+    const tail = parts ? undefined : AFTER_A_NAME.find(t => w.length >= t.length + 2 && w.endsWith(t) && !isName(gen, w));
+    if (parts) out.push(...parts);
+    else if (tail) out.push(w.slice(0, -tail.length), tail);
+    else out.push(w);
+  }
+  return out;
+}
+
 export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
-  const words = norm(text).split(' ').filter(Boolean);
+  const words = unmerged(env.gen, norm(text).split(' ').filter(Boolean));
+  /** Read before it was all written: no full stop or mark at its end (its last word may be cut short). */
+  const cut = !/[.!?…]["”']?$/.test(text.trim());
   const names = {me: monNames(env, 'me'), opp: monNames(env, 'opp')};
   const out: NarrationEvent[] = [];
   let last: MonRef | undefined;
@@ -354,8 +408,11 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
   };
   const same = (a: MonRef, b: MonRef) => a.side === b.side && a.slot === b.slot;
   /** A Pokémon was named: the lines after are about it. */
+  /** The first named in the line: whose a possessive line is ("…'s Matcha Gotcha melted the ice!"). */
+  let first: MonRef | undefined;
   const named = (ref: MonRef, end: number) => {
     [last, lastEnd, i] = [ref, end, end];
+    first ??= ref;
   };
 
   /**
@@ -403,13 +460,24 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
       named(second.ref, second.at + second.len);
     }
   };
+  /**
+   * The line cut off in a move's name ("The opposing Aromatisse used Moonbla", 5 Oct: Moonblast went unlogged and its
+   * damage to Heat Wave): the one of these it's the start of, four letters at least.
+   */
+  const cutShort = (i: number, cands: Named<string>[]): Match<string> | null => {
+    const start = squash(words.slice(i).join(''));
+    if (!cut || start.length < 4) return null;
+    const fits = cands.filter(c => c.key.startsWith(start) && c.key !== start);
+    return fits.length === 1 ? {value: fits[0].value, len: words.length - i, score: 0.75} : null;
+  };
   const moveAt = (i: number, ref: MonRef) => {
     if (ref.side === 'me') {
       const own = (env.battle.myTeam[ref.slot]?.moves ?? []).map(m => ({key: squash(m), value: m}));
-      return matchAt(words, i, own, 0.66, 0.06);
+      return matchAt(words, i, own, 0.66, 0.06) ?? cutShort(i, own);
     }
     const likely = (env.mons?.[ref.slot]?.moves ?? []).filter(m => m.p > 0).map(m => ({key: squash(m.name), value: m.name}));
-    return matchAt(words, i, likely, 0.7, 0.06) ?? matchAt(words, i, every(env.gen, 'moves'), 0.84, 0.03);
+    return matchAt(words, i, likely, 0.7, 0.06) ?? matchAt(words, i, every(env.gen, 'moves'), 0.84, 0.03)
+      ?? cutShort(i, likely) ?? cutShort(i, every(env.gen, 'moves'));
   };
   /** The words at `at` spell the name matched (not just sound like it: "has" and Haze). */
   const spelled = (at: number, m: Match<string>) => similarity(squash(words.slice(at, at + m.len).join('')), squash(m.value)) >= 0.95;
@@ -568,7 +636,8 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
           out.push(ph.extra === 'flinch' ? {kind: 'cant', mon: last, flinch: true} : {kind: 'cant', mon: last, status: ph.extra as Status | undefined});
           break;
         case 'cure':
-          out.push({kind: 'cure', mon: last});
+          // "The opposing Sinistcha's Matcha Gotcha melted the ice!": Sinistcha's, whatever its move's name sounds like.
+          out.push({kind: 'cure', mon: ph.extra === 'thaw' ? first ?? last : last});
           break;
         case 'encored':
           out.push({kind: 'encored', mon: last});

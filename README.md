@@ -122,7 +122,10 @@ guaranteed stat drops (Icy Wind, Snarl…) show those chips on the target.
 
 **Megas** have two abilities in play: the one they enter with (uncertain, e.g. Intimidate vs Moxie) and
 their Mega's own (fixed). They're tracked separately, so an Intimidate before Mega Evolving never
-contradicts Aerilate after.
+contradicts Aerilate after. Once theirs has evolved, its ability is the Mega's, from the forme the game named,
+whether the beliefs have caught up or not (a Mega Staraptor's Contrary, for its Close Combat's stat line a moment
+later). One of yours named as its Mega in the team ("Slowbro-Mega @ Slowbronite") is its regular self until it
+evolves: on 5 Oct such a Slowbro had been taken as Mega all along, even in battles its partner Mega Evolved in.
 
 **Any of theirs**, from the buttons over the panel on the right: one on the field, or one benched, which stays
 shown until you pick another (picked on the field, it gives way to the field's once it leaves).
@@ -219,6 +222,10 @@ What it reads (`src/screen/`), a few times a second, off the main thread:
 - **The message line**: the line that starts at its fixed margin, read once two readings agree (a line fading
   in over a moving scene never stands pixel-still), or, if it never settles, its likeliest reading as it goes.
   Its text is white, but for critical hits: "A critical hit!" is written in yellow, the one coloured line.
+  Words read run together are taken apart where each part is a word the game's lines use ("Butit failed!",
+  "…had its HPrestored.", "…hurt byits burn!", a trainer's name run into "withdrew"); a name never is. A line read
+  before it was all written (no mark at its end) that stops in a move's name is that move, if it's the only one
+  that starts so ("…used Moonbla": on 5 Oct, Moonblast's damage had gone to the Heat Wave before it).
 - **Pop-ups** ("Raichu's" over "Electric Surge"): two lines aligned to the owner's side, theirs prefixed
   "The opposing" (both sides can have a Raichu).
 - **HP boxes**: theirs in %, yours in HP (the digits left of the slash), read once the count stops, or what
@@ -276,12 +283,13 @@ HP, theirs in %), in the order the game shows them:
   itself, so for a hit logged with it the calc is given the stage before it: on 5 Oct every Electro Shot had been
   taken at +2.) "… withdrew X!" is said only of theirs ("…, come back!" of yours), so of a species both sides have,
   it's theirs; a trainer's name before it isn't read in with the Pokémon's ("c.c. withdrew Avalugg!").
-- **Hits**: "A critical hit on the opposing Kingambit!", "It's super effective on the opposing Kingambit
-  and Salamence!", "…protected itself!", "But it failed to affect…", "The Pokémon was hit 4 times!", "But
-  it failed!", "Occa Berry weakened Heat Wave's power!" (the berry of whoever it hit), "…knocked off the
-  opposing Salamence's Life Orb!", "…'s Air Balloon popped!"; the user's HP read after its move ("…was
-  damaged by the recoil! Incineroar 150") sets its HP. HP read after a Sitrus Berry's pop-up is the HP it
-  settled on once healed.
+- **Hits**: "A critical hit on the opposing Kingambit!", "It's super effective on the opposing Kingambit and
+  Salamence!", "…protected itself!", "But it failed to affect…", "The Pokémon was hit 4 times!", "But it
+  failed!", "Occa Berry weakened Heat Wave's power!" (the berry of whoever it hit), "…knocked off the opposing
+  Salamence's Life Orb!", "…'s Air Balloon popped!"; the user's HP read after its move ("…was damaged by the
+  recoil! Incineroar 150") sets its HP. HP read after a Sitrus Berry's pop-up is the HP it settled on once
+  healed. Expanding Force in Psychic Terrain, from one on the ground, hits both foes like a spread move (on 5
+  Oct the second target's HP had been taken as a plain reading, and its hit went unread).
 - **Stat changes** ("The opposing Garchomp's Attack harshly fell!", "Charizard and Incineroar's Attack
   fell!", "…won't go any higher!") are checked against what logging already did (a move's own boosts and
   drops, Intimidate on the way in, Sticky Web, a Defiant answered), so nothing counts twice, and by as much
@@ -308,7 +316,8 @@ HP, theirs in %), in the order the game shows them:
   its place says nothing of Speed. "… and … switched places!" (Ally Switch) swaps the two of that side.
 - **Couldn't move**: "…flinched and couldn't move!", "…couldn't move because it's paralyzed!", "…is fast
   asleep." log no move (and no status on the move before); "…woke up!", "…'s Lum Berry cured its
-  paralysis!" end it; "…cannot be poisoned!", "…is already asleep!" mean the move didn't take.
+  paralysis!" end it; "…cannot be poisoned!", "…is already asleep!" mean the move didn't take. "…'s Matcha Gotcha
+  melted the ice!" thaws it. "You battled to a draw against…!" and "Time has run out!" end the battle.
 - **Held**: "…has been afflicted with an infestation by…!", "…became trapped in the fiery vortex!", "…was
   wrapped by…!", "…was seeded!", "…is being salt cured!" say the move reached it (logging it holds it); "…was
   freed from Infestation!" lets it go.

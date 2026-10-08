@@ -15,11 +15,11 @@
  * with the entries it was about when they're taken back (undo on the screen).
  */
 import LEGAL_ABILITIES from '../../../data/abilities.gen.json';
-import {isStatusMove, move as dexMove, STAT_LABELS, toID, type BoostID, type Gen} from '../../../data/dex';
+import {isStatusMove, STAT_LABELS, toID, type BoostID, type Gen} from '../../../data/dex';
 import {BLOCKERS, DROP_REACT, SEEDS} from '../../../engine/abilities';
 import {megaFormeOf, stoneForme} from '../../../engine/likelihood';
 import {moveFx, RISES_BEFORE_HIT} from '../../../engine/moves';
-import {maxHPOf, TERRAIN_ABILITY, typesOf, WEATHER_ABILITY, WEATHER_ROCK, type StateCtx} from '../../../engine/state';
+import {maxHPOf, targetNow, TERRAIN_ABILITY, typesOf, WEATHER_ABILITY, WEATHER_ROCK, type StateCtx} from '../../../engine/state';
 import type {MonSummary} from '../../../engine/worker';
 import {
   monKey, sameMon, type ActionEvent, type Battle, type Boosts, type HitResult, type MonRef, type SideID, type Snapshot, type Status,
@@ -452,7 +452,7 @@ export class Narrator {
   private fromAction(ev: ActionEvent): Draft {
     const gen = this.io.gen;
     const status = isStatusMove(gen, ev.move);
-    const target = moveFx(ev.move).tg ?? dexMove(gen, ev.move)?.target ?? 'normal';
+    const target = targetNow(this.io.ctx(this.io.battle()), ev.before, ev.actor, ev.move);
     const spread = !status && (target === 'allAdjacentFoes' || target === 'allAdjacent');
     const rows: Row[] = ev.hits.map(h => ({
       ref: h.target,
@@ -531,6 +531,8 @@ export class Narrator {
     this.popped = ev.kind === 'item' && ev.mon ? {key: monKey(ev.mon), item: ev.item} : null;
     // Trace's copy shows straight after Trace: anything else between, and it's over.
     if (ev.kind !== 'ability') this.traced = null;
+    // A weather or terrain line goes with the pop-up just before it, not one from before a move or the turn's end.
+    if (ev.kind === 'use' || ev.kind === 'endTurn') this.shownAbility = null;
     switch (ev.kind) {
       case 'use': {
         // The move told again: said twice ("Raichu Protect… Raichu Protect?"), or brought up again as a phrase goes on
@@ -1012,7 +1014,7 @@ export class Narrator {
 
   private start(b: Battle, actor: MonRef, move: string): Draft {
     const gen = this.io.gen;
-    const target = moveFx(move).tg ?? dexMove(gen, move)?.target ?? 'normal';
+    const target = targetNow(this.io.ctx(b), b.live, actor, move);
     const alive = (side: SideID) => b.live.active[side]
       .filter((s): s is number => s !== null && (b.live.mons[`${side}${s}`]?.hp ?? 1) > 0)
       .map(slot => ({side, slot}) as MonRef);

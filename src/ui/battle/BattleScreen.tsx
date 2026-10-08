@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from 'react';
 import {STAT_LABELS, type BoostID, type Gen} from '../../data/dex';
 import type {FormatData} from '../../data/format';
-import {megaFormeOf} from '../../engine/likelihood';
+import {megaFormeOf, preMegaSpecies} from '../../engine/likelihood';
 import {maxHPOf, type StateCtx} from '../../engine/state';
 import type {InferResult} from '../../engine/worker';
 import {
@@ -197,7 +197,7 @@ function Tile({gen, battle, result, ctx, ref_, selected, onTap}: {
   const set = battle.myTeam[ref_.slot];
   const species = ref_.side === 'opp'
     ? oppSpecies(battle, result?.mons, ref_.slot)
-    : (c?.mega ? megaFormeOf(gen, set) ?? set.species : set.species);
+    : (c?.mega ? megaFormeOf(gen, set) ?? set.species : preMegaSpecies(gen, set.species));
   const name = monLabel(battle, result?.mons, ref_);
   const m = ref_.side === 'opp' ? result?.mons[ref_.slot] : null;
   const fainted = (c?.hp ?? 1) <= 0;

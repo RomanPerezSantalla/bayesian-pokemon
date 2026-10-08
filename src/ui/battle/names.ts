@@ -5,7 +5,8 @@ import type {Battle, MonRef, Snapshot} from '../../engine/types';
 export function monLabel(battle: Battle, mons: (MonSummary | null)[] | undefined, ref: MonRef, live: Snapshot = battle.live) {
   if (ref.side === 'me') {
     const s = battle.myTeam[ref.slot];
-    return s ? s.nickname || s.species : '?';
+    // A Mega named in the team, not evolved (yet): by its own name ("Slowbro", not "Slowbro-Mega").
+    return s ? s.nickname || (live.mons[`me${ref.slot}`]?.mega ? s.species : s.species.replace(/-Mega(-[A-Z])?$/, '')) : '?';
   }
   return oppSpecies(battle, mons, ref.slot, live);
 }

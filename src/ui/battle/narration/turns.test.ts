@@ -1355,3 +1355,60 @@ describe('binding moves as the game writes them (6 Oct)', () => {
     expect(r.max('me0')).toBe(150 - Math.floor(max / 8));
   });
 });
+
+describe('words the reader ran together (8 Oct)', () => {
+  it('are taken apart into words the game uses: "Butit failed!", "…had its HPrestored.", a name run into "withdrew"', () => {
+    expect(events('Butit failed!')).toEqual([{kind: 'fail'}]);
+    expect(events('The opposing Salamence had its HPrestored.')).toEqual([{kind: 'residual', mon: {side: 'opp', slot: 0}, heal: true}]);
+    expect(events('Kimwithdrew Salamence!')).toEqual([expect.objectContaining({kind: 'withdraw', mon: {side: 'opp', slot: 0}})]);
+  });
+
+  it('a name never is (Moonblast, Overheat), nor a word it can\'t wholly take apart', () => {
+    expect(events('The opposing Salamence used Moonblast!')).toEqual([{kind: 'use', actor: {side: 'opp', slot: 0}, move: 'Moonblast'}]);
+    expect(events('The opposing Salamence used Overheat!')).toEqual([{kind: 'use', actor: {side: 'opp', slot: 0}, move: 'Overheat'}]);
+  });
+});
+
+describe('lines the 5 Oct games had that went unread (8 Oct)', () => {
+  it("a frozen one's move thawing it; a draw or the timer ending the battle; a stat line read a letter short", () => {
+    expect(events("The opposing Salamence's Flare Blitz melted the ice!")).toEqual([{kind: 'cure', mon: {side: 'opp', slot: 0}}]);
+    expect(events('You battled to a draw against Kim!')).toEqual([{kind: 'battleEnd'}]);
+    expect(events('Time has run out!')).toEqual([{kind: 'battleEnd'}]);
+    expect(events("The opposing Salamence's Sp. Def harshly fel!")).toEqual([{kind: 'stat', mon: {side: 'opp', slot: 0}, boosts: {spd: -2}}]);
+  });
+});
+
+describe('Expanding Force in Psychic Terrain (8 Oct)', () => {
+  it('hits both foes when its user is on the ground: the second HP read is its hit, not a reading', () => {
+    const r = rig({me: [0, 2], opp: [0, 1]}, {preview: ['Meowstic-F', 'Indeedee-F', 'Sneasler', 'Incineroar']});
+    r.read('The battlefield got weird!');
+    r.read('The opposing Meowstic used Expanding Force!', 'Charizard 100', 'Garchomp 120');
+    r.n.commit();
+    const ef = turnActions(r.b).find(a => a.move === 'Expanding Force')!;
+    expect(ef.targets).toBe(2);
+    expect(ef.hits.map(h => [h.target.slot, h.hpAfter, !!h.unread])).toEqual([[0, 100, false], [2, 120, false]]);
+  });
+});
+
+describe('a line read before it was all written (8 Oct)', () => {
+  it('a move cut short is the one move it starts, from all moves if need be', () => {
+    expect(events('The opposing Salamence used Moonbla')).toEqual([{kind: 'use', actor: {side: 'opp', slot: 0}, move: 'Moonblast'}]);
+    // Shadow… is Shadow Ball, Shadow Claw, Shadow Sneak…: none.
+    expect(events('The opposing Salamence used Shadow')).toEqual([]);
+    // A whole line ends in its mark: a name that isn't a move's start stays unmatched.
+    expect(events('The opposing Salamence used Moonbla!')).toEqual([]);
+  });
+});
+
+describe('a thaw, as the game words it (8 Oct)', () => {
+  it("is the possessor's, whatever its move's name sounds like (Matcha Gotcha had been taken for Milotic)", () => {
+    const team = parseTeam(`Milotic @ Sitrus Berry
+- Ice Beam
+
+Slowbro-Mega @ Slowbronite
+- Iron Defense`);
+    const r = rig({me: [0, 1], opp: [0, 1]}, {team, preview: ['Sinistcha', 'Indeedee-F', 'Blastoise', 'Kingambit']});
+    const evs = parseNarration("The opposing Sinistcha's Matcha Gotcha melted the ice!", {battle: r.b, gen, mons: undefined});
+    expect(evs).toEqual([{kind: 'cure', mon: {side: 'opp', slot: 0}}]);
+  });
+});

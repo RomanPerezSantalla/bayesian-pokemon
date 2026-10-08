@@ -216,6 +216,8 @@ const CHANGES: [string[], number, boolean?][] = ([
   ['was not lowered', 0], ['were not lowered', 0],
   // Misheard or misread forms.
   ['rows', 1], ['rose sharp', 2], ['harsh fell', -2], ['harshly fall', -2], ['fall', -1], ['felt', -1],
+  // Read with a letter short (5 Oct: "…'s Sp. Def harshly fel!").
+  ['harshly fel', -2], ['severely fel', -3], ['fel', -1], ['rose sharpy', 2],
   ['won t go any higher', 1, true], ['won t go any lower', -1, true], ['wont go higher', 1, true], ['wont go lower', -1, true],
 ] as [string, number, boolean?][])
   .map(([p, by, limit]) => [p.split(' '), by, limit] as [string[], number, boolean?])

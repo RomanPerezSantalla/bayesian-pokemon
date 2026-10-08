@@ -7,7 +7,7 @@
  * abilities, berries, end-of-turn residuals.
  */
 import LEGAL_ABILITIES from '../data/abilities.gen.json';
-import {toID, type BoostID, type Gen} from '../data/dex';
+import {move as dexMove, toID, type BoostID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import {makePokemon, typeEffectiveness} from './calc';
 import {megaFormeOf, mySpec} from './likelihood';
@@ -243,6 +243,20 @@ function switchInAbility(ctx: StateCtx, live: Snapshot, ref: MonRef, ability: st
   const t = TERRAIN_ABILITY[ability];
   if (t) setTerrain(ctx, live, t, ref);
   if (ability === 'Intimidate') applyIntimidate(ctx, live, ref, 1);
+}
+
+/** On the ground, for all that's known (not a Flying type, no Levitate or Air Balloon): terrain reaches it. */
+export function grounded(ctx: StateCtx, live: Snapshot, ref: MonRef): boolean {
+  return !typesOf(ctx, live, ref).includes('Flying') && knownAbility(ctx, live, ref) !== 'Levitate' && knownItem(ctx, live, ref) !== 'Air Balloon';
+}
+
+/**
+ * The targets a move goes for, as it's used now: Expanding Force hits both foes in Psychic Terrain when its user is on
+ * the ground (5 Oct: its second target's HP was taken as a reading, and the hit on it went unread).
+ */
+export function targetNow(ctx: StateCtx, live: Snapshot, actor: MonRef, move: string): string {
+  const target = moveFx(move).tg ?? dexMove(ctx.gen, move)?.target ?? 'normal';
+  return toID(move) === 'expandingforce' && live.field.terrain === 'Psychic' && grounded(ctx, live, actor) ? 'allAdjacentFoes' : target;
 }
 
 /** Its types: as a move or an ability changed them, else its species' (as a Mega once it has evolved, where that's known). */
@@ -677,9 +691,9 @@ export function applyEndTurn(ctx: StateCtx, live: Snapshot): Snapshot {
       const frac = (n: number) => (side === 'me' ? Math.floor(max / n) : 100 / n);
       let delta = 0;
       const guarded = ability === 'Magic Guard';
-      const grounded = !types.includes('Flying') && ability !== 'Levitate' && item !== 'Air Balloon';
+      const onGround = grounded(ctx, next, ref);
       if (f.weather === 'Sand' && !guarded && !types.some(t => SAND_IMMUNE_TYPES.has(t)) && !SAND_IMMUNE_ABILITIES.has(ability ?? '') && item !== 'Safety Goggles') delta -= frac(16);
-      if (f.terrain === 'Grassy' && grounded) delta += frac(16);
+      if (f.terrain === 'Grassy' && onGround) delta += frac(16);
       if (item === 'Leftovers') delta += frac(16);
       if (item === 'Black Sludge') delta += types.includes('Poison') ? frac(16) : -frac(8);
       if (!guarded && c.status === 'brn') delta -= frac(16);

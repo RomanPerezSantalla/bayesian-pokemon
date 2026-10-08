@@ -26,6 +26,11 @@ export function stateCtx(fmt: FormatData, gen: Gen, battle: Battle, mons: (MonSu
   return {
     fmt, gen, battle,
     oppAbility: (slot, mega) => {
+      // Mega Evolved: the Mega's one ability, from the forme the game named (its stone), the beliefs in or not (a Mega
+      // Staraptor's Contrary, there for its Close Combat's stat line seconds later).
+      const shown = mega ? [...battle.events].reverse().find((e): e is RevealEvent => e.kind === 'reveal' && e.what === 'forme' && !e.negate && e.mon.side === 'opp' && e.mon.slot === slot) : undefined;
+      const own = shown ? Object.values(gen.species.get(toID(shown.value))?.abilities ?? {})[0] as string | undefined : undefined;
+      if (own) return {name: own, p: 1};
       const m = mons?.[slot];
       if (mega && m) {
         // After Mega Evolving the ability is the Mega's own, known once the forme is.
