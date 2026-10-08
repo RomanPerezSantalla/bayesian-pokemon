@@ -2,8 +2,9 @@
 import {isDamagingMove, toID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import {finalSpeed, makeField, makeMove, makePokemon, runCalc} from './calc';
-import {defaultCondition, hpCandidates, hypView, megaFormeOf, mySpec, oppOrderKey, type Ctx} from './likelihood';
+import {defaultCondition, hpCandidates, hypView, megaFormeOf, mySpec, oppOrderKey, takenTimes, type Ctx} from './likelihood';
 import {DAMAGE_NOT_FROM_STATS} from './moves';
+import {powerFromHistory} from './power';
 import {WEATHER_ABILITY} from './state';
 import type {MonBelief} from './posterior';
 import {sameMon, type Battle, type MonRef, type Snapshot} from './types';
@@ -211,9 +212,11 @@ export function myMoveInto(
   const set = battle.myTeam[mySlot];
   const myCond = snap.mons[`me${mySlot}`] ?? defaultCondition(1);
   const oppCond = snap.mons[`opp${belief.slot}`] ?? defaultCondition(100);
-  const attacker = makePokemon(gen, mySpec(gen, fmt, set, myCond), myCond);
+  // Attacking, an Aegislash is in its Blade forme (Stance Change).
+  const attacker = makePokemon(gen, mySpec(gen, fmt, set, myCond), {...myCond, blade: true});
   const field = makeField(fmt.gameType, snap.field, 'me');
-  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1});
+  const bp = powerFromHistory(gen, battle, {side: 'me', slot: mySlot}, move, undefined, {side: 'opp', slot: belief.slot});
+  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1, bp});
   const {space, post} = belief;
   const memo = new Map<string, {rolls: [number, number][]; ko: number; kind: string}>();
   const kinds = new Map<string, number>();
@@ -229,7 +232,7 @@ export function myMoveInto(
       // Every true HP that reads as the % on screen is equally possible.
       const candidates = hpCandidates(oppCond.hp, v.stats[0], battle.settings, oppCond.hpEstimated || oppCond.hpUnknown);
       const d = makePokemon(gen, v.spec, oppCond, 0, candidates[Math.floor(candidates.length / 2)]);
-      const res = runCalc(gen, attacker, d, mv, field);
+      const res = runCalc(gen, attacker, d, mv, field, takenTimes(oppCond));
       const sash = v.item === 'Focus Sash' && !oppCond.itemGone;
       let k = 0;
       const rolls: [number, number][] = [];
@@ -266,7 +269,8 @@ export function oppMoveInto(
   const sash = !myCond.itemGone && set.item === 'Focus Sash' && cur === myMax;
   let sashSaves = false;
   const field = makeField(fmt.gameType, snap.field, 'opp');
-  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1});
+  const bp = powerFromHistory(gen, battle, {side: 'opp', slot: belief.slot}, move, undefined, {side: 'me', slot: mySlot});
+  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1, bp});
   const {space, post} = belief;
   const memo = new Map<string, {rolls: [number, number][]; ko: number; kind: string}>();
   const kinds = new Map<string, number>();
@@ -279,8 +283,8 @@ export function oppMoveInto(
     const key = `${space.f[h]}|${v.pre}|${v.stats.join('/')}|${v.item}|${v.ability}`;
     let m = memo.get(key);
     if (!m) {
-      const a = makePokemon(gen, v.spec, oppCond, 0, Math.max(1, Math.round((v.stats[0] * oppCond.hp) / 100)));
-      const res = runCalc(gen, a, defender, mv, field);
+      const a = makePokemon(gen, v.spec, {...oppCond, blade: true}, 0, Math.max(1, Math.round((v.stats[0] * oppCond.hp) / 100)));
+      const res = runCalc(gen, a, defender, mv, field, takenTimes(myCond));
       let k = 0;
       const rolls: [number, number][] = [];
       for (const [roll, p] of res.dist) {

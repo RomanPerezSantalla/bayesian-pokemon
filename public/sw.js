@@ -7,7 +7,7 @@
 // isolated, which wouldn't take the ones v2 kept, fetched with them).
 const CACHE = 'battle-analyzer-v3';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './data/formats.json',
-  './data/structure-doubles.json', './data/structure-singles.json', './icons/icon-192.png'];
+  './data/structure-doubles.json', './data/structure-singles.json', './data/leads-doubles.json', './icons/icon-192.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

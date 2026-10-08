@@ -1,5 +1,5 @@
 /** Abilities and items that announce themselves on screen, and what their reactions do. */
-import type {Boosts} from './types';
+import type {Boosts, Terrain} from './types';
 
 /** Always named on screen as the Pokémon comes in, so no banner rules them out. */
 export const ENTRY_ANNOUNCE = new Set([
@@ -7,9 +7,17 @@ export const ENTRY_ANNOUNCE = new Set([
   'Psychic Surge', 'Misty Surge', 'Pressure', 'Mold Breaker', 'Teravolt', 'Turboblaze', 'Unnerve', 'Air Lock',
   'Cloud Nine', 'Fairy Aura', 'Dark Aura', 'Aura Break', 'Neutralizing Gas', 'Sword of Ruin', 'Beads of Ruin',
   'Tablets of Ruin', 'Vessel of Ruin', 'Download', 'Intrepid Sword', 'Dauntless Shield', 'Slow Start', 'Comatose',
-  'As One (Glastrier)', 'As One (Spectrier)', 'Frisk', 'Forewarn',
+  'As One (Glastrier)', 'As One (Spectrier)', 'Frisk', 'Forewarn', 'Trace',
 ]);
 export const ENTRY_ITEMS = new Set(['Air Balloon']);
+
+/** The seed each terrain sets off in a holder on the field: on its way in, or as the terrain starts. */
+export const SEEDS: Record<Terrain, string> = {Electric: 'Electric Seed', Grassy: 'Grassy Seed', Psychic: 'Psychic Seed', Misty: 'Misty Seed'};
+
+/** What would have shown on its way in: Air Balloon, and the seed for the terrain then up. */
+export function entryItems(terrain?: Terrain): Set<string> {
+  return terrain ? new Set([...ENTRY_ITEMS, SEEDS[terrain]]) : ENTRY_ITEMS;
+}
 
 /** Named on screen when the Pokémon is hit by an Intimidate. */
 export const INTIMIDATE_REACT = new Set([

@@ -23,6 +23,15 @@ describe("the game's picture in a captured window", () => {
     expect(a.w / a.h).toBeCloseTo(16 / 9, 2);
   });
 
+  it('a border line of another colour along the edges (BlueStacks draws one) is chrome too', () => {
+    const navy: [number, number, number] = [33, 38, 67];
+    const px = frame(1954, 1114, navy, [[0, 33, 1920, 1081, [120, 60, 30]], [0, 0, 1954, 1, [54, 59, 88]], [1953, 0, 1, 1114, [0, 0, 0]]]);
+    const a = gameArea(px);
+    expect(a.x).toBeCloseTo(0, 0);
+    expect(Math.abs(a.y - 33)).toBeLessThan(1);
+    expect(a.w).toBeCloseTo(1920, -1);
+  });
+
   it('a region placed on it, in frame pixels', () => {
     expect(place({x: 0, y: 33, w: 1920, h: 1080}, REGIONS.message)).toEqual({x: 200, y: 812, w: 1520, h: 80});
     // Half the size: half the pixels.
@@ -50,12 +59,34 @@ describe('white text', () => {
 describe('HP boxes', () => {
   const name = (bg: [number, number, number]) => frame(250, 50, bg, [[20, 12, 120, 22, [245, 245, 245]]]);
   it('theirs pink, yours violet, grey once fainted; the scene behind is none', () => {
-    expect(boxShown(name([175, 51, 105]), 'opp')).toBe(true);
-    expect(boxShown(name([100, 98, 197]), 'me')).toBe(true);
-    expect(boxShown(name([88, 88, 95]), 'me')).toBe(true);
+    expect(boxShown(name([175, 51, 105]), 'opp')).toBe('live');
+    expect(boxShown(name([100, 98, 197]), 'me')).toBe('live');
+    expect(boxShown(name([88, 88, 95]), 'me')).toBe('fainted');
     // Violet isn't theirs, and no name in it is no box.
-    expect(boxShown(name([100, 98, 197]), 'opp')).toBe(false);
-    expect(boxShown(frame(250, 50, [175, 51, 105]), 'opp')).toBe(false);
+    expect(boxShown(name([100, 98, 197]), 'opp')).toBeNull();
+    expect(boxShown(frame(250, 50, [175, 51, 105]), 'opp')).toBeNull();
+    // The stadium in the rain, a bluish grey dotted with lights: not a fainted one's grey box.
+    expect(boxShown(name([78, 94, 102]), 'opp')).toBeNull();
+    expect(boxShown(name([65, 77, 87]), 'me')).toBeNull();
+  });
+
+  it("where the numbers are (measured on 5 Oct's frames, at 1080): all of one, none of the slash or the next box", () => {
+    const area = {x: 0, y: 0, w: 1920, h: 1080};
+    const span = (r: (typeof REGIONS.hpValue.me)[number]) => {
+      const p = place(area, r);
+      return [p.x, p.x + p.w];
+    };
+    // Yours: a three-digit number from 255 (651 in the right box) to 333 (729); the slash from 339 (735). "4 /202" read
+    // as 47 before, the slash's start taken for a 7.
+    for (const [k, [from, to, slash]] of [[255, 333, 339], [651, 729, 735]].entries()) {
+      const [a, b] = span(REGIONS.hpValue.me[k]);
+      expect(a <= from && b > to && b < slash, `yours ${k}: ${a}–${b}`).toBe(true);
+    }
+    // Theirs: "100%" from 1339 to 1434 (1735 to 1830); the right box's edge from 1464 ("100% 1" before).
+    const [a0, b0] = span(REGIONS.hpValue.opp[0]);
+    expect(a0 <= 1339 && b0 > 1434 && b0 < 1464, `theirs 0: ${a0}–${b0}`).toBe(true);
+    const [a1, b1] = span(REGIONS.hpValue.opp[1]);
+    expect(a1 <= 1735 && b1 > 1830, `theirs 1: ${a1}–${b1}`).toBe(true);
   });
 
   it('the number: theirs a %, yours the HP left of the slash (its start read as a digit dropped)', () => {
@@ -67,6 +98,9 @@ describe('HP boxes', () => {
     // A fainted one's grey "0%", read as a letter.
     expect(hpNumber('.O:', 100)).toBe(0);
     expect(hpNumber('', 100)).toBe(null);
+    expect(hpNumber('100%.', 100)).toBe(100);
+    // The scene behind read as a box: letters, or digits with no %.
+    for (const junk of ['8b1', '8R1', '0R1', '8o1', '8bE', 'N']) expect(hpNumber(junk, 100)).toBe(null);
   });
 });
 

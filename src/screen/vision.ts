@@ -25,9 +25,13 @@ export const REGIONS = {
   message: at(200, 779, 1520, 80),
   /** Ability and item pop-ups ("Raichu's" over "Electric Surge"), their text: yours from the left, theirs to the right. */
   popup: {me: at(40, 380, 580, 120), opp: at(1300, 380, 478, 120)},
-  /** HP boxes as on screen, left then right: the name, and the number (theirs %, yours the HP left of the slash). */
+  /**
+   * HP boxes as on screen, left then right: the name, and the number (theirs %, yours the HP left of the slash). The
+   * right box is 396 px on from the left one. A number ends 6 px before its slash ("4 /202": the slash's start was read
+   * as a 7, 47) and 30 px before the next box ("100% 1").
+   */
   hpName: {opp: [at(1190, 47, 250, 52), at(1594, 47, 250, 52)], me: [at(150, 927, 250, 50), at(528, 927, 250, 50)]},
-  hpValue: {opp: [at(1330, 115, 160, 58), at(1734, 115, 160, 58)], me: [at(200, 993, 157, 56), at(578, 993, 157, 56)]},
+  hpValue: {opp: [at(1330, 115, 125, 58), at(1726, 115, 125, 58)], me: [at(200, 993, 135, 56), at(596, 993, 135, 56)]},
   /** "MOVE TIME 40": moves being chosen for the next turn. */
   moveTime: at(1570, 233, 320, 48),
   /** The field's timers ("Electric Terrain 4/5"). */
@@ -62,13 +66,24 @@ export function gameArea(px: Pixels): Rect {
     for (let y = y0; y < H; y++) if (near((y * W + x) * 4, r, g, b)) n++;
     return n / (H - y0) > 0.8;
   };
-  let top = 0;
-  while (top < H / 8 && flatRow(top)) top++;
-  let right = 0;
-  while (right < W / 8 && flatCol(W - 1 - right, top)) right++;
-  let left = 0;
-  while (left < W / 8 && flatCol(left, top)) left++;
+  const top = chrome(k => flatRow(k), H / 8);
+  const right = chrome(k => flatCol(W - 1 - k, top), W / 8);
+  const left = chrome(k => flatCol(k, top), W / 8);
   return fit({x: left, y: top, w: W - left - right, h: H - top});
+}
+
+/**
+ * How many lines at an edge are chrome: a run of flat ones, after a border line or two of another colour (BlueStacks
+ * draws one along the top and the right).
+ */
+function chrome(flat: (k: number) => boolean, max: number): number {
+  for (let skip = 0; skip <= 2; skip++) {
+    if (!flat(skip)) continue;
+    let k = skip;
+    while (k < max && flat(k)) k++;
+    return k;
+  }
+  return 0;
 }
 
 /** The largest 16:9 box centred in `r`. */
@@ -82,6 +97,8 @@ function fit(r: Rect): Rect {
 const WHITE = 190;
 const DARK = 110;
 const isWhite = (d: Uint8ClampedArray, i: number) => d[i] > WHITE && d[i + 1] > WHITE && d[i + 2] > WHITE;
+/** The crits' yellow as captured: red and green alike and high, blue low (the scene's golds are redder). */
+const isYellow = (d: Uint8ClampedArray, i: number) => d[i] > WHITE && d[i + 1] > WHITE && d[i + 2] < 150 && Math.abs(d[i] - d[i + 1]) < 35;
 
 /** Which pixels of a region are the game's text (1), as a grid the region's size. */
 export interface Mask {
@@ -93,8 +110,10 @@ export interface Mask {
 /**
  * The game's text in a region: near-white pixels with something dark within `edge` pixels across or up and down (its
  * outline). Light in the scene behind mostly has no such edge, so moving scenery doesn't look like changing text.
+ * `dark`: how dark the edge must be (on a panel known to be there, its colour is enough). `yellow`: the message line's
+ * yellow too, the one colour the game writes battle text in (critical hits: 255, 255, 70).
  */
-export function textMask(px: Pixels, edge = 3): Mask {
+export function textMask(px: Pixels, edge = 3, dark = DARK, yellow = false): Mask {
   const {width: W, height: H, data: d} = px;
   const lum = new Uint8Array(W * H);
   for (let i = 0; i < W * H; i++) lum[i] = (d[i * 4] * 299 + d[i * 4 + 1] * 587 + d[i * 4 + 2] * 114) / 1000;
@@ -102,9 +121,9 @@ export function textMask(px: Pixels, edge = 3): Mask {
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const i = y * W + x;
-      if (!isWhite(d, i * 4)) continue;
+      if (!isWhite(d, i * 4) && !(yellow && isYellow(d, i * 4))) continue;
       for (let k = 1; k <= edge; k++) {
-        if ((x >= k && lum[i - k] < DARK) || (x + k < W && lum[i + k] < DARK) || (y >= k && lum[i - k * W] < DARK) || (y + k < H && lum[i + k * W] < DARK)) {
+        if ((x >= k && lum[i - k] < dark) || (x + k < W && lum[i + k] < dark) || (y >= k && lum[i - k * W] < dark) || (y + k < H && lum[i + k * W] < dark)) {
           bits[i] = 1;
           break;
         }
@@ -250,10 +269,10 @@ export function alike(a: string, b: string): number {
 }
 
 /**
- * An HP box is up: its name strip is the box's flat colour (theirs pink, yours violet; grey once it has fainted) with
- * the name in white on it, not whatever's behind.
+ * An HP box is up: its name strip is the box's flat colour (theirs pink, yours violet: 'live'; grey once it has fainted:
+ * 'fainted') with the name in white on it, not whatever's behind (null).
  */
-export function boxShown(px: Pixels, side: 'me' | 'opp'): boolean {
+export function boxShown(px: Pixels, side: 'me' | 'opp'): 'live' | 'fainted' | null {
   const d = px.data;
   let r = 0;
   let g = 0;
@@ -271,7 +290,7 @@ export function boxShown(px: Pixels, side: 'me' | 'opp'): boolean {
     n++;
   }
   // The name in white: some 5–12% of the strip (scenery behind has a few specks at most).
-  if (!n || text < 0.04 * (n + text)) return false;
+  if (!n || text < 0.04 * (n + text)) return null;
   [r, g, b] = [r / n, g / n, b / n];
   // Flat: the strip's colour varies little (the scene behind would).
   let spread = 0;
@@ -279,15 +298,24 @@ export function boxShown(px: Pixels, side: 'me' | 'opp'): boolean {
     if (d[i] > 190 && d[i + 1] > 190 && d[i + 2] > 190) continue;
     spread += Math.abs(d[i] - r) + Math.abs(d[i + 1] - g) + Math.abs(d[i + 2] - b);
   }
-  if (spread / n > 130) return false;
-  const grey = Math.abs(r - g) < 25 && Math.abs(g - b) < 25 && r > 60 && r < 140;
-  return grey || (side === 'opp' ? r > 140 && g < 90 && b > 60 && r > b : b > 140 && r < 150 && g < 140);
+  if (spread / n > 130) return null;
+  // A fainted one's grey is neutral (88,88,95); the stadium behind can be a bluish grey (78,94,102) dotted with lights.
+  if (Math.abs(r - g) < 10 && b - r < 15 && r - b < 10 && r > 60 && r < 140) return 'fainted';
+  return (side === 'opp' ? r > 140 && g < 90 && b > 60 && r > b : b > 140 && r < 150 && g < 140) ? 'live' : null;
 }
 
-/** An HP box's number as read: theirs "90%" is 90, yours (the HP left of the slash) "159" is 159. */
+/**
+ * An HP box's number as read: theirs "90%" is 90, yours (the HP left of the slash) "159" is 159. Theirs is digits and a
+ * "%" and nothing else: anything more ("8b1") is the scene behind taken for a box.
+ */
 export function hpNumber(text: string, max?: number): number | null {
   // A fainted one's "0", read as a letter: it's all there is in the box.
   if (/^[\s.:]*[oO][\s.:%/]*$/.test(text)) return 0;
+  if ((max ?? 100) <= 100) {
+    const m = /^[^A-Za-z0-9]*([0-9oO]{1,3})\s*%[^A-Za-z0-9]*$/.exec(text);
+    const v = m ? Number(m[1].replace(/[oO]/g, '0')) : NaN;
+    return v <= 100 ? v : null;
+  }
   // Otherwise digits read as such ("O" among other marks is a smudge, not 0).
   if (!/[0-9]/.test(text)) return null;
   const m = /\d+/.exec(text.replace(/(?<=\d)[oO]|[oO](?=\d)/g, '0'));

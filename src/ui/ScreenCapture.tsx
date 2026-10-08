@@ -2,6 +2,7 @@ import {useEffect, useRef, useState} from 'react';
 import {captureStream, startCapture, stopCapture, useCapture} from '../screen/capture';
 import {startReader, stopReader, useReader} from '../screen/reader';
 import {testLogOn} from '../testlog';
+import {startAutoBattles} from './autoBattle';
 
 /** Only in the copies the screen reader is being built in (development and test), until it reads the battle. */
 const offered = import.meta.env.DEV || testLogOn;
@@ -30,6 +31,8 @@ export function ScreenPanel() {
     if (c.on) startReader();
     else stopReader();
   }, [c.on]);
+  // Team preview read off the screen starts the battle (recorded frames fed in development and tests too).
+  useEffect(() => (offered ? startAutoBattles() : undefined), []);
   useEffect(() => {
     if (ref.current) ref.current.srcObject = c.on ? captureStream() : null;
   }, [c.on, folded]);

@@ -7,15 +7,18 @@
  * contradicts everything is caught upstream (posterior.ts) and set aside instead of
  * wiping out the beliefs.
  */
-import {toID, isDamagingMove, move as dexMove, type Gen} from '../data/dex';
+import {toID, isDamagingMove, move as dexMove, type BoostID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
 import type {PokemonSet} from '../data/paste';
 import {
-  finalSpeed, fractionalPriority, makeField, makeMove, makePokemon, movePriority, quickChances, runCalc,
+  asLogged, finalSpeed, fractionalPriority, makeField, makeMove, makePokemon, movePriority, quickChances, runCalc,
   type DamageOutcome, type MonSpec,
 } from './calc';
 import {DROP_REACT, DROP_REACT_ITEMS, announceLikelihood} from './abilities';
-import {CONTACT_PUNISH, DAMAGE_NOT_FROM_STATS, attackerAbilityStatusChance, moveFx, moveStatusChance} from './moves';
+import {
+  CONTACT_PUNISH, DAMAGE_NOT_FROM_STATS, RISES_BEFORE_HIT, attackerAbilityStatusChance, moveFx, moveStatusChance,
+} from './moves';
+import {powerFromHistory} from './power';
 import {NO_ITEM, type FormeSpace, type MonSpace} from './prior';
 import {
   monKey, sameMon, type ActionEvent, type Battle, type BattleSettings, type HitResult, type MonCondition,
@@ -45,6 +48,9 @@ export function condOf(snap: Snapshot, ref: MonRef, fallbackHp: number) {
   return snap.mons[monKey(ref)] ?? defaultCondition(fallbackHp);
 }
 
+/** What the damage it takes is multiplied by: twice, while it's open after its Glaive Rush. */
+export const takenTimes = (c: MonCondition) => (c.exposed !== undefined ? 2 : 1);
+
 function faintedCount(snap: Snapshot, side: SideID) {
   let n = 0;
   for (const [k, c] of Object.entries(snap.mons)) if (k.startsWith(side) && c.hp <= 0) n++;
@@ -53,11 +59,15 @@ function faintedCount(snap: Snapshot, side: SideID) {
 
 /** The Mega forme a set's stone turns it into, if any. */
 export function megaFormeOf(gen: Gen, set: PokemonSet): string | undefined {
-  if (!set.item) return undefined;
-  const megas = gen.items.get(toID(set.item))?.megaStone as Record<string, string> | undefined;
+  return set.item ? stoneForme(gen, set.species, set.item) : undefined;
+}
+
+/** The Mega forme this stone turns this species into, if it's a Mega Stone (Garchompite Z: Garchomp-Mega-Z). */
+export function stoneForme(gen: Gen, species: string, item: string): string | undefined {
+  const megas = gen.items.get(toID(item))?.megaStone as Record<string, string> | undefined;
   if (!megas) return undefined;
-  const base = gen.species.get(toID(set.species));
-  return megas[set.species] ?? (base?.baseSpecies ? megas[base.baseSpecies] : undefined) ?? Object.values(megas)[0];
+  const base = gen.species.get(toID(species));
+  return megas[species] ?? (base?.baseSpecies ? megas[base.baseSpecies] : undefined) ?? Object.values(megas)[0];
 }
 
 /** My Pokémon as a calc spec, honouring Mega Evolution. */
@@ -295,9 +305,23 @@ export function usesInARow(battle: Battle, ev: ActionEvent): number {
   return lastTurn === ev.turn - 1 ? run : 0;
 }
 
+/** The state its hits were dealt in: the one before it, with a charge's rise said during it (Electro Shot in rain). */
+export function hitState(ev: ActionEvent): Snapshot {
+  const rise = RISES_BEFORE_HIT[toID(ev.move)];
+  const key = monKey(ev.actor);
+  const c = ev.before.mons[key];
+  if (!c) return ev.before;
+  // An attack is made in Aegislash's Blade forme (Stance Change; for any other Pokémon this says nothing).
+  const blade = ev.hits.length > 0;
+  if ((!rise || !ev.actorBoosts) && (!blade || c.blade)) return ev.before;
+  const boosts = {...c.boosts};
+  if (rise && ev.actorBoosts) for (const [k, v] of Object.entries(ev.actorBoosts) as [BoostID, number][]) boosts[k] = Math.max(-6, Math.min(6, (boosts[k] ?? 0) + v));
+  return {...ev.before, mons: {...ev.before.mons, [key]: {...c, boosts, ...(blade ? {blade: true} : {})}}};
+}
+
 export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
   const {gen, fmt, battle} = ctx;
-  const snap = ev.before;
+  const snap = hitState(ev);
   const out: SlotLikelihood[] = [];
   const aura = auras(ctx, snap);
   // A move whose damage isn't down to stats (Counter, Super Fang, a one-hit KO) is no evidence about them.
@@ -330,13 +354,16 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       const set = battle.myTeam[hit.target.slot];
       if (!set) continue;
       const myCond = condOf(snap, hit.target, hit.hpBefore);
+      // Either changed in a way the app doesn't follow (Transform…): the damage says nothing of its set.
+      if (oppCond.odd || myCond.odd) continue;
       const spec = mySpec(gen, fmt, set, myCond);
       const defender = makePokemon(gen, spec, myCond, faintedCount(snap, 'me'), hit.hpBefore);
       const myMax = defender.maxHP();
       const survives = (!myCond.itemGone && set.item === 'Focus Sash') || spec.ability === 'Sturdy';
       const band = !myCond.itemGone && set.item === 'Focus Band';
-      const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome});
+      const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome, bp: powerFromHistory(gen, battle, ev.actor, ev.move, ev, hit.target)});
       const multi = (ev.hitCount ?? 1) > 1;
+      const times = takenTimes(myCond);
 
       const repr = (fi: number, item: string) => {
         const forme = space.formes[fi];
@@ -346,7 +373,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
           species: pre ? forme.preMega! : forme.species, level: fmt.level, nature: spread.nature, evs: spread.evs, item,
           ability: pre ? forme.abilities[0] : forme.megaAbility ?? forme.abilities[0],
         }, oppCond, faintedCount(snap, 'opp'));
-        return runCalc(gen, a, defender, mv, field);
+        return runCalc(gen, asLogged(a, mv), defender, mv, field);
       };
       const classes = itemClasses(space, repr, () => false);
 
@@ -361,7 +388,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         if (lik === undefined) {
           const attacker = makePokemon(gen, cls === 'n' ? {...v.spec, item: NO_ITEM} : v.spec, oppCond,
             faintedCount(snap, 'opp'), curHPFromPct(v.stats[0], oppCond.hp));
-          const res = runCalc(gen, attacker, defender, mv, field);
+          const res = runCalc(gen, asLogged(attacker, mv), defender, mv, field, times);
           lik = myHitLikelihood(res.dist, hit, myMax, survives && !multi, band);
           memo.set(key, lik);
         }
@@ -414,8 +441,11 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     const space = ctx.spaces[slot];
     if (!space || hit.unread) continue;
     const oppCond = condOf(snap, hit.target, hit.hpBefore);
-    const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome});
+    // Either changed in a way the app doesn't follow (Transform…): the damage says nothing of its set.
+    if (myCond.odd || oppCond.odd) continue;
+    const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome, bp: powerFromHistory(gen, battle, ev.actor, ev.move, ev, hit.target)});
     const multi = (ev.hitCount ?? 1) > 1;
+    const times = takenTimes(oppCond);
     const repr = (fi: number, item: string) => {
       const forme = space.formes[fi];
       const pre = !!forme.preMega && !oppCond.mega;
@@ -425,7 +455,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         species: pre ? forme.preMega! : forme.species, level: fmt.level, nature: spread.nature, evs: spread.evs, item,
         ability: pre ? forme.abilities[0] : forme.megaAbility ?? forme.abilities[0],
       }, oppCond, faintedCount(snap, 'opp'), curHPFromPct(stats[0], hit.hpBefore));
-      return runCalc(gen, attacker, d, mv, field);
+      return runCalc(gen, asLogged(attacker, mv), d, mv, field);
     };
     // Focus Sash and Focus Band change survival and Sitrus is tied to the HP threshold: none shows in the rolls.
     const classes = itemClasses(space, repr, item => item === 'Focus Sash' || item === 'Focus Band' || item === 'Sitrus Berry');
@@ -442,7 +472,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       if (!m) {
         const spec = cls === 'n' ? {...v.spec, item: NO_ITEM} : v.spec;
         const defender = makePokemon(gen, spec, oppCond, faintedCount(snap, 'opp'), curHPFromPct(v.stats[0], hit.hpBefore));
-        const res = runCalc(gen, attacker, defender, mv, field);
+        const res = runCalc(gen, asLogged(attacker, mv), defender, mv, field, times);
         const has = !oppCond.itemGone;
         const survives = !multi && ((cls === 'Focus Sash' && has) || v.ability === 'Sturdy');
         m = {

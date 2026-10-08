@@ -35,7 +35,9 @@ export function makePokemon(gen: Gen, spec: MonSpec, cond?: MonCondition, allies
   if (ability === 'Unburden') abilityOn = !!cond?.itemGone;
   else if (ability && TOGGLED.has(ability)) abilityOn = !!cond?.abilityOn;
 
-  return new Pokemon(gen, spec.species, {
+  // Stance Change: Aegislash attacks, and is hit after attacking, as Aegislash-Blade (140 Attack, 50 defences).
+  const species = cond?.blade && /^aegislash/.test(toID(spec.species)) ? 'Aegislash-Blade' : spec.species;
+  const p = new Pokemon(gen, species, {
     level: spec.level,
     nature: spec.nature,
     evs: table(spec.evs),
@@ -50,6 +52,35 @@ export function makePokemon(gen: Gen, spec: MonSpec, cond?: MonCondition, allies
     alliesFainted,
     curHP,
   } as ConstructorParameters<typeof Pokemon>[2]);
+  return cond?.types ? retyped(p, cond.types) : p;
+}
+
+/** Moves the calc gives their charge's Sp. Atk rise in the hit itself. */
+const CHARGE_RISE = new Set(['Electro Shot', 'Meteor Beam']);
+
+/**
+ * The attacker as the calc should see it for a hit the log has its stages for: Electro Shot and Meteor Beam's rise is
+ * in them already (the game said "…'s Sp. Atk rose!"), and the calc adds it again (5 Oct: every Electro Shot was
+ * taken at +2, and Archaludon's hits came out impossible).
+ */
+export function asLogged(attacker: Pokemon, move: Move): Pokemon {
+  if (!CHARGE_RISE.has(move.name)) return attacker;
+  const a = attacker.clone();
+  a.boosts.spa = (a.boosts.spa ?? 0) - (a.hasAbility('Contrary') ? -1 : 1);
+  return a;
+}
+
+/**
+ * The Pokémon with these types (Protean, Soak…), in its copies too: the calc copies it for every calculation, from its
+ * species merged over the dex's, which can't make two types one.
+ */
+function retyped(p: Pokemon, types: string[]): Pokemon {
+  const t = types as Pokemon['types'];
+  p.types = t;
+  p.species = {...p.species, types: t};
+  const copy = p.clone.bind(p);
+  p.clone = () => retyped(copy(), types);
+  return p;
 }
 
 export function makeField(
@@ -81,14 +112,18 @@ export function makeField(
   } as ConstructorParameters<typeof Field>[0]);
 }
 
-export function makeMove(gen: Gen, name: string, opts: {crit?: boolean; hits?: number; targets?: number; metronome?: number} = {}) {
-  const overrides = isSpreadMove(gen, name) && (opts.targets ?? 2) < 2 ? {target: 'normal'} : undefined;
+/** `bp`: its base power as the battle so far makes it (see power.ts), where the calc's is its own. */
+export function makeMove(gen: Gen, name: string, opts: {crit?: boolean; hits?: number; targets?: number; metronome?: number; bp?: number} = {}) {
+  const overrides = {
+    ...(isSpreadMove(gen, name) && (opts.targets ?? 2) < 2 ? {target: 'normal'} : {}),
+    ...(opts.bp ? {basePower: opts.bp} : {}),
+  };
   return new Move(gen, name, {
     isCrit: opts.crit,
     hits: opts.hits,
     // Uses of it just before, in a row: a Metronome holder hits harder each time.
     timesUsedWithMetronome: opts.metronome,
-    overrides: overrides as never,
+    overrides: (Object.keys(overrides).length ? overrides : undefined) as never,
   });
 }
 
@@ -117,10 +152,24 @@ export interface DamageOutcome {
   maxHP: number;
 }
 
-export function runCalc(gen: Gen, attacker: Pokemon, defender: Pokemon, move: Move, field: Field): DamageOutcome {
+/**
+ * `times`: what the damage is multiplied by on top (2 on one open after its Glaive Rush). The game chains it with the
+ * hit's other final modifiers before it rounds, so the product can be a point either side.
+ */
+export function runCalc(gen: Gen, attacker: Pokemon, defender: Pokemon, move: Move, field: Field, times = 1): DamageOutcome {
   const res = calculate(gen, attacker, defender, move, field);
+  let dist = damageDistribution(res.damage);
+  if (times !== 1) {
+    const scaled = new Map<number, number>();
+    const add = (d: number, p: number) => scaled.set(d, (scaled.get(d) ?? 0) + p);
+    for (const [d, p] of dist) {
+      if (d <= 0) add(d, p);
+      else for (const [k, q] of [[-1, 0.25], [0, 0.5], [1, 0.25]]) add(d * times + k, p * q);
+    }
+    dist = scaled;
+  }
   return {
-    dist: damageDistribution(res.damage),
+    dist,
     moveType: res.move.type,
     effectiveness: landedEffectiveness(gen, res),
     maxHP: defender.maxHP(),

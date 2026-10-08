@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {getGen, spriteUrls} from './dex';
+import {getGen, spriteUrls, writtenName} from './dex';
 
 describe('spriteUrls', () => {
   const gen = getGen(0);
@@ -17,5 +17,13 @@ describe('spriteUrls', () => {
   it("falls back to the regular forme's sprite, for a Mega Showdown hasn't drawn yet", () => {
     expect(files('Raichu-Mega-X')).toEqual(['raichu-megax.png', 'raichu.png']);
     expect(files('Malamar-Mega')).toEqual(['malamar-mega.png', 'malamar.png']);
+  });
+});
+
+describe('a species as the game writes it', () => {
+  const gen = getGen(0);
+  it('without its forme, a Mega by its species, a hyphen of its own kept', () => {
+    expect(['Floette-Eternal', 'Floette-Mega', 'Arcanine-Hisui', 'Garchomp-Mega-Z', 'Basculegion-F', 'Ninetales', 'Kommo-o', 'Porygon-Z']
+      .map(n => writtenName(gen, n))).toEqual(['Floette', 'Floette', 'Arcanine', 'Garchomp', 'Basculegion', 'Ninetales', 'Kommo-o', 'Porygon-Z']);
   });
 });

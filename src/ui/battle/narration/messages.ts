@@ -126,6 +126,7 @@ const LASTS: Partial<Record<string, number>> = {tailwind: 4, reflect: 5, lightSc
 
 /** Make the field say so. A weather that carries on without being tracked has an unknown number of turns left. */
 export function applyNews(f: FieldCondition, n: FieldNews) {
+  const changes = !fieldAgrees(f, n);
   const turns = {...(f.turns ?? {})};
   switch (n.what) {
     case 'weather':
@@ -160,6 +161,18 @@ export function applyNews(f: FieldCondition, n: FieldNews) {
     }
   }
   f.turns = turns;
+  // Over, or begun without who set it known: nothing known stretches it now.
+  const key = newsKey(n);
+  if (changes && key && f.mayLast?.[key]) {
+    const {[key]: _, ...rest} = f.mayLast;
+    f.mayLast = rest;
+  }
+}
+
+/** The key of a condition's timer (FieldCondition.turns), for the ones that have one. */
+export function newsKey(n: FieldNews): string | undefined {
+  if (n.what === 'weather' || n.what === 'terrain' || n.what === 'trickRoom' || n.what === 'magicRoom' || n.what === 'wonderRoom' || n.what === 'gravity') return n.what;
+  return 'side' in n && n.side && n.what !== 'spikes' && n.what !== 'toxicSpikes' ? `${n.side}.${n.what}` : undefined;
 }
 
 // --- stat changes ------------------------------------------------------------------

@@ -8,7 +8,7 @@
  * builds are never assigned zero probability.
  */
 import {
-  computeStats, evBudget, evCap, isStatusMove, species as dexSpecies, toID, usesStatPoints, type Gen,
+  alignmentFit, computeStats, evBudget, evCap, isStatusMove, species as dexSpecies, toID, usesStatPoints, type Gen,
 } from '../data/dex';
 import type {FormatData, SpeciesStats} from '../data/format';
 import LEGAL_ABILITIES from '../data/abilities.gen.json';
@@ -66,6 +66,8 @@ export interface SpaceExtras {
   items: string[];
   abilities: string[];
   moves: string[];
+  /** Formes it was shown in: one the format's data doesn't list (a new Mega) is there all the same. */
+  formes?: string[];
 }
 
 const TAIL_SAMPLES = 96;
@@ -155,7 +157,6 @@ function sampleTail(gen: Gen, sd: SpeciesStats, seed: string, count: number): Sp
   const out: Spread[] = [];
   for (let tries = 0; out.length < count && tries < count * 30; tries++) {
     if (!natT || statT.some(t => !t)) break;
-    const nature = sd.natures[sampleIndex(natW, natT, rng())][0];
     const evs = sd.statMarginals.map((m, i) => Math.min(cap, m[sampleIndex(statW[i], statT[i], rng())][0]));
     let left = budget - evs.reduce((a, b) => a + b, 0);
     if (left < 0) continue;
@@ -167,6 +168,10 @@ function sampleTail(gen: Gen, sd: SpeciesStats, seed: string, count: number): Sp
       evs[i] += add;
       left -= add;
     }
+    // Its alignment as the in-game shares say, as far as it fits the spread (no Jolly with no Speed).
+    const fitW = natW.map((p, k) => p * alignmentFit(gen, sd.natures[k][0], evs));
+    const fitT = fitW.reduce((x, y) => x + y, 0);
+    const nature = sd.natures[fitT > 0 ? sampleIndex(fitW, fitT, rng()) : sampleIndex(natW, natT, rng())][0];
     out.push({nature, evs});
   }
   return out;
@@ -216,6 +221,15 @@ function formePriors(fmt: FormatData, formes: string[]): number[] {
   const w = formes.map(f => fmt.species[f]?.weight ?? 1);
   const total = w.reduce((a, b) => a + b, 0) || 1;
   return w.map(x => x / total);
+}
+
+/** The Mega Stone that makes this Mega forme (Garchomp-Mega-Z: Garchompite Z). */
+function stoneOf(gen: Gen, forme: string): string | undefined {
+  for (const it of gen.items) {
+    const megas = (it as {megaStone?: Record<string, string>}).megaStone;
+    if (megas && Object.values(megas).includes(forme)) return it.name;
+  }
+  return undefined;
 }
 
 /** How likely a Pokémon (by preview name, over its formes) is to set the terrain a seed needs. */
@@ -279,7 +293,8 @@ export function buildMonSpace(
   const hit = spaceCache.get(key);
   if (hit) return hit;
 
-  const formeNames = fmt.preview[preview] ?? [preview];
+  const listed = fmt.preview[preview] ?? [preview];
+  const formeNames = [...listed, ...(extras.formes ?? []).filter(f => !listed.includes(f) && dexSpecies(gen, f))];
   const priors = formePriors(fmt, formeNames);
   const formes: FormeSpace[] = [];
 
@@ -290,7 +305,9 @@ export function buildMonSpace(
     const isMega = /-Mega/.test(dex.name) && !!dex.baseSpecies;
     const preMega = isMega ? dex.baseSpecies : undefined;
 
-    const rawItems = sd ? sd.items.slice(0, MAX_ITEMS) : formatItemPrior(fmt, gen);
+    // A Mega the data doesn't list holds its own stone.
+    const stone = isMega && !sd ? stoneOf(gen, dex.name) : undefined;
+    const rawItems: [string, number][] = sd ? sd.items.slice(0, MAX_ITEMS) : stone ? [[stone, 1]] : formatItemPrior(fmt, gen);
     let itemList: [string, number][] = rawItems.slice();
     if (!isMega) {
       const other = sd ? sd.itemsOther : 0.1;

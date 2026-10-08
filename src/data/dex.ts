@@ -78,6 +78,20 @@ export function natureMods(gen: Gen, nature: string): [StatID | undefined, StatI
 }
 
 /** Final (unboosted) stats for a species with a nature and EVs / Stat Points. */
+/** How plausible an alignment (nature) is for a spread of stat points when nobody told us. */
+export function alignmentFit(gen: Gen, nature: string, sp: number[]) {
+  const [up, down] = natureMods(gen, nature);
+  if (!up || !down) return 0.3;
+  const u = STAT_IDS.indexOf(up);
+  const d = STAT_IDS.indexOf(down);
+  let c = 1;
+  if (sp[d] >= 12) c *= 0.03;
+  if (sp[u] >= 12) c *= 4;
+  // Raising a stat with nothing in it, Speed too (a Jolly with no Speed is as odd as an Impish with no Defense).
+  else if (sp[u] === 0) c *= 0.3;
+  return c;
+}
+
 export function computeStats(
   gen: Gen,
   speciesName: string,
@@ -109,6 +123,22 @@ export const allSpecies = (gen: Gen) => sortedNames(gen, 'species');
 export const allMoves = (gen: Gen) => sortedNames(gen, 'moves');
 export const allItems = (gen: Gen) => sortedNames(gen, 'items');
 export const allAbilities = (gen: Gen) => sortedNames(gen, 'abilities');
+
+/** Names with a hyphen of their own, not a forme's. */
+const HYPHENATED = new Set(['hooh', 'porygonz', 'jangmoo', 'hakamoo', 'kommoo', 'chiyu', 'tinglu', 'chienpao', 'wochien']);
+
+/**
+ * What Champions' text and screens call a species: without its forme ("Floette" for Floette-Eternal, which the calc
+ * lists without a base species; "Arcanine" for Arcanine-Hisui; "Garchomp" for Garchomp-Mega-Z), Porygon-Z and the
+ * like whole.
+ */
+export function writtenName(gen: Gen, name: string): string {
+  const sp = gen.species.get(toID(name));
+  if (sp?.baseSpecies && sp.baseSpecies !== sp.name) return writtenName(gen, sp.baseSpecies);
+  const full = sp?.name ?? name;
+  const dash = full.indexOf('-');
+  return dash > 0 && !HYPHENATED.has(toID(full)) ? full.slice(0, dash) : full;
+}
 
 export const NATURES = [
   'Adamant', 'Bashful', 'Bold', 'Brave', 'Calm', 'Careful', 'Docile', 'Gentle', 'Hardy', 'Hasty', 'Impish', 'Jolly',

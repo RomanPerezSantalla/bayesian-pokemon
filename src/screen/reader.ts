@@ -41,6 +41,10 @@ const recent: {at: number; items: Reading[]}[] = [];
 type Listener = (items: Reading[], at: number) => void;
 const listeners = new Set<Listener>();
 
+/** When team preview was last read (a frame's time): what's read before it is another battle's. */
+let previewAt: number | undefined;
+export const lastPreviewAt = () => previewAt;
+
 /** Readings from now on; `since`: also those kept from that time on. */
 export function onReadings(fn: Listener, since?: number): () => void {
   if (since !== undefined) for (const r of recent) if (r.at >= since) fn(r.items, r.at);
@@ -51,18 +55,29 @@ export function onReadings(fn: Listener, since?: number): () => void {
 }
 
 let worker: Worker | null = null;
+/** The worker has loaded its recogniser (it stays loaded when capturing stops). */
+let ready = false;
 let busy = false;
 let unhook: (() => void) | null = null;
 
 /** Start reading the captured frames (the recogniser loads the first time: about 22 MB with its runtime). */
 export function startReader() {
   if (unhook) return;
+  // A worker that broke: a new one.
+  if (worker && state.status === 'error') {
+    worker.terminate();
+    worker = null;
+    ready = false;
+  }
   if (!worker) {
     set({status: 'loading', error: undefined});
     worker = new Worker(new URL('./ocrWorker.ts', import.meta.url), {type: 'module'});
     worker.onmessage = (e: MessageEvent<OcrOut>) => received(e.data);
     worker.onerror = e => set({status: 'error', error: e.message || 'the reader stopped'});
     send({type: 'load', base: document.baseURI});
+  } else if (ready) {
+    // Loaded the last time capturing started: reading again straight away.
+    set({status: 'reading'});
   }
   unhook = onCaptureTick(video => {
     if (busy || state.status !== 'reading' || video.readyState < 2) return;
@@ -108,7 +123,7 @@ async function feedFrames(urls: string[], from = Date.now()) {
   set({status: 'off'});
 }
 
-if (import.meta.env.DEV || testLogOn) (window as unknown as {__screenFeed?: typeof feedFrames}).__screenFeed = feedFrames;
+if ((import.meta.env.DEV || testLogOn) && typeof window !== 'undefined') (window as unknown as {__screenFeed?: typeof feedFrames}).__screenFeed = feedFrames;
 
 function received(m: OcrOut) {
   if (m.type === 'read' || m.type === 'error') {
@@ -117,6 +132,7 @@ function received(m: OcrOut) {
     done?.();
   }
   if (m.type === 'ready') {
+    ready = true;
     testLog('screen-reader', {loaded: m.ms});
     set({status: unhook ? 'reading' : 'off'});
     return;
@@ -134,6 +150,7 @@ function received(m: OcrOut) {
   testLog('screen-read', {t: m.t, items: m.items, ms: m.ms});
   const last = m.items.map(describe).join(' · ');
   set({last});
+  if (m.items.some(r => r.kind === 'preview')) previewAt = m.t;
   recent.push({at: m.t, items: m.items});
   while (recent.length && recent[0].at < m.t - KEEP_MS) recent.shift();
   for (const fn of listeners) fn(m.items, m.t);
@@ -145,5 +162,10 @@ export function describe(r: Reading): string {
     case 'popup': return `${r.side === 'opp' ? 'their ' : ''}${r.text}`;
     case 'hp': return `${r.name || '?'} ${r.value ?? r.raw}${r.side === 'opp' ? '%' : ''}`;
     case 'command': return `choosing moves${r.field ? ` (${r.field})` : ''}`;
+    case 'preview': {
+      const theirs = r.theirs.map(g => (g[0] ? `${g[0].name}${g[0].shiny ? '*' : ''}` : '?')).join(', ');
+      const mine = r.picks ? `; picked ${r.picks.map(p => p ?? '-').join(' ')}` : r.names ? `; yours ${r.names.join(', ')}` : '';
+      return `team preview (${r.screen}): ${theirs}${mine}`;
+    }
   }
 }

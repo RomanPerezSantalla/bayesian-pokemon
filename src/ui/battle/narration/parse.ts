@@ -5,7 +5,7 @@
  * "Kim sent out Kingambit!", and the pop-ups: "Salamence's Intimidate"), plus HP where it's known
  * ("Charizard 45": yours in HP, theirs in %). Anything it can't place is skipped.
  */
-import {allAbilities, allItems, allMoves, move as dexMove, toID, type BoostID, type Gen} from '../../../data/dex';
+import {allAbilities, allItems, allMoves, move as dexMove, toID, writtenName, type BoostID, type Gen} from '../../../data/dex';
 import {megaFormeOf} from '../../../engine/likelihood';
 import {moveFx} from '../../../engine/moves';
 import type {MonSummary} from '../../../engine/worker';
@@ -44,8 +44,17 @@ export type NarrationEvent =
   | {kind: 'field'; news: FieldNews}
   /** End-of-turn damage or healing (sandstorm, burn, poison, Leftovers…): the turn's moves are over. */
   | {kind: 'residual'; mon?: MonRef; sand?: boolean; heal?: boolean}
+  /**
+   * Held by a binding move, seeded, salt cured: "…has been afflicted with an infestation by…!", "…was seeded!", "…is
+   * being salt cured!" (the move being told reached it).
+   */
+  | {kind: 'trapped'; mon?: MonRef}
+  /** "…was freed from Infestation!": the binding move let go, at the end of a turn. */
+  | {kind: 'freed'; mon?: MonRef}
   /** "…must do an encore!" */
   | {kind: 'encored'; mon?: MonRef}
+  /** A two-turn move's charge: "…absorbed electricity!" (Electro Shot), "…flew up high!" (Fly)… */
+  | {kind: 'charge'; mon?: MonRef; move: string}
   /** "The battle has ended due to a forfeit.", "You lost to …!", "You defeated …!" */
   | {kind: 'battleEnd'}
   /** "…lost some of its HP!": Life Orb recoil. */
@@ -61,7 +70,32 @@ export type NarrationEvent =
   | {kind: 'dragged'; mon: MonRef}
   | {kind: 'endTurn'}
   /** "Rillaboom moved first", "… outsped Dragapult": where its move goes in the turn (before or after `other`). */
-  | {kind: 'order'; mon: MonRef; place: 'first' | 'last'; other?: MonRef};
+  | {kind: 'order'; mon: MonRef; place: 'first' | 'last'; other?: MonRef}
+  /**
+   * Its stat stages became `from`'s (Psych Up: "Milotic copied Baxcalibur's stat changes!", the one copied never called
+   * "the opposing"), or `invert`ed (Topsy-Turvy: "All stat changes on … were inverted!").
+   */
+  | {kind: 'copyBoosts'; mon: MonRef; from: MonRef; invert?: boolean}
+  /**
+   * Its move this turn comes where something else put it, not where its Speed does: After You ("…took the kind
+   * offer!"), Quash ("…'s move was postponed!"), Instruct ("…followed …'s instructions!": `again`, its move once more).
+   */
+  | {kind: 'outOfTurn'; mon: MonRef; again?: boolean}
+  /**
+   * Its types changed: to `to` (Protean, Libero, Soak: "…transformed into the Water type!"; Reflect Type: `like`, "…became
+   * the same type as …!"), with `add` (Trick-or-Treat, Forest's Curse: "Ghost type was added to …!"), without `lose`
+   * (Burn Up: "…burned itself out!", Double Shock: "…used up all its electricity!"), or back to its own (`back`).
+   */
+  | {kind: 'types'; mon: MonRef; to?: string; like?: MonRef; add?: string; lose?: string; back?: boolean}
+  /**
+   * Changed in a way the app doesn't follow (Transform, Imposter, Power Trick, a swap or split of stats with a target it
+   * can't tell…): what it deals and takes, and when it moves, say nothing of its set until it leaves the field.
+   */
+  | {kind: 'odd'; mon: MonRef}
+  /** Ally Switch: "Charizard and Incineroar switched places!" */
+  | {kind: 'places'; side: SideID}
+  /** Its HP box is up in that place (read off the screen, not the text): it's out there. */
+  | {kind: 'onField'; mon: MonRef; position: number};
 
 export interface ParseEnv {
   battle: Battle;
@@ -71,9 +105,10 @@ export interface ParseEnv {
 
 type Phrase = 'crit' | 'faint' | 'miss' | 'missAfter' | 'shield' | 'immune' | 'immuneAfter' | 'recoil' | 'status' | 'sendOut'
   | 'lead' | 'go' | 'withdraw' | 'withdrawAfter' | 'mega' | 'endTurn' | 'first' | 'last' | 'effective' | 'fail' | 'hits' | 'cant'
-  | 'cure' | 'encored' | 'battleEnd' | 'residual' | 'knockOff' | 'steal' | 'itemGone' | 'seen' | 'whiteHerb' | 'popped' | 'obtained' | 'dragged' | 'reacting'
+  | 'cure' | 'encored' | 'charge' | 'battleEnd' | 'residual' | 'knockOff' | 'steal' | 'itemGone' | 'seen' | 'whiteHerb' | 'popped' | 'obtained' | 'dragged' | 'reacting'
   | 'substitute' | 'blewAway' | 'quickDraw' | 'maxAttack' | 'unaffected' | 'unaffectedBy' | 'targetsItem' | 'skip' | 'skipMove'
-  | 'skipCount';
+  | 'skipCount' | 'copied' | 'offer' | 'postponed' | 'followed' | 'transformedInto' | 'typeAdded' | 'sameType' | 'burnedOut'
+  | 'noElectricity' | 'typeBack' | 'inverted' | 'oddChange' | 'places' | 'trapped' | 'freed';
 
 /**
  * Pokémon Champions' battle lines (its own English text: see messages.ts) after norm(), longest
@@ -102,12 +137,17 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['cannot be frozen solid', 'unaffected'], ['is already poisoned', 'unaffected'], ['is already burned', 'unaffected'],
   ['is already paralyzed', 'unaffected'], ['is already asleep', 'unaffected'], ['stays awake', 'unaffected'],
   ['stays wide awake', 'unaffected'], ['stayed awake', 'unaffected'], ['is not affected by', 'unaffectedBy'],
-  // Lines that only look like something: Burn Up, Magnet Rise, Electrify, Safeguard ending, Perish Song, Fairy Lock, Forewarn.
-  ['burned itself out', 'skip'], ['levitated with electromagnetism', 'skip'], ['electromagnetism wore off', 'skip'],
+  // Lines that only look like something: Magnet Rise, Electrify, Safeguard ending, Perish Song, Fairy Lock, Forewarn.
+  ['levitated with electromagnetism', 'skip'], ['electromagnetism wore off', 'skip'],
   ['moves have been electrified', 'skip'], ['no longer protected', 'skip'], ['will faint in three turns', 'skip'],
   ['during the next turn', 'skip'], ['one of the moves', 'skip'], ['already has a substitute', 'skip'], ['stockpiled', 'skipCount'],
   // Encore taking hold (its move is logged from "…used Encore!"), and the battle over.
   ['must do an encore', 'encored'], ['has ended due to', 'battleEnd'], ['you lost to', 'battleEnd'], ['you defeated', 'battleEnd'],
+  // A two-turn move's charge, and which move it is.
+  ['absorbed electricity', 'charge', 'Electro Shot'], ['overflowing with space power', 'charge', 'Meteor Beam'],
+  ['absorbed light', 'charge', 'Solar Beam'], ['burrowed its way under the ground', 'charge', 'Dig'], ['flew up high', 'charge', 'Fly'],
+  ['hid underwater', 'charge', 'Dive'], ['vanished instantly', 'charge', 'Phantom Force'], ['sprang up', 'charge', 'Bounce'],
+  ['became cloaked in a harsh light', 'charge', 'Sky Attack'],
   ['won the battle', 'battleEnd'],
   ['but it failed', 'fail'], ['it failed', 'fail'], ['does not have enough hp', 'fail'], ['but nothing happened', 'fail'],
   ['pokemon was hit', 'hits'], ['was hit', 'hits'],
@@ -123,6 +163,11 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['cannot use', 'cant'], ['couldnt move', 'cant'], ['cant move', 'cant'], ['cannot move', 'cant'],
   ['woke up', 'cure'], ['woke it up', 'cure'], ['snap fully awake', 'cure'], ['thawed out', 'cure'], ['defrosted it', 'cure'],
   ['was cured of', 'cure'], ['cured its', 'cure'], ['burn was cured', 'cure'], ['status returned to normal', 'cure'],
+  // Binding moves, Leech Seed, Salt Cure taking hold; a binding move letting go.
+  ['has been afflicted with an infestation', 'trapped'], ['became trapped in the fiery vortex', 'trapped'],
+  ['became trapped in the vortex', 'trapped'], ['became trapped by the quicksand', 'trapped'], ['was wrapped by', 'trapped'],
+  ['was squeezed by', 'trapped'], ['got trapped by a snap trap', 'trapped'], ['was seeded', 'trapped'],
+  ['is being salt cured', 'trapped'], ['was freed from', 'freed'],
   // The end of the turn.
   ['buffeted by the sandstorm', 'residual', 'sand'], ['hurt by its burn', 'residual'], ['hurt by its poisoning', 'residual'],
   ['sapped by leech seed', 'residual'], ['is hurt by', 'residual'], ['afflicted by the curse', 'residual'],
@@ -142,6 +187,17 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['blew away', 'blewAway'], ['quick draw made', 'quickDraw'], ['maxed its attack', 'maxAttack'],
   // "…took the Future Sight attack!", "…took the attack!" (Lightning Rod): no move used.
   ['took the', 'skipMove'],
+  // Stat stages copied (Psych Up) or inverted (Topsy-Turvy).
+  ['copied', 'copied'], ['were inverted', 'inverted'],
+  // A move made out of its Speed's turn: After You, Quash, Instruct.
+  ['took the kind offer', 'offer'], ['move was postponed', 'postponed'], ['followed', 'followed'], ['switched places', 'places'],
+  // Types changed: Protean, Libero, Soak ("…transformed into the Water type!"), Trick-or-Treat, Reflect Type, Burn Up,
+  // Double Shock. Transform and Imposter ("…transformed into Incineroar!") and the rest the app doesn't follow: odd.
+  ['transformed into', 'transformedInto'], ['type was added to', 'typeAdded'], ['became the same type as', 'sameType'],
+  ['burned itself out', 'burnedOut'], ['used up all its electricity', 'noElectricity'], ['returned to its original type', 'typeBack'],
+  ['transformed', 'oddChange'], ['switched its attack and defense', 'oddChange'], ['switched all changes to its', 'oddChange'],
+  ['switched speed with its target', 'oddChange'], ['shared its power with the target', 'oddChange'],
+  ['shared its guard with the target', 'oddChange'], ['underwent a heroic transformation', 'oddChange'],
   // Switching. "…, come back!" and "… withdrew …!" are the switches chosen for a turn, made before its moves.
   ['sent out', 'sendOut'], ['send out', 'sendOut'], ['sends out', 'sendOut'], ['brought out', 'sendOut'], ['brings out', 'sendOut'],
   // Said rather than read: "opponent sent Rillaboom and Corviknight", "I lead with Dragapult".
@@ -197,6 +253,9 @@ const MEGA_GEAR = new Set(['ring', 'bracelet', 'stone', 'band', 'key']);
 const HAZARDS: [string[], SideNews][] = [
   [['stealth', 'rock'], 'stealthRock'], [['toxic', 'spikes'], 'toxicSpikes'], [['sticky', 'web'], 'stickyWeb'], [['spikes'], 'spikes'],
 ];
+/** The types, by the word for them ("…transformed into the Water type!"). */
+const TYPES = new Map(['Normal', 'Fire', 'Water', 'Electric', 'Grass', 'Ice', 'Fighting', 'Poison', 'Ground', 'Flying', 'Psychic', 'Bug',
+  'Rock', 'Ghost', 'Dragon', 'Dark', 'Steel', 'Fairy'].map(t => [t.toLowerCase(), t]));
 /** "Wide Guard protected the opposing team!" */
 const TEAM_WORDS = new Set(['team', 'teams', 'side']);
 const TARGET_WORDS = new Set(['on', 'at', 'into', 'against']);
@@ -242,6 +301,7 @@ function monNames(env: ParseEnv, side: SideID): (Named<string> & {said: string})
       add(slot, set.species);
       add(slot, set.nickname);
       add(slot, env.gen.species.get(toID(set.species))?.baseSpecies);
+      add(slot, writtenName(env.gen, set.species));
       const mega = megaFormeOf(env.gen, set);
       if (mega) add(slot, spokenName(mega));
     });
@@ -249,6 +309,8 @@ function monNames(env: ParseEnv, side: SideID): (Named<string> & {said: string})
     env.battle.oppPreview.forEach((species, slot) => {
       add(slot, species);
       add(slot, env.gen.species.get(toID(species))?.baseSpecies);
+      // As the game writes it: "Floette" for Floette-Eternal (no base species in the calc's data).
+      add(slot, writtenName(env.gen, species));
       for (const f of env.mons?.[slot]?.formes ?? []) if (f.p > 0 && /-Mega/.test(f.name)) add(slot, spokenName(f.name));
     });
   }
@@ -284,7 +346,12 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
     room[side] = live.active[side].filter(s => s === null || (live.mons[`${side}${s}`]?.hp ?? 1) <= 0).length;
   }
   const benched = (ref: MonRef) => !live.active[ref.side].includes(ref.slot) && (live.mons[`${ref.side}${ref.slot}`]?.hp ?? 1) > 0;
-  const nameAt = (at: number, side: SideID) => matchAt(words, at, names[side], 0.6, 0.12, NAMES);
+  const nameAt = (at: number, side: SideID) => {
+    const m = matchAt(words, at, names[side], 0.6, 0.12, NAMES);
+    // A name doesn't run over the words of a line ("c.c. withdrew Avalugg!" read as one long Avalugg).
+    for (let k = at + 1; m && k < at + m.len; k++) if (phraseAt(words, k) || USED.has(words[k])) return null;
+    return m;
+  };
   const same = (a: MonRef, b: MonRef) => a.side === b.side && a.slot === b.slot;
   /** A Pokémon was named: the lines after are about it. */
   const named = (ref: MonRef, end: number) => {
@@ -358,7 +425,10 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
     const own = ref.side === 'me' ? [env.battle.myTeam[ref.slot]?.item]
       : (env.mons?.[ref.slot]?.items ?? []).filter(x => x.p > 0).map(x => x.name);
     const cands = own.filter((x): x is string => !!x).map(x => ({key: squash(x), value: x}));
-    return matchAt(words, i, cands, 0.75, 0.06) ?? matchAt(words, i, every(env.gen, 'items'), 0.8, 0.04);
+    const likely = matchAt(words, i, cands, 0.75, 0.06);
+    const any = matchAt(words, i, every(env.gen, 'items'), 0.8, 0.04);
+    // One spelled out in full beats a likely one it starts with: "Garchompite Z", not Garchompite and a stray "z".
+    return any && likely && any.len > likely.len && spelled(i, any) ? any : likely ?? any;
   };
   /**
    * "The opposing Salamence's Intimidate", "Rillaboom's Sitrus Berry": its ability or item, whichever
@@ -503,6 +573,19 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
         case 'encored':
           out.push({kind: 'encored', mon: last});
           break;
+        case 'trapped':
+          out.push({kind: 'trapped', mon: last});
+          // "…by Toxapex!", "…by the opposing Arbok!": the binder, the one telling its move.
+          i = words.length;
+          break;
+        case 'freed':
+          out.push({kind: 'freed', mon: last});
+          // "…from Infestation!"
+          i = words.length;
+          break;
+        case 'charge':
+          out.push({kind: 'charge', mon: last, move: ph.extra!});
+          break;
         case 'battleEnd':
           out.push({kind: 'battleEnd'});
           i = words.length;
@@ -613,6 +696,84 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
           break;
         case 'skip':
           break;
+        case 'copied': {
+          // Psych Up: "Milotic copied Baxcalibur's stat changes!" (the one copied is never "the opposing": either side's).
+          // Role Play ("…copied Incineroar's Intimidate Ability!") reads on: the ability is the other one's.
+          const from = nextMon(i, 3);
+          const k = from ? from.at + from.len : -1;
+          if (last && from && !same(from.ref, last) && words[k] === 'stat' && words[k + 1] === 'changes') {
+            out.push({kind: 'copyBoosts', mon: last, from: from.ref});
+            i = k + 2;
+          }
+          break;
+        }
+        case 'inverted':
+          // Topsy-Turvy: "All stat changes on the opposing Salamence were inverted!"
+          if (last) out.push({kind: 'copyBoosts', mon: last, from: last, invert: true});
+          break;
+        case 'offer':
+        case 'postponed':
+          // After You ("…took the kind offer!"), Quash ("…'s move was postponed!").
+          if (last) out.push({kind: 'outOfTurn', mon: last});
+          break;
+        case 'followed': {
+          // Instruct: "Charizard followed Incineroar's instructions!"
+          const by = nextMon(i, 3);
+          if (last && by && words[by.at + by.len] === 'instructions') {
+            out.push({kind: 'outOfTurn', mon: last, again: true});
+            i = by.at + by.len + 1;
+          }
+          break;
+        }
+        case 'transformedInto': {
+          // "…transformed into the Water type!" (Protean, Libero, Soak); "…transformed into Incineroar!" (Transform, Imposter).
+          const j = words[i] === 'the' ? i + 1 : i;
+          const type = TYPES.get(words[j] ?? '');
+          const into = type && words[j + 1] === 'type' ? null : nextMon(i, 4);
+          if (last && type && !into) {
+            out.push({kind: 'types', mon: last, to: type});
+            i = j + 2;
+          } else if (last && into) {
+            out.push({kind: 'odd', mon: last});
+            i = into.at + into.len;
+          }
+          break;
+        }
+        case 'typeAdded': {
+          // "Ghost type was added to the opposing Salamence!": the type before, the Pokémon after.
+          const type = TYPES.get(words[start - 1] ?? '');
+          const m = nextMon(i, 4);
+          if (type && m) {
+            out.push({kind: 'types', mon: m.ref, add: type});
+            named(m.ref, m.at + m.len);
+          }
+          break;
+        }
+        case 'sameType': {
+          // Reflect Type: "Charizard became the same type as the opposing Salamence!"
+          const like = nextMon(i, 4);
+          if (last && like && !same(like.ref, last)) {
+            out.push({kind: 'types', mon: last, like: like.ref});
+            i = like.at + like.len;
+          }
+          break;
+        }
+        case 'burnedOut':
+          if (last) out.push({kind: 'types', mon: last, lose: 'Fire'});
+          break;
+        case 'noElectricity':
+          if (last) out.push({kind: 'types', mon: last, lose: 'Electric'});
+          break;
+        case 'typeBack':
+          if (last) out.push({kind: 'types', mon: last, back: true});
+          break;
+        case 'oddChange':
+          if (last) out.push({kind: 'odd', mon: last});
+          break;
+        case 'places':
+          // Ally Switch: the two of the side just named.
+          if (last) out.push({kind: 'places', side: last.side});
+          break;
         case 'skipCount': {
           // "…stockpiled 2!": a count, not HP.
           const n = numberAt(words, i);
@@ -640,8 +801,10 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
         case 'withdraw':
         case 'withdrawAfter': {
           // "Salamence, come back!", "Garchomp went back to Roman!" are about the one just named;
-          // "The opposing trainer withdrew Salamence!", "Come back, Salamence!" name it after.
-          const m = ph.kind === 'withdraw' && afterName ? null : nextMon(i, 3);
+          // "The opposing trainer withdrew Salamence!", "Come back, Salamence!" name it after. "… withdrew" is
+          // only ever said of theirs (yours are told "…, come back!"), so of a species both sides have, theirs.
+          const theirs = ph.kind === 'withdrawAfter' ? nextOnSide(i, 3, ctx === 'me' ? 'me' : 'opp') : null;
+          const m = ph.kind === 'withdraw' && afterName ? null : theirs ?? nextMon(i, 3);
           if (m) named(m.ref, m.at + m.len);
           const gone = m?.ref ?? last;
           if (gone && live.active[gone.side].includes(gone.slot)) room[gone.side]++;

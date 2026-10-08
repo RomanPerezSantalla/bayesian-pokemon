@@ -14,7 +14,7 @@
  * differ from the base species' (it lists them pooled: a Mega X and a Mega Y fight differently),
  * the share each teammate rank stands for, and species the in-game data doesn't list.
  */
-import {getGen, natureMods, toID, STAT_IDS, type Gen} from './dex';
+import {alignmentFit, getGen, toID, STAT_IDS, type Gen} from './dex';
 import type {Dist, FormatData, FormatInfo, SpeciesStats} from './format';
 import type {OfficialEntry, OfficialSnapshot} from './official';
 
@@ -41,17 +41,25 @@ const norm = (list: Dist): Dist => {
   return list.map(([n, p]) => [n, p / t]);
 };
 
-/** How plausible an alignment is for a spread when nobody told us. */
-function alignmentFit(gen: Gen, nature: string, sp: number[]) {
-  const [up, down] = natureMods(gen, nature);
-  if (!up || !down) return 0.3;
-  const u = STAT_IDS.indexOf(up);
-  const d = STAT_IDS.indexOf(down);
-  let c = 1;
-  if (sp[d] >= 12) c *= 0.03;
-  if (sp[u] >= 12) c *= 4;
-  else if (up !== 'spe' && sp[u] === 0) c *= 0.3;
-  return c;
+/**
+ * Each spread's alignments, balanced so that over all the spreads each comes out at its in-game share, as far as the
+ * spreads it fits allow (iterative proportional fitting, from the fit-weighted shares). The in-game data lists the two
+ * apart: the same Jolly-or-Adamant split for every spread would leave Jollies on spreads with no Speed and too few
+ * on the ones with it (Sneasler: 54% Jolly in-game, 30% so).
+ */
+function balanceAlignments(rows: {p: number; pairs: [string, number][]}[], natures: Dist) {
+  const total = rows.reduce((s, r) => s + r.p, 0);
+  if (!natures.length || rows.length < 2 || total <= 0) return;
+  const target = new Map(natures);
+  for (let round = 0; round < 60; round++) {
+    const got = new Map<string, number>();
+    for (const r of rows) for (const [n, q] of r.pairs) got.set(n, (got.get(n) ?? 0) + r.p * q);
+    for (const r of rows) {
+      const scaled = r.pairs.map(([n, q]) => [n, q * ((target.get(n) ?? 0) * total) / (got.get(n) || 1)] as [string, number]);
+      const sum = scaled.reduce((s, [, q]) => s + q, 0);
+      if (sum > 0) r.pairs = scaled.map(([n, q]) => [n, q / sum]);
+    }
+  }
 }
 
 function formesOf(gen: Gen, name: string, items: Dist): {base: string; megas: [string, string, number][]} {
@@ -147,14 +155,16 @@ function fuseEntry(
     });
     const spreads: [string, number[], number][] = [];
     let covered = 0;
+    const rows: {sp: number[]; p: number; pairs: [string, number][]}[] = [];
     for (const [sp, p0] of officialSpreads) {
       const p = p0 * spreadLift(spKey(sp));
       covered += p;
-      // Its alignment: the in-game alignment shares, as far as they make sense for this spread.
-      const pairs = norm((natures.length ? natures : [['Hardy', 1]] as Dist).map(([n, q]) => [n, (q + 0.001) * alignmentFit(gen, n, sp)] as [string, number]))
-        .filter(([, q]) => q >= 0.02);
-      for (const [n, q] of norm(pairs)) spreads.push([n, sp, p * q]);
+      // Its alignment: the in-game alignment shares, as far as they make sense for this spread…
+      rows.push({sp, p, pairs: norm((natures.length ? natures : [['Hardy', 1]] as Dist).map(([n, q]) => [n, (q + 0.001) * alignmentFit(gen, n, sp)] as [string, number]))});
     }
+    // …and so that over all of them each alignment has its in-game share.
+    balanceAlignments(rows, natures);
+    for (const {sp, p, pairs} of rows) for (const [n, q] of norm(pairs.filter(([, q]) => q >= 0.02))) spreads.push([n, sp, p * q]);
     // Rescale so the head keeps the official share of the whole distribution.
     const headShare = officialSpreads.reduce((s, [, p]) => s + p, 0);
     const scale = covered > 0 ? headShare / covered : 1;

@@ -10,8 +10,8 @@ import type {FormatInfo} from '../data/format';
 import {fuse, type Structure} from '../data/fuse';
 import {parseTeam} from '../data/paste';
 import {createBattle, emptyField, uid} from './battle';
-import {makeField, makeMove, makePokemon, runCalc} from './calc';
-import {applyAction, applySwitch, type StateCtx} from './state';
+import {asLogged, makeField, makeMove, makePokemon, runCalc} from './calc';
+import {applyAction, applyEndTurn, applySwitch, maxHPOf, type StateCtx} from './state';
 import type {ActionEvent, Battle, HitResult, MonRef} from './types';
 
 const gen = getGen(0);
@@ -178,5 +178,108 @@ describe('items taken', () => {
     expect(knocked.mons.opp0.itemGone).toBe(true);
     const onMine = applyAction(ctx, b.live, act(b, opp(0), 'Knock Off', [hit(me(2), b.live.mons.me2.hp, 100)]));
     expect(onMine.mons.me2.itemGone).toBe(false);
+  });
+});
+
+describe("a charge's Sp. Atk rise, counted once (5 Oct)", () => {
+  it("Electro Shot and Meteor Beam: the calc adds the rise itself; a hit logged at +1 is taken at +1, not +2", () => {
+    const spec = {species: 'Archaludon', level: 50, nature: 'Modest', evs: [0, 0, 0, 32, 0, 0]};
+    const defender = makePokemon(gen, {species: 'Grimmsnarl', level: 50, nature: 'Careful', evs: [32, 0, 0, 0, 0, 0]});
+    const field = makeField('doubles', {...emptyField(), weather: 'Rain'}, 'opp');
+    const max = (spa: number, move: string, logged: boolean) => {
+      const a = makePokemon(gen, spec, {hp: 100, boosts: {spa}, status: '', mega: false, abilityOn: false, itemGone: false});
+      const mv = makeMove(gen, move, {targets: 1});
+      return Math.max(...runCalc(gen, logged ? asLogged(a, mv) : a, defender, mv, field).dist.keys());
+    };
+    // Its rise said and logged (+1): as the calc has a +0 attacker charging in the hit.
+    expect(max(1, 'Electro Shot', true)).toBe(max(0, 'Electro Shot', false));
+    expect(max(1, 'Meteor Beam', true)).toBe(max(0, 'Meteor Beam', false));
+    // Other moves are as they are.
+    expect(max(1, 'Flash Cannon', true)).toBe(max(1, 'Flash Cannon', false));
+  });
+});
+
+describe('Stance Change in the calc (5 Oct)', () => {
+  it('Aegislash in its Blade forme hits with, and takes hits on, the Blade forme\'s stats', () => {
+    const spec = {species: 'Aegislash-Shield', level: 50, nature: 'Adamant', evs: [0, 32, 0, 0, 0, 0]};
+    const cond = {hp: 100, boosts: {}, status: '' as const, mega: false, abilityOn: false, itemGone: false};
+    expect(makePokemon(gen, spec, cond).rawStats.atk).toBeLessThan(makePokemon(gen, spec, {...cond, blade: true}).rawStats.atk);
+    expect(makePokemon(gen, spec, {...cond, blade: true}).species.name).toBe('Aegislash-Blade');
+    // Anyone else: as it is.
+    expect(makePokemon(gen, {...spec, species: 'Garchomp'}, {...cond, blade: true}).species.name).toBe('Garchomp');
+  });
+});
+
+describe('Contrary and Simple (6 Oct)', () => {
+  it("a known Contrary turns its own stat changes round, and others': Mega Staraptor's Close Combat raises its defences", () => {
+    const {b, ctx: base} = rig(['Staraptor', 'Clefable', 'Glimmora', 'Kingambit']);
+    const ctx: StateCtx = {...base, oppAbility: (slot, mega) => (slot === 0 && mega ? {name: 'Contrary', p: 1} : undefined)};
+    b.live.mons.opp0 = {...b.live.mons.opp0, mega: true};
+    let live = applyAction(ctx, b.live, act(b, opp(0), 'Close Combat', [hit(me(1), 200, 100)]));
+    expect(live.mons.opp0.boosts).toEqual({def: 1, spd: 1});
+    // Snarl's sure Sp. Atk drop raises it.
+    b.live = live;
+    live = applyAction(ctx, b.live, act(b, me(1), 'Snarl', [hit(opp(0), 100, 90)]));
+    expect(live.mons.opp0.boosts).toEqual({def: 1, spd: 1, spa: 1});
+    // Not yet Mega Evolved (its ability not Contrary): as the move has it.
+    const {b: b2, ctx: ctx2} = rig(['Staraptor', 'Clefable', 'Glimmora', 'Kingambit']);
+    expect(applyAction({...ctx2, oppAbility: ctx.oppAbility}, b2.live, act(b2, opp(0), 'Close Combat', [hit(me(1), 200, 100)])).mons.opp0.boosts)
+      .toEqual({def: -1, spd: -1});
+  });
+
+  it('Simple doubles them; a stat change the game said is taken as said', () => {
+    const {b, ctx: base} = rig();
+    const ctx: StateCtx = {...base, oppAbility: slot => (slot === 3 ? {name: 'Simple', p: 1} : undefined)};
+    expect(applyAction(ctx, b.live, act(b, opp(3), 'Swords Dance')).mons.opp3.boosts).toEqual({atk: 4});
+    // Electro Shot's rise, as logged from the game's line: not doubled again.
+    expect(applyAction(ctx, b.live, act(b, opp(3), 'Electro Shot', [], {actorBoosts: {spa: 2}, charged: true})).mons.opp3.boosts.spa).toBe(2);
+  });
+});
+
+describe('what hurts at the end of each turn until it leaves (6 Oct)', () => {
+  it("a binding move holds what it hit: 1/8 a turn while its binder stays in, 5 times at most, and its binder's leaving frees it", () => {
+    const {b, ctx} = rig();
+    let live = applyAction(ctx, b.live, act(b, opp(0), 'Sand Tomb', [hit(me(1), 200, 190)]));
+    expect(live.mons.me1.bound).toEqual({move: 'Sand Tomb', by: opp(0), ticks: 0});
+    const max = maxHPOf(ctx, live, me(1));
+    live = applyEndTurn(ctx, live);
+    expect(live.mons.me1.hp).toBe(190 - Math.floor(max / 8));
+    expect(live.mons.me1.bound?.ticks).toBe(1);
+    // Garchomp switched out: free, and not hurt again.
+    const freed = applySwitch(ctx, live, 'opp', 0, 1);
+    expect(freed.mons.me1.bound).toBeUndefined();
+    expect(applyEndTurn(ctx, freed).mons.me1.hp).toBe(live.mons.me1.hp);
+    // Held on: hurt 5 times in all, then let go unhurt (the game's "…was freed" may come a turn sooner).
+    for (let k = 0; k < 4; k++) live = applyEndTurn(ctx, live);
+    expect(live.mons.me1.bound?.ticks).toBe(5);
+    const hp = live.mons.me1.hp;
+    live = applyEndTurn(ctx, live);
+    expect(live.mons.me1.bound).toBeUndefined();
+    expect(live.mons.me1.hp).toBe(hp);
+  });
+
+  it("theirs, an estimate: Whirlpool's 12.5% a turn; Leech Seed (not on a Grass type) and Salt Cure (1/4 on a Steel type) until they leave", () => {
+    const {b, ctx} = rig(['Rillaboom', 'Clefable', 'Glimmora', 'Kingambit']);
+    let live = applyAction(ctx, b.live, act(b, me(3), 'Whirlpool', [hit(opp(3), 100, 90)]));
+    live = applyAction(ctx, live, act(b, me(1), 'Leech Seed', [], {targetRefs: [opp(0)]}));
+    expect(live.mons.opp0.seeded).toBeUndefined();
+    live = applyAction(ctx, live, act(b, me(1), 'Salt Cure', [hit(opp(3), 90, 85)]));
+    live = applyEndTurn(ctx, live);
+    // 85 − 12.5 (Whirlpool) − 25 (Salt Cure, Kingambit being Steel).
+    expect(live.mons.opp3.hp).toBe(48);
+    expect(live.mons.opp3.hpEstimated).toBe(true);
+    const back = applySwitch(ctx, live, 'opp', 1, 2);
+    expect(back.mons.opp3.salted).toBeUndefined();
+    expect(back.mons.opp3.bound).toBeUndefined();
+  });
+
+  it('Rapid Spin frees its user of what held and seeded it', () => {
+    const {b, ctx} = rig();
+    let live = applyAction(ctx, b.live, act(b, opp(0), 'Fire Spin', [hit(me(1), 200, 190)]));
+    live = {...live, mons: {...live.mons, me1: {...live.mons.me1, seeded: true}}};
+    b.live = live;
+    live = applyAction(ctx, live, act(b, me(1), 'Rapid Spin', [hit(opp(0), 100, 95)]));
+    expect(live.mons.me1.bound).toBeUndefined();
+    expect(live.mons.me1.seeded).toBeUndefined();
   });
 });

@@ -236,7 +236,9 @@ function expected(name: string, targets: MonRef[]) {
   const on: Boosts = {};
   const selfTarget = ['self', 'adjacentAllyOrSelf', 'allies'].includes(d.target);
   if (status && d.boosts) add(selfTarget ? self : on, d.boosts);
-  if (d.self?.boosts) add(self, d.self.boosts);
+  // Champions' own changes, where the calc has them: its Make It Rain lowers Sp. Atk by 2, not 1.
+  const champions = gen.moves.get(id)?.self?.boosts;
+  if (champions ?? d.self?.boosts) add(self, champions ?? d.self!.boosts);
   let st: Status | undefined = status ? (d.status as Status | undefined) : undefined;
   for (const s of d.secondaries ?? []) {
     if ((s.chance ?? 100) < 100) continue;

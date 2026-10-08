@@ -13,9 +13,12 @@ import {fuse, type Structure} from '../../../data/fuse';
 import {parseTeam} from '../../../data/paste';
 import {createBattle} from '../../../engine/battle';
 import {computeBeliefs} from '../../../engine/posterior';
-import type {Battle, SideID} from '../../../engine/types';
+import type {ActionEvent, Battle, SideID} from '../../../engine/types';
 import type {MonSummary} from '../../../engine/worker';
+import {hitState} from '../../../engine/likelihood';
+import {maxHPOf} from '../../../engine/state';
 import {turnActions, undo} from '../actions';
+import {readingEvents} from '../ScreenFeed';
 import {Narrator, type NarratorIO} from './narrator';
 import {parseNarration} from './parse';
 
@@ -64,7 +67,7 @@ Adamant Nature
 const THEIRS = ['Salamence', 'Kingambit', 'Rillaboom', 'Clefable'];
 
 /** A battle driven only by what's read out. */
-function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEIRS, team = TEAM} = {}) {
+function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEIRS, team = TEAM, beliefs = true} = {}) {
   let b = createBattle(fmt, team, preview, 'turns');
   b.live.active = active;
   let cache: {n: number; mons: MonSummary[]} | null = null;
@@ -73,6 +76,8 @@ function rig(active: Battle['live']['active'], {fmt = doublesFmt, preview = THEI
     gen,
     battle: () => b,
     mons: () => {
+      // The beliefs not in yet (worked out off the main thread, they can lag a line or two behind).
+      if (!beliefs) return undefined;
       if (!cache || cache.n !== b.events.length) cache = {n: b.events.length, mons: computeBeliefs(fmt, b).mons as unknown as MonSummary[]};
       return cache.mons;
     },
@@ -819,5 +824,534 @@ describe('the game\'s text as read off the screen (2 Oct)', () => {
   it("a ribbon's title after the name isn't another Pokémon", () => {
     const kinds = events('Kim sent out Salamence the Alola Champion and Kingambit!', {me: [null, null], opp: [null, null]});
     expect(kinds).toEqual([{kind: 'sendOut', mon: {side: 'opp', slot: 0}}, {kind: 'sendOut', mon: {side: 'opp', slot: 1}}]);
+  });
+});
+
+describe('the game\'s text, live (3 Oct)', () => {
+  const LIVE = parseTeam(`Espathra @ Electric Seed
+Ability: Speed Boost
+EVs: 28 HP / 11 Def / 2 SpD / 25 Spe
+Bold Nature
+- Lumina Crash
+- Calm Mind
+- Baton Pass
+- Protect
+
+Raichu @ Raichunite X
+Ability: Lightning Rod
+EVs: 24 HP / 10 SpA / 32 Spe
+Timid Nature
+- Fake Out
+- Rising Voltage
+- Light Screen
+- Reflect
+
+Pelipper @ Focus Sash
+Ability: Drizzle
+EVs: 32 HP / 32 SpA / 2 Spe
+Modest Nature
+- Hurricane
+- Weather Ball
+- Tailwind
+- Wide Guard
+
+Archaludon @ Leftovers
+Ability: Stamina
+EVs: 29 HP / 1 Def / 5 SpA / 20 SpD / 11 Spe
+Modest Nature
+- Electro Shot
+- Flash Cannon
+- Dragon Pulse
+- Protect`);
+  const PREVIEW = ['Rillaboom', 'Arcanine-Hisui', 'Gholdengo', 'Salamence'];
+
+  it('Baton Pass: the one sent in takes its stat stages', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {team: LIVE, preview: PREVIEW});
+    r.read('Espathra used Calm Mind!', "Espathra's Sp. Atk and Sp. Def rose!");
+    r.n.commit();
+    // Speed Boost, at the end of the turn.
+    r.read("Espathra's Speed rose!");
+    r.n.feed([{kind: 'endTurn'}]);
+    r.read('Espathra used Baton Pass!', 'Go! Archaludon!');
+    expect(r.b.live.active.me).toEqual([3, 1]);
+    expect(r.boosts('me3')).toEqual({spa: 1, spd: 1, spe: 1});
+    expect(r.boosts('me0')).toEqual({});
+  });
+
+  it("Electro Shot in the rain: its Sp. Atk rise is part of it (its damage taken with it), and counted once", () => {
+    const r = rig({me: [3, 2], opp: [2, 0]}, {team: LIVE, preview: PREVIEW});
+    r.b.live.field.weather = 'Rain';
+    r.read('Archaludon used Electro Shot!', 'Archaludon absorbed electricity!', "Archaludon's Sp. Atk rose!");
+    r.n.feed([{kind: 'hp', mon: {side: 'opp', slot: 2}, value: 0}]);
+    r.read('The opposing Gholdengo fainted!');
+    r.n.commit();
+    const shot = turnActions(r.b).find(a => a.move === 'Electro Shot')!;
+    expect(shot.actorBoosts).toEqual({spa: 1});
+    expect(shot.hits.map(h => h.fainted)).toEqual([true]);
+    expect(r.boosts('me3')).toEqual({spa: 1});
+    // The hit was dealt at +1, the state before the move at +0.
+    expect(hitState(shot).mons.me3.boosts).toEqual({spa: 1});
+    expect(shot.before.mons.me3.boosts).toEqual({});
+  });
+
+  it("Electro Shot into a Protect in the rain: the charge's rise is had all the same, the hit isn't", () => {
+    const r = rig({me: [3, 2], opp: [2, 0]}, {team: LIVE, preview: PREVIEW});
+    r.b.live.field.weather = 'Rain';
+    r.read('The opposing Gholdengo used Protect!', 'Archaludon used Electro Shot!', 'Archaludon absorbed electricity!',
+      "Archaludon's Sp. Atk rose!", 'The opposing Gholdengo protected itself!');
+    r.n.commit();
+    const shot = turnActions(r.b).find(a => a.move === 'Electro Shot')!;
+    expect([shot.hits, shot.charged]).toEqual([[], undefined]);
+    expect(r.boosts('me3')).toEqual({spa: 1});
+  });
+
+  it("Electro Shot in the rain, its \"…'s Sp. Atk rose!\" unread: the charge comes with its rise all the same (5 Oct)", () => {
+    const r = rig({me: [3, 2], opp: [2, 0]}, {team: LIVE, preview: PREVIEW});
+    r.b.live.field.weather = 'Rain';
+    r.read('Archaludon used Electro Shot!', 'Archaludon absorbed electricity!');
+    r.n.feed([{kind: 'hp', mon: {side: 'opp', slot: 2}, value: 40}]);
+    r.n.commit();
+    const shot = turnActions(r.b).find(a => a.move === 'Electro Shot')!;
+    expect([shot.actorBoosts, hitState(shot).mons.me3.boosts, r.boosts('me3')]).toEqual([{spa: 1}, {spa: 1}, {spa: 1}]);
+  });
+
+    it('Electro Shot out of the rain: the charge is its turn (its rise with it), the attack its next', () => {
+    const r = rig({me: [3, 2], opp: [2, 0]}, {team: LIVE, preview: PREVIEW});
+    r.read('Archaludon used Electro Shot!', 'Archaludon absorbed electricity!', "Archaludon's Sp. Atk rose!",
+      'The opposing Gholdengo used Shadow Ball on Archaludon!', 'Archaludon 150');
+    r.n.feed([{kind: 'endTurn'}]);
+    r.read('Archaludon used Electro Shot on the opposing Gholdengo!', 'The opposing Gholdengo 40');
+    r.n.commit();
+    const [charge, attack] = r.b.events.filter((e): e is ActionEvent => e.kind === 'action' && e.move === 'Electro Shot');
+    expect([charge.turn, charge.charged, charge.hits]).toEqual([1, true, []]);
+    expect([attack.turn, attack.charged, attack.actorBoosts, attack.hits.map(h => h.hpAfter)]).toEqual([2, undefined, undefined, [40]]);
+    expect(r.boosts('me3')).toEqual({spa: 1});
+  });
+
+  it('a charge with no "…used" line, the attack straight after (singles: nothing to choose in between): two turns', () => {
+    const r = rig({me: [3, 2], opp: [2, 0]}, {team: LIVE, preview: PREVIEW});
+    r.read('Archaludon absorbed electricity!', "Archaludon's Sp. Atk rose!", 'Archaludon used Electro Shot on the opposing Gholdengo!',
+      'The opposing Gholdengo 40');
+    r.n.commit();
+    const shots = r.b.events.filter((e): e is ActionEvent => e.kind === 'action' && e.move === 'Electro Shot');
+    expect(shots.map(s => [s.turn, !!s.charged, s.hits.length])).toEqual([[1, true, 0], [2, false, 1]]);
+    expect(r.boosts('me3')).toEqual({spa: 1});
+  });
+
+  it('Life Orb said twice (the pop-up, then "…lost some of its HP!"): one recoil', () => {
+    const r = rig({me: [3, 1], opp: [2, 0]}, {team: LIVE, preview: PREVIEW});
+    r.read('The opposing Gholdengo used Shadow Ball on Archaludon!', 'Archaludon 134', "The opposing Gholdengo's Life Orb",
+      'The opposing Gholdengo lost some of its HP!');
+    r.n.commit();
+    expect(turnActions(r.b).find(a => a.move === 'Shadow Ball')?.actorTriggers).toEqual(['lifeorb']);
+  });
+});
+
+describe('the game\'s text, live (5 Oct)', () => {
+  const MINE = parseTeam(`Araquanid @ Leftovers
+Ability: Water Bubble
+EVs: 32 HP / 32 Def / 2 SpD
+Relaxed Nature
+- Liquidation
+- Stockpile
+- Infestation
+- Protect
+
+Grimmsnarl @ Light Clay
+Ability: Prankster
+EVs: 32 HP / 16 Def / 18 SpD
+Careful Nature
+- Spirit Break
+- Reflect
+- Light Screen
+- Taunt
+
+Milotic @ Sitrus Berry
+Ability: Competitive
+EVs: 32 HP / 16 Def / 18 SpD
+Calm Nature
+- Scald
+- Ice Beam
+- Psych Up
+- Recover
+
+Gholdengo @ Life Orb
+Ability: Good as Gold
+EVs: 32 HP / 32 SpA / 2 Spe
+Modest Nature
+- Make It Rain
+- Shadow Ball
+- Nasty Plot
+- Protect`);
+  const THEIRS5 = ['Gholdengo', 'Baxcalibur', 'Arcanine-Hisui', 'Greninja', 'Oranguru', 'Rillaboom'];
+  const live = (active: Battle['live']['active']) => rig(active, {team: MINE, preview: THEIRS5});
+
+  it("Make It Rain: Sp. Atk down 2 a time (\"harshly fell\"), as Champions has it (Scarlet and Violet's was 1)", () => {
+    const r = live({me: [1, 0], opp: [0, 2]});
+    r.read('The opposing Gholdengo used Make It Rain!', 'Grimmsnarl 41', 'Araquanid 120', "The opposing Gholdengo's Life Orb",
+      'The opposing Gholdengo lost some of its HP!', "The opposing Gholdengo's Sp. Atk harshly fell!");
+    r.n.feed([{kind: 'endTurn'}]);
+    expect(r.boosts('opp0')).toEqual({spa: -2});
+    r.read('The opposing Gholdengo used Make It Rain!', 'Grimmsnarl 0', 'Grimmsnarl fainted!', 'Araquanid 70',
+      "The opposing Gholdengo's Sp. Atk harshly fell!");
+    r.n.commit();
+    expect(r.boosts('opp0')).toEqual({spa: -4});
+  });
+
+  it('how far a stat went is as the game says, whatever the move does as the app has it', () => {
+    // A Simple Pokémon's drops are doubled: Snarl's 1 read as 2, the other's as 1.
+    const r = rig({me: [0, 1], opp: [0, 1]});
+    r.read('Incineroar used Snarl!', "The opposing Salamence's Sp. Atk harshly fell!", "The opposing Kingambit's Sp. Atk fell!");
+    r.n.commit();
+    expect([r.boosts('opp0'), r.boosts('opp1')]).toEqual([{spa: -2}, {spa: -1}]);
+    // Said once what made it is logged (a switch-in's Intimidate): the same.
+    const s = rig({me: [null, null], opp: [0, 1]});
+    s.read('Go! Charizard and Incineroar!', "Incineroar's Intimidate", "The opposing Salamence's Attack harshly fell!",
+      "The opposing Kingambit's Attack fell!");
+    expect([s.boosts('opp0'), s.boosts('opp1')]).toEqual([{atk: -2}, {atk: -1}]);
+  });
+
+  it("Psych Up: its stat stages become the other's, an ally's or a foe's (the game names it with no \"opposing\")", () => {
+    const r = live({me: [0, 2], opp: [1, 0]});
+    r.read('Araquanid used Stockpile!', 'Araquanid stockpiled 1!', "Araquanid's Defense and Sp. Def rose!");
+    r.read('Milotic used Psych Up!', "Milotic copied Araquanid's stat changes!");
+    r.n.commit();
+    expect(r.boosts('me2')).toEqual({def: 1, spd: 1});
+    r.read('The opposing Baxcalibur used Dragon Dance!', "The opposing Baxcalibur's Attack and Speed rose!");
+    r.read('Milotic used Psych Up!', "Milotic copied Baxcalibur's stat changes!");
+    r.n.commit();
+    expect(r.boosts('me2')).toEqual({atk: 1, spe: 1});
+  });
+
+  it('Glaive Rush: its user takes double damage until it moves again', () => {
+    const r = live({me: [0, 2], opp: [1, 0]});
+    r.read('The opposing Baxcalibur used Glaive Rush on Araquanid!', 'Araquanid 80');
+    r.read('Milotic used Scald on the opposing Baxcalibur!', 'The opposing Baxcalibur 40');
+    r.n.commit();
+    expect(r.b.live.mons.opp1.exposed).toBe(1);
+    const scald = turnActions(r.b).find(a => a.move === 'Scald')!;
+    expect(scald.before.mons.opp1.exposed).toBe(1);
+    // Its next move closes it.
+    r.n.feed([{kind: 'endTurn'}]);
+    r.read('The opposing Baxcalibur used Protect!');
+    r.n.commit();
+    expect(r.b.live.mons.opp1.exposed).toBeUndefined();
+  });
+
+  it('types the game says changed (Protean, Burn Up…): kept until it leaves the field', () => {
+    const r = live({me: [0, 2], opp: [3, 0]});
+    r.read("The opposing Greninja's Protean", 'The opposing Greninja transformed into the Ice type!');
+    expect(r.b.live.mons.opp3.types).toEqual(['Ice']);
+    r.read('The opposing Greninja, come back!', 'Kim sent out Rillaboom!');
+    expect(r.b.live.mons.opp3.types).toBeUndefined();
+  });
+
+  it('nothing shown as one came in (no Intimidate): answered by the moves being chosen, not asked', () => {
+    const r = live({me: [null, null], opp: [null, null]});
+    r.read('Kim sent out Arcanine and Rillaboom!', 'Go! Grimmsnarl and Araquanid!', "Rillaboom's Grassy Surge",
+      'Grass grew to cover the battlefield!');
+    r.n.feed([{kind: 'endTurn'}]);
+    const checks = r.b.events.filter(e => e.kind === 'check');
+    const arcanine = checks.find(c => c.kind === 'check' && c.mon.slot === 2);
+    expect(arcanine && arcanine.kind === 'check' && arcanine.seen).toBe(null);
+    // Rillaboom showed its Grassy Surge: that's its answer, not "nothing"; the terrain it set showed no Grassy Seed of its
+    // own.
+    expect(checks.filter(c => c.kind === 'check' && c.mon.slot === 5).map(c => c.kind === 'check' && [c.context, c.seen]))
+      .toEqual([['entry', 'Grassy Surge'], ['terrain', null]]);
+  });
+
+  it('a seed for the terrain up as one came in, or as the terrain started, would have gone off: none shown, none held', () => {
+    const r = live({me: [null, null], opp: [null, null]});
+    r.read('Kim sent out Rillaboom and Arcanine!', 'Go! Grimmsnarl and Araquanid!', "Rillaboom's Grassy Surge",
+      'Grass grew to cover the battlefield!');
+    r.n.feed([{kind: 'endTurn'}]);
+    const arcanine = r.b.events.find(e => e.kind === 'check' && e.mon.slot === 2);
+    expect(arcanine && arcanine.kind === 'check' && [arcanine.seen, arcanine.terrain]).toEqual([null, 'Grassy']);
+    // Shown: it's held, and gone once used.
+    const s = live({me: [null, null], opp: [null, null]});
+    s.read('Kim sent out Rillaboom and Arcanine!', 'Go! Grimmsnarl and Araquanid!', "Rillaboom's Grassy Surge",
+      'Grass grew to cover the battlefield!', "The opposing Arcanine's Grassy Seed", "The opposing Arcanine's Defense rose!");
+    s.n.feed([{kind: 'endTurn'}]);
+    const seed = s.b.events.find(e => e.kind === 'check' && e.mon.slot === 2);
+    expect(seed && seed.kind === 'check' && seed.seen).toBe('Grassy Seed');
+    expect([s.b.live.mons.opp2.itemGone, s.boosts('opp2')]).toEqual([true, {def: 1}]);
+    // Out before the terrain started: its moment is the terrain's.
+    const t = live({me: [null, null], opp: [null, null]});
+    t.read('Kim sent out Arcanine and Gholdengo!', 'Go! Grimmsnarl and Araquanid!');
+    t.n.feed([{kind: 'endTurn'}]);
+    t.read('Kim withdrew Gholdengo!', 'Kim sent out Rillaboom!', "Rillaboom's Grassy Surge", 'Grass grew to cover the battlefield!');
+    t.n.feed([{kind: 'endTurn'}]);
+    const terrain = t.b.events.filter(e => e.kind === 'check' && e.mon.slot === 2).map(e => e.kind === 'check' && [e.context, e.seen]);
+    expect(terrain).toEqual([['entry', null], ['terrain', null]]);
+  });
+
+  it('After You, Quash: that move says nothing of its Speed', () => {
+    const r = live({me: [0, 2], opp: [4, 1]});
+    r.read('The opposing Oranguru used After You on the opposing Baxcalibur!', 'The opposing Baxcalibur took the kind offer!',
+      'The opposing Baxcalibur used Glaive Rush on Araquanid!', 'Araquanid 60');
+    r.n.commit();
+    const acts = turnActions(r.b);
+    expect(acts.map(a => [a.move, a.ordered])).toEqual([['After You', true], ['Glaive Rush', false]]);
+  });
+
+  it('Instruct: the move made again is the same turn, and says nothing of its Speed', () => {
+    const r = live({me: [0, 2], opp: [4, 1]});
+    r.read('The opposing Baxcalibur used Glaive Rush on Araquanid!', 'Araquanid 100', 'The opposing Oranguru used Instruct!',
+      "The opposing Baxcalibur followed the opposing Oranguru's instructions!", 'The opposing Baxcalibur used Glaive Rush on Araquanid!',
+      'Araquanid 30');
+    r.n.commit();
+    const acts = turnActions(r.b);
+    expect(acts.map(a => [a.turn, a.move, a.ordered])).toEqual([[1, 'Glaive Rush', true], [1, 'Instruct', true], [1, 'Glaive Rush', false]]);
+  });
+
+  it('changed in a way the app does not follow (Transform): counted as nothing until it leaves', () => {
+    const r = live({me: [0, 2], opp: [3, 0]});
+    r.read('The opposing Greninja transformed into Milotic!');
+    expect(r.b.live.mons.opp3.odd).toBe(true);
+    r.read('The opposing Greninja used Scald on Araquanid!', 'Araquanid 150');
+    r.n.commit();
+    expect(turnActions(r.b).find(a => a.move === 'Scald')?.ordered).toBe(false);
+    const notes = computeBeliefs(doublesFmt, r.b).notes.filter(n => n.slot === 3 && n.kind === 'damage-dealt');
+    expect(notes).toEqual([]);
+    r.read('The opposing Greninja, come back!', 'Kim sent out Rillaboom!');
+    expect(r.b.live.mons.opp3.odd).toBeUndefined();
+  });
+});
+
+describe('lines that change what a Pokémon is (5 Oct)', () => {
+  const me0 = {side: 'me', slot: 0};
+  const opp0 = {side: 'opp', slot: 0};
+  const opp1 = {side: 'opp', slot: 1};
+  it('types: to one, one added, the same as another, one lost, its own again', () => {
+    expect(events('The opposing Salamence transformed into the Water type!')).toEqual([{kind: 'types', mon: opp0, to: 'Water'}]);
+    expect(events('Ghost type was added to the opposing Kingambit!')).toEqual([{kind: 'types', mon: opp1, add: 'Ghost'}]);
+    expect(events('Charizard became the same type as the opposing Salamence!')).toEqual([{kind: 'types', mon: me0, like: opp0}]);
+    expect(events('Charizard burned itself out!')).toEqual([{kind: 'types', mon: me0, lose: 'Fire'}]);
+    expect(events('The opposing Salamence used up all its electricity!')).toEqual([{kind: 'types', mon: opp0, lose: 'Electric'}]);
+    expect(events('The opposing Salamence returned to its original type!')).toEqual([{kind: 'types', mon: opp0, back: true}]);
+  });
+
+  it("stat stages copied, inverted; a move out of its Speed's turn; one the app doesn't follow", () => {
+    expect(events("The opposing Salamence copied Charizard's stat changes!")).toEqual([{kind: 'copyBoosts', mon: opp0, from: me0}]);
+    expect(events('All stat changes on the opposing Salamence were inverted!')).toEqual([{kind: 'copyBoosts', mon: opp0, from: opp0, invert: true}]);
+    expect(events("The opposing Kingambit's move was postponed!")).toEqual([{kind: 'outOfTurn', mon: opp1}]);
+    expect(events('The opposing Salamence transformed into Charizard!')).toEqual([{kind: 'odd', mon: opp0}]);
+    expect(events('Charizard switched its Attack and Defense!')).toEqual([{kind: 'odd', mon: me0}]);
+    // Role Play copies an ability: what it says is the other's.
+    expect(events("Charizard copied the opposing Salamence's Intimidate Ability!")).toEqual([{kind: 'ability', mon: opp0, ability: 'Intimidate'}]);
+  });
+});
+
+describe('Mega Evolution, theirs (5 Oct)', () => {
+  it('the stone shown says which Mega (the line after calls Garchomp-Mega-Z plain "Mega Garchomp"), listed or not', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Garchomp', 'Kingambit', 'Rillaboom', 'Clefable']});
+    r.read("The opposing Garchomp's Garchompite Z is reacting to Kim's Omni Ring!", 'The opposing Garchomp has Mega Evolved into Mega Garchomp!');
+    const forme = r.b.events.find(e => e.kind === 'reveal' && e.what === 'forme');
+    expect(forme && forme.kind === 'reveal' && forme.value).toBe('Garchomp-Mega-Z');
+    // Not in the format's data (Showdown's, without the in-game data): there all the same, nothing impossible.
+    expect(doublesFmt.preview.Garchomp).not.toContain('Garchomp-Mega-Z');
+    const res = computeBeliefs(doublesFmt, r.b);
+    expect(res.notes.filter(n => n.kind === 'conflict')).toEqual([]);
+    expect(res.mons[0]?.formes.find(f => f.name === 'Garchomp-Mega-Z')?.p).toBeGreaterThan(0.99);
+  });
+});
+
+describe('Ally Switch (5 Oct)', () => {
+  it('the two of a side change places: one coming in for a fainted one goes where it was', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]});
+    r.read('The opposing Kingambit used Ally Switch!', 'The opposing Kingambit and the opposing Salamence switched places!');
+    expect(r.b.live.active.opp).toEqual([1, 0]);
+    r.read('Charizard used Heat Wave!', 'The opposing Salamence 0', 'The opposing Salamence fainted!', 'Kim sent out Rillaboom!');
+    expect(r.b.live.active.opp).toEqual([1, 2]);
+  });
+});
+
+describe('an entry pop-up read before the beliefs are in (5 Oct)', () => {
+  it("answers its question at the moves being chosen, its effect not made again", () => {
+    const r = rig({me: [0, 1], opp: [null, null]}, {beliefs: false});
+    r.read('Kim sent out Salamence and Kingambit!', "Salamence's Intimidate", "Charizard and Incineroar's Attack fell!");
+    r.n.feed([{kind: 'endTurn'}]);
+    expect([r.boosts('me0'), r.boosts('me1')]).toEqual([{atk: -1}, {atk: -1}]);
+    const checks = r.b.events.filter(e => e.kind === 'check').map(e => e.kind === 'check' ? [e.mon.slot, e.seen] : []);
+    expect(checks).toEqual([[0, 'Intimidate'], [1, null]]);
+  });
+});
+
+describe('switches as the game writes them (5 Oct, evening)', () => {
+  const MIRROR = parseTeam(`Grimmsnarl @ Light Clay
+- Reflect
+
+Milotic @ Sitrus Berry
+- Scald
+
+Slowbro-Mega @ Slowbronite
+- Body Press
+
+Volcarona @ Rocky Helmet
+- Struggle Bug`);
+
+  it('"… withdrew X!" is theirs, of a species both sides have too (yours are told "…, come back!")', () => {
+    const r = rig({me: [3, 2], opp: [1, 3]}, {team: MIRROR, preview: ['Aegislash', 'Rillaboom', 'Sneasler', 'Volcarona', 'Salamence', 'Milotic']});
+    r.read('TrashRat withdrew Volcarona!', 'TrashRat sent out Aegislash!', 'TrashRat withdrew Rillaboom!', 'TrashRat sent out Milotic!');
+    expect(r.b.live.active).toEqual({me: [3, 2], opp: [5, 0]});
+    expect(r.asked).toEqual([]);
+  });
+
+  it("a trainer's name before \"withdrew\" isn't taken in with the Pokémon's (\"c.c. withdrew Avalugg!\")", () => {
+    const r = rig({me: [0, 2], opp: [2, 3]}, {team: MIRROR, preview: ['Camerupt', 'Farigiraf', 'Aromatisse', 'Avalugg-Hisui', 'Rillaboom', 'Sneasler']});
+    r.read('c.c. withdrew Avalugg!', 'c.c. sent out Camerupt!');
+    expect(r.b.live.active.opp).toEqual([2, 0]);
+  });
+
+  it("an HP box naming one the log doesn't have out: it came in there (a switch read wrong, or missed)", () => {
+    const r = rig({me: [0, 2], opp: [2, 3]}, {team: MIRROR, preview: ['Camerupt', 'Farigiraf', 'Aromatisse', 'Avalugg-Hisui', 'Rillaboom', 'Sneasler']});
+    // Theirs face you: the right-hand box (screen 1) is their first place.
+    const box = {kind: 'hp' as const, side: 'opp' as const, screen: 0, name: 'Camerupt', value: 100, raw: '100%'};
+    r.n.feed(readingEvents(r.b, gen, () => undefined, box));
+    expect(r.b.live.active.opp).toEqual([2, 0]);
+    // What it has there already, the box agreeing: nothing more.
+    const n = r.b.events.length;
+    r.n.feed(readingEvents(r.b, gen, () => undefined, box));
+    expect(r.b.events.length).toBe(n);
+  });
+});
+
+describe('abilities as the game shows them (5 Oct, evening)', () => {
+  const MIRROR = parseTeam(`Grimmsnarl @ Light Clay
+Ability: Prankster
+- Reflect
+
+Milotic @ Sitrus Berry
+- Scald`);
+
+  it("Trace: the pop-up after it is the ability it copied (your Grimmsnarl's Prankster), not its own", () => {
+    const r = rig({me: [null, null], opp: [null, null]}, {team: MIRROR, preview: ['Gardevoir', 'Sneasler', 'Torkoal', 'Kingambit']});
+    r.read('The Trainer sent out Sneasler and Gardevoir!', 'Go! Grimmsnarl and Milotic!', "The opposing Gardevoir's Trace",
+      "The opposing Gardevoir's Prankster", "It traced Grimmsnarl's Prankster!");
+    r.n.feed([{kind: 'endTurn'}]);
+    // What it showed of its own: Trace, as the answer to its coming in.
+    const shown = r.b.events.filter(e => (e.kind === 'reveal' && e.what === 'ability') || (e.kind === 'check' && e.seen))
+      .filter(e => (e.kind === 'reveal' || e.kind === 'check') && e.mon.side === 'opp' && e.mon.slot === 0)
+      .map(e => (e.kind === 'reveal' ? e.value : e.kind === 'check' ? e.seen : ''));
+    expect(shown).toEqual(['Trace']);
+    expect(computeBeliefs(doublesFmt, r.b).notes.filter(n => n.kind === 'conflict')).toEqual([]);
+  });
+
+  it('back into the terrain its ability sets: no pop-up, and that says nothing against the ability', () => {
+    const r = rig({me: [null, null], opp: [null, null]}, {team: MIRROR, preview: ['Rillaboom', 'Garchomp', 'Kingambit', 'Incineroar']});
+    r.read('Chris sent out Garchomp and Rillaboom!', 'Go! Grimmsnarl and Milotic!', "The opposing Rillaboom's Grassy Surge",
+      'Grass grew to cover the battlefield!');
+    r.n.feed([{kind: 'endTurn'}]);
+    r.read('The opposing Rillaboom used U-turn on Grimmsnarl!', 'Grimmsnarl 180', 'The opposing Rillaboom went back to Chris!',
+      'Chris sent out Kingambit!');
+    r.n.feed([{kind: 'endTurn'}]);
+    r.read('Chris withdrew Kingambit!', 'Chris sent out Rillaboom!');
+    r.n.feed([{kind: 'endTurn'}]);
+    const back = r.b.events.filter(e => e.kind === 'check' && e.mon.slot === 0 && e.context === 'entry').at(-1);
+    expect(back && back.kind === 'check' && [back.seen, back.already?.terrain]).toEqual([null, 'Grassy']);
+    expect(computeBeliefs(doublesFmt, r.b).notes.filter(n => n.kind === 'conflict')).toEqual([]);
+  });
+});
+
+describe('Stance Change, and abilities not its own (5 Oct, evening)', () => {
+  const MINE = parseTeam(`Slowbro-Mega @ Slowbronite
+Ability: Oblivious
+- Body Press
+
+Milotic @ Sitrus Berry
+- Scald`);
+
+  it("an ability none of its formes can have (Trace's copy, its own pop-up unread) isn't taken as its own", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {team: MINE, preview: ['Meowstic-F', 'Lucario', 'Indeedee-F', 'Sneasler']});
+    r.read("The opposing Meowstic's Shell Armor", "It traced Slowbro's Shell Armor!");
+    expect(r.b.events.filter(e => e.kind === 'reveal' && e.mon.side === 'opp')).toEqual([]);
+  });
+
+  it('Aegislash attacks in its Blade forme, and stays in it until King\'s Shield', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {team: MINE, preview: ['Aegislash', 'Rillaboom', 'Sneasler', 'Volcarona']});
+    r.read('The opposing Aegislash used Shadow Ball on Milotic!', 'Milotic 150');
+    r.n.commit();
+    expect(r.b.live.mons.opp0.blade).toBe(true);
+    const ball = turnActions(r.b).find(a => a.move === 'Shadow Ball')!;
+    expect(hitState(ball).mons.opp0.blade).toBe(true);
+    r.n.feed([{kind: 'endTurn'}]);
+    r.read("The opposing Aegislash used King's Shield!");
+    r.n.commit();
+    expect(r.b.live.mons.opp0.blade).toBeUndefined();
+  });
+});
+
+describe('stat lines the other way round: Contrary (6 Oct)', () => {
+  it("Mega Staraptor's Close Combat raised its defences, as the game said, though logged as drops (they had been left at 0)", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Staraptor', 'Grimmsnarl', 'Basculegion', 'Primarina']});
+    r.read("The opposing Staraptor's Staraptite is reacting to ukulele's Omni Ring!", 'The opposing Staraptor has Mega Evolved into Mega Staraptor!');
+    r.read('The opposing Staraptor used Close Combat!', 'Incineroar 80', "The opposing Staraptor's Defense and Sp. Def rose!");
+    r.n.commit();
+    expect(r.boosts('opp0')).toEqual({def: 1, spd: 1});
+  });
+
+  it("Serperior's Leaf Storm: its Sp. Atk rose sharply, so it has Contrary, shown", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Serperior', 'Grimmsnarl', 'Basculegion', 'Primarina']});
+    r.read('The opposing Serperior used Leaf Storm!', 'Incineroar 150', "The opposing Serperior's Sp. Atk rose sharply!");
+    r.n.commit();
+    expect(r.boosts('opp0')).toEqual({spa: 2});
+    expect(r.b.events.some(e => e.kind === 'reveal' && e.what === 'ability' && e.value === 'Contrary')).toBe(true);
+  });
+});
+
+describe('screens, weather and terrain that may last 8 turns (6 Oct)', () => {
+  /** A turn's lines, then the moves being chosen for the next. */
+  const turn = (r: ReturnType<typeof rig>, ...lines: string[]) => {
+    r.read(...lines);
+    r.n.feed([{kind: 'endTurn'}]);
+  };
+  const items = (r: ReturnType<typeof rig>) => r.b.events.flatMap(e => (e.kind === 'reveal' && e.what === 'item' ? [[e.value, e.negate, e.mon.slot]] : []));
+
+  it("Sableye's Light Screen up past its 5th turn, and no line saying it's over: Light Clay (it had been taken off after 5)", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Sableye', 'Archaludon', 'Pelipper', 'Sneasler']});
+    turn(r, 'The opposing Sableye used Light Screen!', 'Light Screen made the opposing side stronger against special moves!');
+    for (let k = 0; k < 4; k++) turn(r, 'Charizard used Protect!', 'Charizard protected itself!');
+    // Five turns over: up still, as it would be with Light Clay.
+    expect(r.b.live.field.opp.lightScreen).toBe(true);
+    r.read('Charizard used Protect!');
+    expect(items(r)).toEqual([['Light Clay', false, 0]]);
+    expect(r.b.live.field.turns?.['opp.lightScreen']).toBe(3);
+    expect(r.b.live.field.mayLast?.['opp.lightScreen']).toBeUndefined();
+  });
+
+  it('…and one that wore off at the end of its 5th turn: no Light Clay', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Sableye', 'Archaludon', 'Pelipper', 'Sneasler']});
+    turn(r, 'The opposing Sableye used Light Screen!', 'Light Screen made the opposing side stronger against special moves!');
+    for (let k = 0; k < 3; k++) turn(r, 'Charizard used Protect!', 'Charizard protected itself!');
+    turn(r, 'Charizard used Protect!', 'Charizard protected itself!', "The opposing side's Light Screen wore off!");
+    expect(r.b.live.field.opp.lightScreen).toBe(false);
+    r.read('Charizard used Protect!');
+    expect(items(r)).toEqual([['Light Clay', true, 0]]);
+  });
+
+  it("Pelipper's Drizzle: the rain still falling past 5 turns is Damp Rock's", () => {
+    const r = rig({me: [0, 1], opp: [null, null]}, {preview: ['Pelipper', 'Archaludon', 'Sableye', 'Sneasler']});
+    r.read('Kim sent out Pelipper and Archaludon!', "Pelipper's Drizzle", 'It started to rain!');
+    expect(r.b.live.field.mayLast?.weather).toEqual({slot: 0, item: 'Damp Rock'});
+    for (let k = 0; k < 5; k++) turn(r, 'Charizard used Protect!', 'Charizard protected itself!');
+    r.read('Charizard used Protect!');
+    expect(items(r)).toEqual([['Damp Rock', false, 0]]);
+    expect(r.b.live.field.weather).toBe('Rain');
+  });
+});
+
+describe('binding moves as the game writes them (6 Oct)', () => {
+  it("Toxapex's Infestation: held, hurt at the end of each turn, and freed when the game says (not hurt that turn)", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Toxapex', 'Archaludon', 'Sableye', 'Pelipper']});
+    const max = maxHPOf({fmt: doublesFmt, gen, battle: r.b, oppAbility: () => undefined, oppItem: () => undefined}, r.b.live, {side: 'me', slot: 0});
+    r.read('The opposing Toxapex used Infestation!', 'Charizard 150', 'Charizard has been afflicted with an infestation by the opposing Toxapex!');
+    r.read('Charizard is hurt by Infestation!');
+    expect(r.b.live.mons.me0.bound).toEqual({move: 'Infestation', by: {side: 'opp', slot: 0}, ticks: 1});
+    expect(r.max('me0')).toBe(150 - Math.floor(max / 8));
+    r.n.feed([{kind: 'endTurn'}]);
+    // The next turn ends with it let go, instead of hurt: as it was.
+    r.read('Charizard used Protect!', 'Charizard protected itself!', 'Charizard was freed from Infestation!');
+    expect(r.b.live.mons.me0.bound).toBeUndefined();
+    expect(r.max('me0')).toBe(150 - Math.floor(max / 8));
   });
 });

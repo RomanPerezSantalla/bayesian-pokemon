@@ -17,6 +17,13 @@
   --border-strong: #c3cad3;
   /* Text on the saturated fills (accent, good/warn/bad). */
   --on-color: #ffffff;
+  /* Statuses, in the games' colours (both themes: saturated badges read on either). */
+  --st-brn: #dd5a2b;
+  --st-psn: #9a40a8;
+  --st-tox: #7b2c8f;
+  --st-par: #e3b50f;
+  --st-slp: #7c8592;
+  --st-frz: #4fb4dc;
   --radius: 10px;
   --tap: 44px;
   color-scheme: light;
@@ -107,6 +114,14 @@ input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent-soft
 .tag.me { color: var(--me); }
 .tag.opp { color: var(--opp); }
 .tag.st { background: var(--warn); color: var(--on-color); text-transform: uppercase; }
+.tag.st.brn, .chip.warn-on.st-brn.on { background: var(--st-brn); border-color: var(--st-brn); color: #fff; }
+.tag.st.psn, .chip.warn-on.st-psn.on { background: var(--st-psn); border-color: var(--st-psn); color: #fff; }
+.tag.st.tox, .chip.warn-on.st-tox.on { background: var(--st-tox); border-color: var(--st-tox); color: #fff; }
+.tag.st.par, .chip.warn-on.st-par.on { background: var(--st-par); border-color: var(--st-par); color: #1a1d21; }
+.tag.st.slp, .chip.warn-on.st-slp.on { background: var(--st-slp); border-color: var(--st-slp); color: #fff; }
+.tag.st.frz, .chip.warn-on.st-frz.on { background: var(--st-frz); border-color: var(--st-frz); color: #1a1d21; }
+/* What hurts it at each turn's end (a binding move, Leech Seed, Salt Cure). */
+.tag.held { background: var(--panel-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--border-strong); }
 .tag.boost { background: var(--accent-soft); color: var(--accent); }
 /* The "as Mega" / "not Mega" switch on your cards. */
 button.tag { border: 0; font-family: inherit; line-height: inherit; cursor: pointer; }
@@ -162,6 +177,10 @@ table.t th { color: var(--muted); font-weight: 500; }
 .bt-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 4px 0; }
 .turn { font-weight: 700; font-size: 17px; min-width: 56px; }
 .pill { font-size: 12px; padding: 3px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; cursor: pointer; }
+.bt-field { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; padding: 2px 0; }
+.fx { font-size: 12.5px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
+.fx.opp { color: var(--opp); border-color: color-mix(in srgb, var(--opp) 45%, var(--border)); }
+.fx.me { color: var(--me); border-color: color-mix(in srgb, var(--me) 45%, var(--border)); }
 .pill b { font-variant-numeric: tabular-nums; }
 .side { display: flex; flex-direction: column; gap: 6px; }
 .side .label { display: flex; align-items: center; gap: 6px; }
@@ -209,6 +228,9 @@ table.t th { color: var(--muted); font-weight: 500; }
 
 .intel .section { margin-top: 8px; }
 .checks { border-color: var(--warn); }
+.leads .dist { grid-template-columns: minmax(110px, max-content) minmax(48px, 1fr) 44px; }
+.leads .tag { font-size: 12.5px; padding: 3px 8px; }
+.leads .tag b { color: var(--text); font-variant-numeric: tabular-nums; }
 .check-row { display: flex; flex-direction: column; gap: 4px; }
 .check-row .who { font-weight: 600; font-size: 13.5px; }
 .note { font-size: 12px; color: var(--muted); }
@@ -293,11 +315,12 @@ table.t th { color: var(--muted); font-weight: 500; }
 .item-icon.none { background: none; }
 .with-icon { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
 .with-icon .nm, .dist .label .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.dmg-row { display: grid; grid-template-columns: 40px minmax(0, 1.35fr) minmax(36px, 1fr) 48px 46px; gap: 4px; align-items: center; font-size: 13px; }
+/* The range and verdict columns fit their widest ("105–124%", "KO 81%"): narrower, they ran into each other. */
+.dmg-row { display: grid; grid-template-columns: 40px minmax(0, 1.35fr) minmax(36px, 1fr) 58px 56px; gap: 4px; align-items: center; font-size: 13px; }
 .dmg-row.weak { opacity: .6; }
 /* Phones: names first, the bar takes what is left. */
 @media (max-width: 420px) {
-  .dmg-row { grid-template-columns: 36px minmax(0, 1.9fr) minmax(32px, 1fr) 46px 44px; font-size: 12.5px; }
+  .dmg-row { grid-template-columns: 36px minmax(0, 1.9fr) minmax(32px, 1fr) 58px 56px; font-size: 12.5px; }
   .type-tab.with-eff { width: 36px; }
 }
 .dmg-pct { font-size: 11.5px; text-align: right; white-space: nowrap; }

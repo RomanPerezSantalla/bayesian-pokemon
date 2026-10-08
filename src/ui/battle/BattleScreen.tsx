@@ -5,7 +5,8 @@ import {megaFormeOf} from '../../engine/likelihood';
 import {maxHPOf, type StateCtx} from '../../engine/state';
 import type {InferResult} from '../../engine/worker';
 import {
-  monKey, sameMon, type ActionEvent, type Battle, type BattleEvent, type MonRef, type SideID, type Weather,
+  monKey, sameMon, type ActionEvent, type Battle, type BattleEvent, type FieldCondition, type MonCondition, type MonRef, type SideID,
+  type Weather,
 } from '../../engine/types';
 import {useStore} from '../../state/store';
 import {testLog} from '../../testlog';
@@ -21,6 +22,7 @@ import {pendingChecks} from './checks';
 import {nextToMove} from './order';
 import {SpeedOrder} from './visuals';
 import {headline, Intel} from './Intel';
+import {LeadsPanel} from './Leads';
 import {monLabel, oppSpecies} from './names';
 import {ScreenFeed} from './ScreenFeed';
 
@@ -28,20 +30,66 @@ type Update = (fn: (b: Battle) => Battle) => void;
 const STATUS_LABEL: Record<string, string> = {brn: 'BRN', par: 'PAR', psn: 'PSN', tox: 'TOX', slp: 'SLP', frz: 'FRZ'};
 const BOOSTS: BoostID[] = ['atk', 'def', 'spa', 'spd', 'spe'];
 
+/**
+ * Turns left, where known: " 3"; " 2 or 5" for one of theirs whose setter may hold what makes it last 8 (Light Clay, a
+ * rock, Terrain Extender); " 3?" once it's past 5 turns that way, until the game shows which.
+ */
+function turnsLeft(f: FieldCondition, key: string): string {
+  const n = f.turns?.[key];
+  if (!n) return '';
+  const m = f.mayLast?.[key];
+  return m ? (m.past ? ` ${n}?` : ` ${n} or ${n + 3}`) : ` ${n}`;
+}
+
+/** A timed effect taken off by hand: its timer, and what may have stretched it, with it. */
+function untimed(f: FieldCondition, key: string) {
+  delete f.turns?.[key];
+  delete f.mayLast?.[key];
+}
+
+/**
+ * What's up on the field, between their Pokémon and yours: each side's screens and Tailwind (the damage counts them),
+ * the weather, terrain and rooms, with the turns left where known.
+ */
+function FieldStrip({battle}: {battle: Battle}) {
+  const f = battle.live.field;
+  const left = (k: string) => turnsLeft(f, k);
+  const sideFx = (side: SideID) => ([
+    ['reflect', 'Reflect'], ['lightScreen', 'Light Screen'], ['auroraVeil', 'Aurora Veil'], ['tailwind', 'Tailwind'],
+  ] as const).filter(([k]) => f[side][k]).map(([k, label]) => `${label}${left(`${side}.${k}`)}`);
+  const field = [
+    f.weather && `${f.weather}${left('weather')}`,
+    f.terrain && `${f.terrain} Terrain${left('terrain')}`,
+    f.trickRoom && `Trick Room${left('trickRoom')}`,
+    f.gravity && `Gravity${left('gravity')}`,
+    f.magicRoom && `Magic Room${left('magicRoom')}`,
+    f.wonderRoom && `Wonder Room${left('wonderRoom')}`,
+  ].filter((x): x is string => !!x);
+  const theirs = sideFx('opp');
+  const yours = sideFx('me');
+  if (!theirs.length && !yours.length && !field.length) return null;
+  return (
+    <div className="bt-field">
+      {theirs.map(x => <span key={`opp${x}`} className="fx opp">Their {x}</span>)}
+      {field.map(x => <span key={x} className="fx">{x}</span>)}
+      {yours.map(x => <span key={`me${x}`} className="fx me">Your {x}</span>)}
+    </div>
+  );
+}
+
 function Pills({battle, update}: {battle: Battle; update: Update}) {
   const f = battle.live.field;
-  const t = f.turns ?? {};
   const [adding, setAdding] = useState(false);
   const pills: [string, string, () => void][] = [];
   const clear = (fn: (b: Battle['live']) => void) => () => update(b => editLive(b, fn));
-  const left = (k: string) => (t[k] ? ` ${t[k]}` : '');
+  const left = (k: string) => turnsLeft(f, k);
   if (f.weather) pills.push(['weather', `${f.weather}${left('weather')}`, clear(l => {
     l.field.weather = undefined;
-    delete l.field.turns?.weather;
+    untimed(l.field, 'weather');
   })]);
   if (f.terrain) pills.push(['terrain', `${f.terrain} T.${left('terrain')}`, clear(l => {
     l.field.terrain = undefined;
-    delete l.field.turns?.terrain;
+    untimed(l.field, 'terrain');
   })]);
   if (f.trickRoom) pills.push(['tr', `Trick Room${left('trickRoom')}`, clear(l => {
     l.field.trickRoom = false;
@@ -61,7 +109,7 @@ function Pills({battle, update}: {battle: Battle; update: Update}) {
     for (const [k, label] of [['tailwind', 'Tailwind'], ['reflect', 'Reflect'], ['lightScreen', 'L. Screen'], ['auroraVeil', 'Veil']] as const) {
       if (f[side][k]) pills.push([`${side}${k}`, `${whose} ${label}${left(`${side}.${k}`)}`, clear(l => {
         l.field[side] = {...l.field[side], [k]: false};
-        delete l.field.turns?.[`${side}.${k}`];
+        untimed(l.field, `${side}.${k}`);
       })]);
     }
     // Entry hazards on this side, laid by the other.
@@ -116,6 +164,31 @@ function Pills({battle, update}: {battle: Battle; update: Update}) {
   );
 }
 
+/** A binding move's turns to come: 4 or 5 in all (7 with its binder's Grip Claw, where that's known). */
+function heldLeft(bound: NonNullable<MonCondition['bound']>, gripClaw: boolean): string {
+  const most = (gripClaw ? 7 : 5) - bound.ticks;
+  const least = gripClaw ? most : Math.max(0, 4 - bound.ticks);
+  return least === most ? `${most}` : least === 0 ? `≤${most}` : `${least}–${most}`;
+}
+
+/** What's hurting it at the end of each turn, until it's over or it leaves the field, with the turns to come. */
+function Held({battle, result, c}: {battle: Battle; result: InferResult | null; c: MonCondition}) {
+  const bound = c.bound;
+  const binder = bound && monLabel(battle, result?.mons, bound.by);
+  const grip = !!bound && (bound.by.side === 'me' ? battle.myTeam[bound.by.slot]?.item : result?.mons[bound.by.slot]?.items.find(i => i.p >= 1)?.name) === 'Grip Claw';
+  return (
+    <>
+      {bound && (
+        <span className="tag held" title={`Held by ${binder}'s ${bound.move}: it can't switch out (unless it's a Ghost). It loses 1/8 of its HP at the end of each turn, ${heldLeft(bound, grip)} more times, while ${binder} stays in.`}>
+          {bound.move} {heldLeft(bound, grip)}
+        </span>
+      )}
+      {c.seeded && <span className="tag held" title="Leech Seed: it loses 1/8 of its HP at the end of each turn, until it leaves the field.">Leech Seed</span>}
+      {c.salted && <span className="tag held" title="Salt Cure: it loses 1/8 of its HP at the end of each turn (1/4 for a Water or Steel type), until it leaves the field.">Salt Cure</span>}
+    </>
+  );
+}
+
 function Tile({gen, battle, result, ctx, ref_, selected, onTap}: {
   gen: Gen; battle: Battle; result: InferResult | null; ctx: StateCtx; ref_: MonRef; selected: boolean; onTap(): void;
 }) {
@@ -144,10 +217,11 @@ function Tile({gen, battle, result, ctx, ref_, selected, onTap}: {
       <div className="badges">
         {ord && <span className={`tag ord${ord.ev.ordered ? '' : ' unsure'}`}>{ordinal(ord.n)}{ord.ev.ordered ? '' : '?'}</span>}
         {justIn && <span className="tag">just in</span>}
-        {c?.status && <span className="tag st">{STATUS_LABEL[c.status]}</span>}
+        {c?.status && <span className={`tag st ${c.status}`}>{STATUS_LABEL[c.status]}</span>}
         {c?.mega && <span className="tag">Mega</span>}
         {boosts.map(b => <span key={b} className="tag boost">{b}</span>)}
         {c?.itemGone && <span className="tag">no item</span>}
+        {c && <Held battle={battle} result={result} c={c} />}
       </div>
       {m && <div className="info">{headline(m, !!c?.mega)}</div>}
     </button>
@@ -205,7 +279,7 @@ function describe(battle: Battle, result: InferResult | null, ev: BattleEvent): 
   switch (ev.kind) {
     case 'action': {
       const hits = ev.hits.map(h => `${nm(h.target)} ${h.noEffect ? 'unaffected' : h.fainted ? 'KO' : h.unread ? '→ ? (HP skipped)' : `→${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}${h.status ? ` ${h.status}` : ''}${h.triggers.length ? ` [${h.triggers.join(',')}]` : ''}`);
-      return `${nm(ev.actor)}: ${ev.move}${ev.quick ? ` (${ev.quick})` : ''}${ev.failed ? ' (failed)' : ''}${hits.length ? ` · ${hits.join('; ')}` : ''}${ev.actorTriggers.length ? ` [${ev.actorTriggers.join(',')}]` : ''}${ev.ordered ? '' : ' · order unsure'}`;
+      return `${nm(ev.actor)}: ${ev.move}${ev.quick ? ` (${ev.quick})` : ''}${ev.failed ? ' (failed)' : ev.charged ? ' (charging)' : ''}${hits.length ? ` · ${hits.join('; ')}` : ''}${ev.actorTriggers.length ? ` [${ev.actorTriggers.join(',')}]` : ''}${ev.ordered ? '' : ' · order unsure'}`;
     }
     case 'reveal':
       return `${nm(ev.mon)} ${ev.negate ? 'not ' : ''}${ev.what === 'forme' ? 'Mega Evolved →' : `${ev.what}:`} ${ev.value}`;
@@ -350,18 +424,20 @@ export function BattleScreen({battleId}: {battleId: string}) {
   }, [battleId, openBattle]);
   const {fmt, gen, error} = useFormat(battle?.formatId);
   const [actor, setActor] = useState<MonRef | null>(null);
-  const [focusOpp, setFocusOpp] = useState(0);
+  /** Theirs to show on the right: as picked (one benched too), or, picked out on the field, the field's once it's gone. */
+  const [focusOpp, setFocusOpp] = useState<{slot: number; benched: boolean} | null>(null);
   const [benchPick, setBenchPick] = useState<{side: SideID; position?: number; slot?: number} | null>(null);
   const [panel, setPanel] = useState<'intel' | 'log' | 'settings'>('intel');
 
   const activeOpp = battle?.live.active.opp.filter((s): s is number => s !== null) ?? [];
-  const intelSlot = activeOpp.includes(focusOpp) || !activeOpp.length ? focusOpp : activeOpp[0];
+  const intelSlot = focusOpp && (focusOpp.benched || activeOpp.includes(focusOpp.slot)) ? focusOpp.slot : activeOpp[0] ?? focusOpp?.slot ?? 0;
+  const pickOpp = (slot: number) => setFocusOpp({slot, benched: !activeOpp.includes(slot)});
   const {result} = useInference(fmt, battle, [...activeOpp, intelSlot]);
 
   if (!battle) return <div className="panel empty">{listed ? 'Loading battle…' : 'Battle not found.'}</div>;
   if (error) return <div className="panel empty bad">Couldn't load data: {error}</div>;
   if (!fmt || !gen) return <div className="panel empty">Loading ladder data…</div>;
-  return <Loaded {...{fmt, gen, battle, result, actor, setActor, intelSlot, setFocusOpp, benchPick, setBenchPick, panel, setPanel}}
+  return <Loaded {...{fmt, gen, battle, result, actor, setActor, intelSlot, setFocusOpp: pickOpp, benchPick, setBenchPick, panel, setPanel}}
     update={fn => updateBattle(battle.id, fn)}
     onDelete={() => {
       if (confirm('Delete this battle?')) {
@@ -485,15 +561,17 @@ function Loaded({fmt, gen, battle, result, actor, setActor, intelSlot, setFocusO
           onAskSwitch={(side, slot) => setBenchPick({side, slot})} onLogged={tick} />
 
         <ChecksPanel battle={battle} result={result} ctx={ctx} run={run} />
+        <LeadsPanel battle={battle} />
 
         <Side gen={gen} battle={battle} result={result} ctx={ctx} side="opp" selected={actor}
           onTap={tap} onEmpty={pos => setBenchPick({side: 'opp', position: pos})} onBench={slot => onBench('opp', slot)} />
+        <FieldStrip battle={battle} />
         <Side gen={gen} battle={battle} result={result} ctx={ctx} side="me" selected={actor}
           onTap={tap} onEmpty={pos => setBenchPick({side: 'me', position: pos})} onBench={slot => onBench('me', slot)} />
         <SpeedOrder battle={battle} result={result} />
         <div className="note kbd-hint">Keys: Q W their Pokémon · A S yours · E end turn · Ctrl+Z undo</div>
 
-        {benchPick && (
+        {benchPick && !(benchPick.slot !== undefined && battle.live.active[benchPick.side].includes(benchPick.slot)) && (
           <div className="panel col">
             {benchPick.slot !== undefined ? (
               <>

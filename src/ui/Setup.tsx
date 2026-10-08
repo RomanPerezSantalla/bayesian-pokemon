@@ -1,30 +1,14 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
-import {species as dexSpecies, toID, type Gen} from '../data/dex';
+import {toID, type Gen} from '../data/dex';
 import {previewNamesByUsage, type FormatData} from '../data/format';
 import {parseTeam, type PokemonSet} from '../data/paste';
 import {createBattle} from '../engine/battle';
 import {useStore} from '../state/store';
 import {logLeads, stateCtx} from './battle/actions';
-import {addTheirs} from './picks';
+import {addTheirs, toPreviewName} from './picks';
 import {Sprite, useFormat, useFormatIndex} from './common';
 
 const LAST_FORMAT = 'bayesian-battle:last-format';
-
-/** Map any species name (including Mega formes) to the name shown at team preview. */
-export function toPreviewName(fmt: FormatData, gen: Gen, raw: string): string | null {
-  const name = raw.trim().replace(/,.*$/, '').replace(/\*$/, '').trim();
-  if (!name) return null;
-  const id = toID(name);
-  for (const [preview, formes] of Object.entries(fmt.preview)) {
-    if (toID(preview) === id || formes.some(f => toID(f) === id)) return preview;
-  }
-  const prefixed = Object.keys(fmt.preview).filter(p => toID(p).startsWith(id))
-    .sort((a, b) => (fmt.previewUsage[b] ?? 0) - (fmt.previewUsage[a] ?? 0));
-  if (prefixed.length) return prefixed[0];
-  const sp = dexSpecies(gen, name);
-  if (!sp) return null;
-  return /-Mega/.test(sp.name) && sp.baseSpecies ? sp.baseSpecies : sp.name;
-}
 
 function parsePasted(fmt: FormatData, gen: Gen, text: string): {names: string[]; sheet: PokemonSet[] | null} {
   if (/ @ |Ability:|^- /m.test(text)) {

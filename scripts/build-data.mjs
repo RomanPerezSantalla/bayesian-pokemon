@@ -91,8 +91,35 @@ function compactBoosts(b) {
   return Object.keys(out).length ? out : undefined;
 }
 
+/**
+ * Pokémon Champions' own changes to a move, as the calc has them (its Champions moves are Scarlet and Violet's with a
+ * patch): where its Champions move and its Scarlet and Violet one differ, Champions' wins. Make It Rain lowers Sp. Atk
+ * by 2 there, Freeze-Dry can't freeze, Double Shock is a punch, Dragon Cheer a sound move.
+ */
+function championsChanges(e, champions, sv) {
+  // Its entries with no type (Metal Claw, Anchor Shot…) lost what they inherit: whole in its gen 9 data, as the app
+  // completes them (completeChampionsMoves in src/data/dex.ts).
+  if (!champions.type) {
+    const own = Object.fromEntries(Object.entries(champions).filter(([, v]) => v !== undefined));
+    champions = {...sv, ...own, flags: {...sv.flags, ...champions.flags}};
+  }
+  const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  if (!same(champions.self?.boosts, sv.self?.boosts)) {
+    const sb = compactBoosts(champions.self?.boosts);
+    if (sb) e.sb = sb;
+    else delete e.sb;
+  }
+  if (sv.secondaries && !champions.secondaries) delete e.sec;
+  for (const [flag, key] of [['contact', 'ct'], ['sound', 'snd'], ['punch', 'pun']]) {
+    if (!!champions.flags?.[flag] === !!sv.flags?.[flag]) continue;
+    if (champions.flags?.[flag]) e[key] = 1;
+    else delete e[key];
+  }
+}
+
 function buildMoves() {
   const d = Dex.forGen(9);
+  const sv = Generations.get(9);
   const out = {};
   const names = new Set([...gen.moves].map(m => m.id));
   for (const m of d.moves.all()) names.add(m.id);
@@ -142,6 +169,8 @@ function buildMoves() {
       // The calc keeps only positive priorities; turn order needs Trick Room's −7 too.
       if (m.priority) e.pr = m.priority;
       if (m.flags?.heal || m.heal) e.heal = 1;
+      const s = sv.moves.get(id);
+      if (c && s) championsChanges(e, c, s);
     }
     Object.assign(e, MOVE_OVERRIDES[id] || {});
     if (Object.keys(e).length) out[id] = e;
@@ -362,13 +391,15 @@ async function buildTypeIcons() {
 }
 
 async function main() {
-  // `--tables` rebuilds just the move/ability/item tables (no Smogon stats, priors untouched).
+  // `--tables` rebuilds just the move/ability/item tables (no Smogon stats, priors untouched); `--moves` just the move
+  // effects (nothing downloaded: they come from the installed packages).
   const args = process.argv.slice(2);
   const tablesOnly = args.includes('--tables');
   fs.mkdirSync(OUT_DIR, {recursive: true});
   const moves = buildMoves();
   fs.writeFileSync(path.join(ROOT, 'src', 'data', 'moves.gen.json'), JSON.stringify(moves));
   console.log(`Move effects: ${Object.keys(moves).length} moves`);
+  if (args.includes('--moves')) return;
   const abilities = buildAbilities();
   fs.writeFileSync(path.join(ROOT, 'src', 'data', 'abilities.gen.json'), JSON.stringify(abilities));
   console.log(`Legal abilities: ${Object.keys(abilities).length} species`);

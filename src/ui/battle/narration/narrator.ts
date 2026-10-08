@@ -14,23 +14,24 @@
  * that can't come after one already made: Fake Out after an ordinary attack). What it heard goes
  * with the entries it was about when they're taken back (undo on the screen).
  */
+import LEGAL_ABILITIES from '../../../data/abilities.gen.json';
 import {isStatusMove, move as dexMove, STAT_LABELS, toID, type BoostID, type Gen} from '../../../data/dex';
-import {BLOCKERS, DROP_REACT} from '../../../engine/abilities';
-import {megaFormeOf} from '../../../engine/likelihood';
-import {moveFx} from '../../../engine/moves';
-import {maxHPOf, type StateCtx} from '../../../engine/state';
+import {BLOCKERS, DROP_REACT, SEEDS} from '../../../engine/abilities';
+import {megaFormeOf, stoneForme} from '../../../engine/likelihood';
+import {moveFx, RISES_BEFORE_HIT} from '../../../engine/moves';
+import {maxHPOf, TERRAIN_ABILITY, typesOf, WEATHER_ABILITY, WEATHER_ROCK, type StateCtx} from '../../../engine/state';
 import type {MonSummary} from '../../../engine/worker';
 import {
   monKey, sameMon, type ActionEvent, type Battle, type Boosts, type HitResult, type MonRef, type SideID, type Snapshot, type Status,
-  type Trigger,
+  type Trigger, type Weather,
 } from '../../../engine/types';
 import {
   canMoveAction, editLive, endTurn, helpedThisTurn, logAction, logCheck, logMega, logReveal, logSwitch, moveAction, setOrdered, turnActions, undo,
   type ActionDraft,
 } from '../actions';
-import {pendingChecks} from '../checks';
+import {openMoments, pendingChecks} from '../checks';
 import {monLabel} from '../names';
-import {applyNews, fieldAgrees, type FieldNews} from './messages';
+import {applyNews, fieldAgrees, newsKey, type FieldNews} from './messages';
 import type {NarrationEvent} from './parse';
 
 export interface NarratorIO {
@@ -72,6 +73,9 @@ const THROUGH_PROTECT = new Set(['feint', 'shadowforce', 'phantomforce', 'hypers
 const PIVOTS = new Set(['uturn', 'voltswitch', 'flipturn', 'partingshot', 'batonpass', 'teleport', 'shedtail', 'chillyreception']);
 /** Berries that restore HP when eaten mid-move ("…had its HP restored." after their pop-up). */
 const HEALING_BERRIES = new Set(['Sitrus Berry', 'Oran Berry', 'Figy Berry', 'Wiki Berry', 'Mago Berry', 'Aguav Berry', 'Iapapa Berry']);
+/** Items used up as their pop-up shows (besides berries, and those a hit or a reaction takes care of). */
+const ONE_USE = new Set([...Object.values(SEEDS), 'Room Service', 'Booster Energy', 'Mental Herb', 'Power Herb', 'Mirror Herb',
+  'Throat Spray', 'Eject Button', 'Eject Pack', 'Red Card', 'Blunder Policy', 'Absorb Bulb', 'Cell Battery', 'Luminous Moss', 'Snowball']);
 
 /** A stat change the game showed, in stages. */
 interface Heard {
@@ -84,6 +88,8 @@ interface Change {
   key: string;
   stat: BoostID;
   sign: number;
+  /** By how many stages. */
+  delta: number;
 }
 
 /** Straight onto the board, as the game shows it (not evidence). Each one can be made again safely. */
@@ -92,7 +98,19 @@ type Edit =
   | {kind: 'status'; key: string; status: Status}
   | {kind: 'itemGone'; key: string}
   | {kind: 'hp'; key: string; hp: number}
-  | {kind: 'field'; news: FieldNews};
+  | {kind: 'field'; news: FieldNews}
+  /** Its types as the game says they've become (none: its own again). */
+  | {kind: 'types'; key: string; types?: string[]}
+  | {kind: 'odd'; key: string}
+  /** Ally Switch: the two of a side change places. */
+  | {kind: 'places'; side: SideID}
+  /**
+   * A timed effect's setter, for what may stretch it (FieldCondition.mayLast: none, known now); `turns`: as long as it's
+   * known to last.
+   */
+  | {kind: 'lasts'; key: string; by?: {slot: number; item: string}; turns?: number}
+  /** A binding move let go of it; `hp`: as it was before the hurt the log gave it this turn, which it didn't take. */
+  | {kind: 'unbound'; key: string; hp?: number};
 
 interface Draft {
   actor: MonRef;
@@ -111,6 +129,8 @@ interface Draft {
   crit?: boolean;
   failed?: boolean;
   hitCount?: number;
+  /** A two-turn move's charge was said ("…absorbed electricity!"). */
+  charging?: boolean;
   /** Stat changes the game showed while it was open: checked against what logging it does. */
   heard: Heard[];
   /** What came with or after the move but isn't part of it (the field, an item gone): made once it's logged. */
@@ -131,6 +151,11 @@ const END_OF_TURN_ABILITIES = new Set([
 ]);
 const END_OF_TURN_ITEMS = new Set(['Leftovers', 'Black Sludge']);
 
+/** Two-turn moves that charge and hit in the same turn in this weather. */
+const FIRES_AT_ONCE: Record<string, readonly string[]> = {
+  electroshot: ['Rain', 'Heavy Rain'], solarbeam: ['Sun', 'Harsh Sunshine'], solarblade: ['Sun', 'Harsh Sunshine'],
+};
+
 const clamp6 = (n: number) => Math.max(-6, Math.min(6, n));
 const entries = (b: Boosts) => Object.entries(b) as [BoostID, number][];
 /** Every stat the game named went the way this effect sends it. */
@@ -139,6 +164,18 @@ const agrees = (effect: Boosts, seen: Boosts) => entries(seen).length > 0 && ent
 function applyEdit(live: Snapshot, e: Edit) {
   if (e.kind === 'field') {
     applyNews(live.field, e.news);
+    return;
+  }
+  if (e.kind === 'places') {
+    live.active[e.side] = [...live.active[e.side]].reverse();
+    return;
+  }
+  if (e.kind === 'lasts') {
+    const may = {...(live.field.mayLast ?? {})};
+    if (e.by) may[e.key] = {...e.by};
+    else delete may[e.key];
+    live.field.mayLast = may;
+    if (e.turns) live.field.turns = {...(live.field.turns ?? {}), [e.key]: e.turns};
     return;
   }
   const c = live.mons[e.key];
@@ -152,6 +189,15 @@ function applyEdit(live: Snapshot, e: Edit) {
   if (e.kind === 'status') c.status = e.status;
   if (e.kind === 'itemGone') c.itemGone = true;
   if (e.kind === 'hp') Object.assign(c, {hp: e.hp, hpUnknown: false, hpEstimated: false}, e.hp <= 0 ? {boosts: {}} : {});
+  if (e.kind === 'types') {
+    if (e.types) c.types = [...e.types];
+    else delete c.types;
+  }
+  if (e.kind === 'odd') c.odd = true;
+  if (e.kind === 'unbound') {
+    delete c.bound;
+    if (e.hp !== undefined) c.hp = e.hp;
+  }
 }
 
 declare const saved: unique symbol;
@@ -168,6 +214,10 @@ export class Narrator {
   private pending = new Map<string, {place: 'first' | 'last'; other?: MonRef}>();
   /** Stat changes made by what was logged since the last move started, for the game's lines about them. */
   private explained: Change[] = [];
+  /** The last ability pop-up, for the weather or terrain it sets (the line after it). */
+  private shownAbility: {mon: MonRef; ability: string} | null = null;
+  /** Theirs whose stat line turned a logged change round (see matchChange): Contrary, unless it's their Mega's. */
+  private reversed = new Set<string>();
   /** Past the last move (a switch, one that couldn't move, the end of the turn): HP said now is where it's at. */
   private sealed = false;
   /** The end of the turn has come: the turn has been ended already. */
@@ -188,6 +238,10 @@ export class Narrator {
   private popped: {key: string; item: string} | null = null;
   /** Made by an Encore to use its last move this turn ("…must do an encore!"): that move goes at the priority of the one chosen. */
   private encored = new Set<string>();
+  /** Theirs whose Trace just showed: the ability pop-up next for it is the one it copied. */
+  private traced: string | null = null;
+  /** Made to move again this turn by an Instruct ("…followed …'s instructions!"): its next move isn't a new turn's. */
+  private instructed = new Set<string>();
 
   constructor(private io: NarratorIO) {}
 
@@ -196,6 +250,7 @@ export class Narrator {
     if (this.anchor && !this.io.battle().events.some(e => e.id === this.anchor)) {
       this.couldnt.clear();
       this.encored.clear();
+      this.instructed.clear();
       this.pending.clear();
       this.quick.clear();
       this.explained = [];
@@ -220,10 +275,19 @@ export class Narrator {
    * The move is one logged this turn told again: the last thing logged (said twice), or one this phrase brings up
    * after telling of this turn ("…but Raichu had Protect"). Otherwise its Pokémon moving again is the next turn's.
    */
+  /** A two-turn move that charged and won't hit until next turn (no rain for its Electro Shot…). */
+  private chargeOnly(d: Draft): boolean {
+    const weather = this.io.battle().live.field.weather;
+    return !!d.charging && !(weather && FIRES_AT_ONCE[toID(d.move)]?.includes(weather));
+  }
+
   private toldAgain(actor: MonRef, move: string) {
     const b = this.io.battle();
+    // Another's move open since (an Instruct, its "…followed …'s instructions!"): its move once more, not told again.
+    if (this.instructed.has(monKey(actor)) || (this.draft && !sameMon(this.draft.actor, actor))) return false;
     const same = turnActions(b).find(a => sameMon(a.actor, actor) && a.move === move);
-    if (!same || !this.fits(same)) return false;
+    // After a charge, the move said again is its attack: the next turn's.
+    if (!same || same.charged || !this.fits(same)) return false;
     if (this.phraseTurn === b.turn) return true;
     if (this.sealed) return false;
     for (let k = b.events.length - 1; k >= 0; k--) {
@@ -342,18 +406,22 @@ export class Narrator {
     const extra = this.settle(changes, d.heard);
     if (logged?.kind === 'action') this.kept = {id: logged.id, draft: d, extra};
     this.editNow([...extra, ...d.later], false);
+    this.showReversed();
     // Its place in the turn was said before its move was ("Rillaboom moved first… Fake Out").
     const wanted = this.pending.get(monKey(d.actor));
     this.pending.delete(monKey(d.actor));
     const moved = wanted ? this.reorder(d.actor, wanted.place, wanted.other) : '';
-    // Its priority isn't its own (an Encore made it): its place in the turn says nothing of its Speed.
-    if (logged?.kind === 'action' && this.encored.has(monKey(d.actor))) this.io.apply(bb => setOrdered(bb, logged.id, false));
+    // Its priority isn't its own (an Encore made it), something else put it where it went (After You, Quash, Instruct), or
+    // it's changed in a way the app doesn't follow: its place in the turn says nothing of its Speed.
+    const odd = !!this.io.battle().live.mons[monKey(d.actor)]?.odd;
+    if (logged?.kind === 'action' && (this.encored.has(monKey(d.actor)) || odd)) this.io.apply(bb => setOrdered(bb, logged.id, false));
+    this.instructed.delete(monKey(d.actor));
     const which = this.whichOne(d);
     const hits = which ? [`${which} (not said): HP skipped`] : action.hits.map(h => `${this.label(h.target)} ${h.fainted ? 'KO' : h.noEffect ? 'immune'
       : h.unread ? 'HP skipped' : `${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}`);
     const missed = which ? [] : d.rows.filter(r => r.missed && (r.shielded || r.said)).map(r => `${this.label(r.ref)} ${r.shielded ? 'protected' : 'missed'}`);
     const outcome = [...hits, ...missed];
-    const done = `✓ ${this.label(d.actor)} · ${d.move}${d.failed ? ' → failed' : outcome.length ? ` → ${outcome.join(', ')}` : ''}`;
+    const done = `✓ ${this.label(d.actor)} · ${d.move}${d.failed ? ' → failed' : action.charged ? ' → charging' : outcome.length ? ` → ${outcome.join(', ')}` : ''}`;
     this.mark();
     return [done, moved].filter(Boolean).join(' · ');
   }
@@ -403,7 +471,7 @@ export class Narrator {
     return {
       actor: ev.actor, move: ev.move, spread, status, rows, actorTriggers: [...ev.actorTriggers], actorStatus: ev.actorStatus,
       actorBoosts: ev.actorBoosts, actorHp: ev.actorHpAfter, quick: ev.quick ?? undefined, failed: ev.failed, hitCount: ev.hitCount,
-      lastRow: rows.length === 1 ? rows[0].ref : undefined, heard: [], later: [],
+      charging: ev.charged, lastRow: rows.length === 1 ? rows[0].ref : undefined, heard: [], later: [],
     };
   }
 
@@ -461,11 +529,13 @@ export class Narrator {
     // The pop-up just before this, if it was an item's (a Sitrus Berry's "…had its HP restored." follows it).
     const popped = this.popped;
     this.popped = ev.kind === 'item' && ev.mon ? {key: monKey(ev.mon), item: ev.item} : null;
+    // Trace's copy shows straight after Trace: anything else between, and it's over.
+    if (ev.kind !== 'ability') this.traced = null;
     switch (ev.kind) {
       case 'use': {
         // The move told again: said twice ("Raichu Protect… Raichu Protect?"), or brought up again as a phrase goes on
         // ("Fake Out into Raichu, but Raichu had Protect"). It's the one there is: not a second move, nor a new turn.
-        if (this.draft && sameMon(this.draft.actor, ev.actor) && this.draft.move === ev.move && this.fitsOpen(this.draft)) {
+        if (this.draft && sameMon(this.draft.actor, ev.actor) && this.draft.move === ev.move && !this.chargeOnly(this.draft) && this.fitsOpen(this.draft)) {
           this.phraseTurn = b.turn;
           return [];
         }
@@ -476,6 +546,7 @@ export class Narrator {
         }
         this.retelling = false;
         const done = this.commit();
+        this.nothingShown();
         // It couldn't move earlier this turn: the next turn's. (One that moved already this turn starts the next as it's
         // logged. A move said after ones it must have come before, Fake Out after an ordinary attack, is this turn's,
         // said out of order: it goes in its place once logged.)
@@ -625,7 +696,8 @@ export class Narrator {
       }
       case 'recoil': {
         const d = this.draft ?? this.reopen(ev.mon);
-        if (d && d.actor.side === 'opp' && (!ev.mon || sameMon(ev.mon, d.actor))) d.actorTriggers.push('lifeorb');
+        // The pop-up ("…'s Life Orb") and "…lost some of its HP!" say the same recoil.
+        if (d && d.actor.side === 'opp' && (!ev.mon || sameMon(ev.mon, d.actor)) && !d.actorTriggers.includes('lifeorb')) d.actorTriggers.push('lifeorb');
         return [];
       }
       case 'status': {
@@ -670,6 +742,32 @@ export class Narrator {
         return [`${this.label(ev.mon)}: status over`];
       case 'stat':
         return ev.mon ? this.stat(ev.mon, ev.boosts, ev.limit) : [];
+      case 'copyBoosts':
+        return this.copyBoosts(ev.mon, ev.from, ev.invert);
+      case 'outOfTurn':
+        // After You, Quash, Instruct: its move this turn goes where they put it, so it says nothing of its Speed.
+        this.encored.add(monKey(ev.mon));
+        if (ev.again) this.instructed.add(monKey(ev.mon));
+        return [];
+      case 'types':
+        return this.retype(ev);
+      case 'onField': {
+        // Its HP box is up where the log has another (its switch read wrong, or missed): it came in there.
+        const now = this.io.battle();
+        const {side, slot} = ev.mon;
+        if (now.live.active[side].includes(slot) || ev.position >= now.live.active[side].length) return [];
+        const done = this.commit();
+        this.sealed = true;
+        this.explained.push(...this.log((bb, c) => logSwitch(c, bb, side, ev.position, slot)));
+        return [done, `${this.label(ev.mon)} is out (its HP box): logged as come in`];
+      }
+      case 'places':
+        if (this.io.battle().live.active[ev.side].length !== 2) return [];
+        this.edit({kind: 'places', side: ev.side});
+        return [`${ev.side === 'me' ? 'yours' : 'theirs'} switched places`];
+      case 'odd':
+        this.edit({kind: 'odd', key: monKey(ev.mon)});
+        return [`${this.label(ev.mon)} changed: what it does now isn't counted`];
       case 'unchanged':
         return this.unchanged(ev.mon, ev.stats);
       case 'field':
@@ -677,6 +775,20 @@ export class Narrator {
       case 'battleEnd':
         // "The battle has ended due to a forfeit.", "You lost to …!": the move still being told is logged.
         return this.endPhase();
+      case 'charge': {
+        // A two-turn move's charge ("…absorbed electricity!"), with its "…used" line or without: its stat rise (Electro
+        // Shot's, Meteor Beam's) comes with the charge, so a Protect against the hit doesn't stop it. In the rain (Electro
+        // Shot) or the sun (Solar Beam) the hit comes straight after; otherwise this was its turn, the attack the next.
+        if (!ev.mon) return [];
+        const notes = this.draft && sameMon(this.draft.actor, ev.mon) ? [] : this.one({kind: 'use', actor: ev.mon, move: ev.move});
+        if (this.draft && sameMon(this.draft.actor, ev.mon)) {
+          this.draft.charging = true;
+          // The charge always comes with its rise: had even if its "…'s Sp. Atk rose!" isn't read.
+          const rise = RISES_BEFORE_HIT[toID(ev.move)];
+          if (rise && !this.draft.actorBoosts) this.draft.actorBoosts = {...rise};
+        }
+        return notes;
+      }
       case 'encored': {
         // "…must do an encore!": whom the Encore being told was aimed at; its move this turn says nothing of its Speed.
         const d = this.draft;
@@ -684,6 +796,26 @@ export class Narrator {
         if (row) row.said = true;
         if (ev.mon) this.encored.add(monKey(ev.mon));
         return [];
+      }
+      case 'trapped': {
+        // The move being told reached it: logging it holds it (MonCondition.bound, seeded, salted).
+        const d = this.draft;
+        const row = d && ev.mon ? this.row(d, ev.mon) : null;
+        if (row && !row.missed) row.said = true;
+        return [];
+      }
+      case 'freed': {
+        // At the end of a turn, instead of its hurt: the log, not knowing whether it was 4 turns or 5, gave it that.
+        const notes = this.endPhase();
+        if (!ev.mon) return notes;
+        const key = monKey(ev.mon);
+        const now = this.io.battle();
+        const c = now.live.mons[key];
+        if (!c?.bound) return notes;
+        const max = maxHPOf(this.io.ctx(now), now.live, ev.mon);
+        const back = ev.mon.side === 'me' ? Math.floor(max / 8) : 100 / 8;
+        this.edit({kind: 'unbound', key, hp: c.bound.ticks >= 1 && c.hp > 0 ? Math.min(max, Math.round(c.hp + back)) : undefined});
+        return [...notes, `${this.label(ev.mon)}: free of ${c.bound.move}`];
       }
       case 'residual': {
         // "…had its HP restored." straight after a healing berry of one in the move being told: part of the move. (After
@@ -717,7 +849,7 @@ export class Narrator {
         const d = withHit ? this.draft ?? this.reopen(mon) : this.draft;
         const {notes, onHit} = this.item(d, mon, ev.item);
         // A berry the game names outside a hit was eaten (a Lum Berry curing, a Sitrus at the end of the turn).
-        const gone = ev.gone ?? (!onHit && /Berry$/.test(ev.item));
+        const gone = ev.gone ?? (!onHit && (/Berry$/.test(ev.item) || ONE_USE.has(ev.item)));
         if (gone && mon) this.edit({kind: 'itemGone', key: monKey(mon)});
         return [...ended, ...notes];
       }
@@ -730,6 +862,7 @@ export class Narrator {
         // Speed Boost, Poison Heal…: the end of the turn.
         const notes = END_OF_TURN_ABILITIES.has(ev.ability) ? this.endPhase() : [];
         const mon = this.popupOwner(ev.mon, 'ability', ev.ability);
+        this.shownAbility = mon ? {mon, ability: ev.ability} : null;
         return [...notes, ...this.ability(this.io.battle(), this.draft, mon, ev.ability)];
       }
       case 'mega': {
@@ -777,9 +910,12 @@ export class Narrator {
       }
       case 'endTurn': {
         const done = this.commit();
+        // The moves being chosen: what came in has shown what it had.
+        this.nothingShown();
         this.pending.clear();
         this.couldnt.clear();
         this.encored.clear();
+        this.instructed.clear();
         this.sealed = true;
         // The turn already ended with its first end-of-turn line.
         if (this.ending) return [done];
@@ -867,6 +1003,7 @@ export class Narrator {
     this.pending.clear();
     this.couldnt.clear();
     this.encored.clear();
+    this.instructed.clear();
     const now = this.io.battle();
     if (!turnActions(now).length) return [done];
     this.log((bb, c) => endTurn(c, bb));
@@ -995,10 +1132,12 @@ export class Narrator {
     }
     if (limit) return this.board(mon, boosts, true);
     const rest = this.consume(monKey(mon), boosts);
+    this.showReversed();
     if (!entries(rest).length) return [heard];
     const re = this.reopen(mon);
     if (re) {
-      this.heardInMove(re, mon, rest);
+      // Logged again, it's checked again then: by what the game said, all of it.
+      this.heardInMove(re, mon, Object.fromEntries(entries(boosts).filter(([s]) => s in rest)) as Boosts);
       return [heard];
     }
     return this.board(mon, rest);
@@ -1008,9 +1147,9 @@ export class Narrator {
     const fx = moveFx(d.move);
     const key = monKey(mon);
     if (sameMon(mon, d.actor)) {
-      // Its own chance boost: Meteor Mash, Ancient Power, Charge Beam…
-      const s = (fx.sec ?? []).find(x => x.ch < 100 && x.sb && agrees(x.sb, boosts));
-      if (s && !limit) d.actorBoosts = {...s.sb};
+      // Its own chance boost (Meteor Mash, Ancient Power, Charge Beam…), or a charge's rise before its hit (Electro Shot).
+      const s = (fx.sec ?? []).find(x => x.ch < 100 && x.sb && agrees(x.sb, boosts))?.sb ?? RISES_BEFORE_HIT[toID(d.move)];
+      if (s && agrees(s, boosts) && !limit) d.actorBoosts = {...s};
     } else {
       const row = this.row(d, mon);
       if (row && !row.missed && !row.noEffect) {
@@ -1040,20 +1179,57 @@ export class Narrator {
     return mon.side === 'opp' && !!this.io.mons()?.[mon.slot]?.abilities.some(a => a.name === ability && a.p > 0);
   }
 
-  /** Take the stat changes something logged made off what the game said; what's left wasn't. */
+  /**
+   * Take the stat changes something logged made off what the game said; what's left wasn't. By as much as the game
+   * says, whatever the move's data has: Champions' Make It Rain lowers Sp. Atk by 2 where Scarlet and Violet's lowered
+   * it by 1, and a Simple Pokémon's changes are doubled.
+   */
   private consume(key: string, boosts: Boosts): Boosts {
     const rest: Boosts = {};
     for (const [stat, v] of entries(boosts)) {
-      const at = this.explained.findIndex(c => c.key === key && c.stat === stat && c.sign === Math.sign(v));
-      if (at >= 0) this.explained.splice(at, 1);
-      else rest[stat] = v;
+      const made = this.matchChange(this.explained, key, stat, v)?.delta ?? 0;
+      if (made !== v) rest[stat] = v - made;
     }
     return rest;
   }
 
   /**
+   * The logged change a stat line is about, taken off the list: one of the same sign, else, on one of theirs that may
+   * have Contrary, the one it turns round exactly ("…'s Defense and Sp. Def rose!" after its Close Combat logged as
+   * drops), which the game's line then replaces. Only then: a Competitive's "sharply rose" after a drop it was never
+   * told isn't a drop turned round.
+   */
+  private matchChange(list: Change[], key: string, stat: BoostID, v: number): Change | undefined {
+    let at = list.findIndex(c => c.key === key && c.stat === stat && c.sign === Math.sign(v));
+    if (at < 0 && this.mayReverse(key)) at = list.findIndex(c => c.key === key && c.stat === stat && c.delta === -v);
+    if (at < 0) return undefined;
+    const [c] = list.splice(at, 1);
+    if (c.sign !== Math.sign(v)) this.reversed.add(key);
+    return c;
+  }
+
+  /** A change turned round on one of theirs that may have entered with Contrary: that's its ability, shown. */
+  private showReversed() {
+    for (const key of this.reversed) {
+      const slot = Number(key.slice(3));
+      const known = this.io.mons()?.[slot]?.abilities.find(a => a.name === 'Contrary');
+      if (known && known.p < 1) this.io.apply(bb => logReveal(bb, {side: 'opp', slot}, 'ability', 'Contrary'));
+    }
+    this.reversed.clear();
+  }
+
+  /** One of theirs that may have Contrary (as it entered, or as the Mega it may be). */
+  private mayReverse(key: string): boolean {
+    if (!key.startsWith('opp')) return false;
+    const slot = Number(key.slice(3));
+    const m = this.io.mons()?.[slot];
+    return this.mayHave({side: 'opp', slot}, 'Contrary') || Object.values(m?.megaAbilityOf ?? {}).includes('Contrary');
+  }
+
+  /**
    * Once a move is logged: the stat changes the game showed while it was open that logging it
-   * didn't make are made as said; the ones it made that the game hasn't shown yet may still be.
+   * didn't make are made as said, and the ones it made by as much as said (see consume); the ones
+   * it made that the game hasn't shown yet may still be.
    */
   private settle(changes: Change[], heard: Heard[]): Edit[] {
     const left = [...changes];
@@ -1062,13 +1238,10 @@ export class Narrator {
     const now = new Map<string, number>();
     for (const h of heard) {
       for (const [stat, v] of entries(h.boosts)) {
-        const at = left.findIndex(c => c.key === h.key && c.stat === stat && c.sign === Math.sign(v));
-        if (at >= 0) {
-          left.splice(at, 1);
-          continue;
-        }
+        const made = this.matchChange(left, h.key, stat, v)?.delta ?? 0;
+        if (made === v) continue;
         const k = `${h.key}.${stat}`;
-        const value = clamp6((now.get(k) ?? live.mons[h.key]?.boosts[stat] ?? 0) + v);
+        const value = clamp6((now.get(k) ?? live.mons[h.key]?.boosts[stat] ?? 0) + v - made);
         now.set(k, value);
         out.push({kind: 'stage', key: h.key, stat, value});
       }
@@ -1091,6 +1264,158 @@ export class Narrator {
     return bits.length ? [`${this.label(mon)}: ${bits.join(', ')}`] : [];
   }
 
+  /**
+   * Psych Up: its stat stages become the other's, as the game says (the move names no target the log could use).
+   * Topsy-Turvy (`invert`): its own, the other way round.
+   */
+  private copyBoosts(mon: MonRef, from: MonRef, invert?: boolean): string[] {
+    const b = this.io.battle();
+    const src = b.live.mons[monKey(from)];
+    const c = b.live.mons[monKey(mon)];
+    if (!src || !c || c.hp <= 0) return [];
+    const bits: string[] = [];
+    for (const stat of STAGES) {
+      const value = (invert ? -1 : 1) * (src.boosts[stat] ?? 0);
+      if ((c.boosts[stat] ?? 0) === value) continue;
+      this.edit({kind: 'stage', key: monKey(mon), stat, value});
+      bits.push(`${STAT_LABELS[stat]} ${value > 0 ? '+' : ''}${value}`);
+    }
+    const what = invert ? 'stat changes inverted' : `copied ${this.label(from)}'s stat changes`;
+    return [`${this.label(mon)}: ${what}${bits.length ? ` (${bits.join(', ')})` : ''}`];
+  }
+
+  /** Its types as the game says they've become: Protean, Libero, Soak, Reflect Type, Trick-or-Treat, Burn Up… */
+  private retype(ev: Extract<NarrationEvent, {kind: 'types'}>): string[] {
+    const b = this.io.battle();
+    const ctx = this.io.ctx(b);
+    const now = typesOf(ctx, b.live, ev.mon);
+    let types: string[] | undefined;
+    if (ev.to) types = [ev.to];
+    else if (ev.like) types = typesOf(ctx, b.live, ev.like);
+    else if (ev.add) types = now.includes(ev.add) ? now : [...now, ev.add];
+    else if (ev.lose) types = now.filter(t => t !== ev.lose);
+    // Burn Up on a Pokémon that's only Fire leaves it with no type, which the calc has no way to take.
+    if (types && !types.length) return [];
+    this.edit({kind: 'types', key: monKey(ev.mon), types});
+    return [`${this.label(ev.mon)}: ${types ? types.join('/') : 'its own types again'}`];
+  }
+
+  /**
+   * What came in showed no ability or item on its way in (no Intimidate, no Drought, no Air Balloon…), and what my
+   * Intimidate met didn't react: with every line of the game read, that's the answer, not a question left open. Once the
+   * moment has passed (a move used, the moves being chosen). A pop-up logged as a plain reveal (the beliefs not in yet to
+   * match it to the question) is the answer instead; the weather or terrain changing with no ability shown for it leaves
+   * the question to be answered.
+   */
+  private nothingShown() {
+    const b = this.io.battle();
+    for (const o of openMoments(b)) {
+      const key = monKey(o.mon);
+      const c = b.live.mons[key];
+      if (!c) continue;
+      const since = b.events.slice(b.events.findIndex(e => e.id === o.about) + 1);
+      const shown = since.filter(e => e.kind === 'reveal' && (e.what === 'ability' || e.what === 'item') && !e.negate && sameMon(e.mon, o.mon)).at(-1);
+      // The terrain up as it came in: its seed would have gone off too. The weather and terrain up before: an ability
+      // that would set them again says nothing.
+      const terrain = o.context === 'entry' ? b.live.field.terrain : undefined;
+      const already = o.context === 'entry' && o.before ? {weather: o.before.field.weather, terrain: o.before.field.terrain} : undefined;
+      if (shown?.kind === 'reveal') {
+        this.explained.push(...this.log((bb, cx) => logCheck(cx, bb, {
+          mon: o.mon, context: o.context, about: o.about, seen: shown.value, seenKind: shown.what === 'item' ? 'item' : 'ability',
+          // An item it showed (a seed, used up as it went off) it held then.
+          mega: !!c.mega, itemGone: shown.what === 'item' ? false : !!c.itemGone, applied: true, terrain, already,
+        })));
+        continue;
+      }
+      const before = o.before;
+      if (o.context === 'entry' && before) {
+        const changed = before.field.weather !== b.live.field.weather || before.field.terrain !== b.live.field.terrain;
+        const shown = since.some(e => (e.kind === 'reveal' && e.what === 'ability') || (e.kind === 'check' && e.seenKind === 'ability' && !!e.seen));
+        if (changed && !shown) continue;
+      }
+      // My Intimidate taken as it comes: its Attack a stage down from before (else something answered it).
+      if (o.context === 'intimidate' && before && (c.boosts.atk ?? 0) !== Math.max(-6, (before.mons[key]?.boosts.atk ?? 0) - 1)) continue;
+      this.explained.push(...this.log((bb, cx) => logCheck(cx, bb, {
+        mon: o.mon, context: o.context, about: o.about, seen: null, mega: !!c.mega, itemGone: !!c.itemGone, terrain, already,
+      })));
+    }
+    this.seedsShown();
+    this.stretchShown();
+  }
+
+  /**
+   * Their screen, weather or terrain up still past its 5th turn, and no line saying it's over: its setter holds what
+   * makes it last 8 (6 Oct: Sableye's Light Screen wore off after 8 turns, and had been taken off after 5).
+   */
+  private stretchShown() {
+    for (const [key, m] of Object.entries(this.io.battle().live.field.mayLast ?? {})) {
+      if (!m.past) continue;
+      // Shown to hold something else since: it can't be.
+      if (this.io.mons()?.[m.slot]?.items.find(i => i.name === m.item)?.p === 0) continue;
+      this.io.apply(bb => logReveal(bb, {side: 'opp', slot: m.slot}, 'item', m.item));
+      this.edit({kind: 'lasts', key});
+    }
+  }
+
+  /**
+   * Weather or terrain the ability just shown set ("…'s Drizzle", "It started to rain!"): 8 turns where its holder's
+   * Damp Rock (Terrain Extender…) is known, and where it's theirs with an item not known, maybe (see FieldCondition.mayLast).
+   */
+  private setBy(news: FieldNews): Edit | null {
+    const by = this.shownAbility;
+    if (!by || !news.value || (news.what !== 'weather' && news.what !== 'terrain')) return null;
+    const sets = news.what === 'weather' ? WEATHER_ABILITY[by.ability] : TERRAIN_ABILITY[by.ability];
+    if (sets !== news.value) return null;
+    this.shownAbility = null;
+    const stretcher = news.what === 'weather' ? WEATHER_ROCK[news.value as Weather] : 'Terrain Extender';
+    if (!stretcher) return null;
+    const known = by.mon.side === 'me'
+      ? this.io.battle().myTeam[by.mon.slot]?.item ?? null
+      : this.io.mons()?.[by.mon.slot]?.items.find(i => i.p >= 1)?.name;
+    if (known !== undefined) return known === stretcher ? {kind: 'lasts', key: news.what, turns: 8} : null;
+    return {kind: 'lasts', key: news.what, by: {slot: by.mon.slot, item: stretcher}};
+  }
+
+  /** Over right at the end of its 5th turn: its setter doesn't hold what would have made it last 8. */
+  private stretchOver(news: FieldNews) {
+    const key = newsKey(news);
+    const f = this.io.battle().live.field;
+    const m = key ? f.mayLast?.[key] : undefined;
+    if (m?.past && !news.value && f.turns?.[key!] === 3) {
+      this.io.apply(bb => logReveal(bb, {side: 'opp', slot: m.slot}, 'item', m.item, true));
+    }
+  }
+
+  /**
+   * A terrain up with one of theirs out: its seed would have gone off, on its way in (its entry, answered above) or as
+   * the terrain started. Once for each stay on the field and terrain.
+   */
+  private seedsShown() {
+    const b = this.io.battle();
+    const terrain = b.live.field.terrain;
+    if (!terrain) return;
+    const seed = SEEDS[terrain];
+    for (const slot of b.live.active.opp) {
+      if (slot === null) continue;
+      const mon: MonRef = {side: 'opp', slot};
+      const c = b.live.mons[monKey(mon)];
+      let at = -1;
+      b.events.forEach((e, k) => {
+        if (e.kind === 'switch' && e.side === 'opp' && e.slotIn === slot) at = k;
+      });
+      if (!c || c.hp <= 0 || at < 0) continue;
+      const about = `${b.events[at].id}:${terrain}`;
+      const since = b.events.slice(at + 1);
+      if (since.some(e => e.kind === 'check' && sameMon(e.mon, mon) && (e.context === 'terrain' ? e.about === about : e.context === 'entry' && e.terrain === terrain))) continue;
+      const shown = since.some(e => e.kind === 'reveal' && e.what === 'item' && e.value === seed && sameMon(e.mon, mon));
+      if (c.itemGone && !shown) continue;
+      this.explained.push(...this.log((bb, cx) => logCheck(cx, bb, {
+        mon, context: 'terrain', about, terrain, seen: shown ? seed : null, seenKind: shown ? 'item' : undefined,
+        mega: !!c.mega, itemGone: shown ? false : !!c.itemGone, applied: shown || undefined,
+      })));
+    }
+  }
+
   /** The field as a line describes it: ending the turn if it's an end-of-turn line, then made so if it isn't already. */
   private field(news: FieldNews): (string | null)[] {
     const notes = this.endsTurn(news) ? this.endPhase() : [];
@@ -1102,8 +1427,11 @@ export class Narrator {
       if (sides.length !== 1 || n.value) return notes;
       news = {...n, side: sides[0]};
     }
+    this.stretchOver(news);
     if (fieldAgrees(f, news)) return [...notes, `${fieldNote(news)} ✓`];
     this.edit({kind: 'field', news});
+    const set = this.setBy(news);
+    if (set) this.edit(set);
     return [...notes, fieldNote(news)];
   }
 
@@ -1165,7 +1493,7 @@ export class Narrator {
       if (!was || c.hp <= 0) continue;
       for (const stat of STAGES) {
         const d = (c.boosts[stat] ?? 0) - (was.boosts[stat] ?? 0);
-        if (d) out.push({key, stat, sign: Math.sign(d)});
+        if (d) out.push({key, stat, sign: Math.sign(d), delta: d});
       }
     }
     return out;
@@ -1200,7 +1528,7 @@ export class Narrator {
     }
     if (d) {
       if (item === 'Life Orb' && (!mon || sameMon(mon, d.actor))) {
-        if (d.actor.side === 'opp') d.actorTriggers.push('lifeorb');
+        if (d.actor.side === 'opp' && !d.actorTriggers.includes('lifeorb')) d.actorTriggers.push('lifeorb');
         return {notes: [], onHit: true};
       }
       if (item === 'Rocky Helmet' && d.actor.side === 'me') {
@@ -1226,6 +1554,14 @@ export class Narrator {
 
   private ability(b: Battle, d: Draft | null, mon: MonRef, ability: string): (string | null)[] {
     if (mon.side === 'me') return [];
+    // Trace's pop-up, then the one it copied ("…'s Prankster", from your Grimmsnarl): that one isn't its own.
+    if (this.traced === monKey(mon)) {
+      this.traced = null;
+      return [`${this.label(mon)}: traced ${ability}`];
+    }
+    if (ability === 'Trace') this.traced = monKey(mon);
+    // One none of its formes can have (Trace's copy read without Trace's own pop-up, a Skill Swap…): not its own.
+    if (!this.canHave(mon, ability)) return [`${this.label(mon)}: ${ability} (not its own)`];
     if (ability === 'Quick Draw') this.quick.set(monKey(mon), 'Quick Draw');
     // An open "what did the game show?" question about it (entry abilities, Intimidate reactions).
     const ctx = this.io.ctx(b);
@@ -1249,10 +1585,34 @@ export class Narrator {
     return [`${this.label(mon)}: ${ability}`];
   }
 
+  /** One of theirs can have this ability: one of its formes' (a Mega's own too). */
+  private canHave(mon: MonRef, ability: string): boolean {
+    const b = this.io.battle();
+    const species = b.oppPreview[mon.slot];
+    if (!species) return true;
+    const formes = this.io.ctx(b).fmt.preview[species] ?? [species];
+    return formes.some(f => {
+      const legal = (LEGAL_ABILITIES as Record<string, string[]>)[toID(f)] ?? [];
+      return legal.includes(ability) || (Object.values(this.io.gen.species.get(toID(f))?.abilities ?? {}) as string[]).includes(ability);
+    });
+  }
+
   private megaForme(mon: MonRef, suffix?: string): string | undefined {
     const b = this.io.battle();
     if (mon.side === 'me') return megaFormeOf(this.io.gen, b.myTeam[mon.slot]);
-    const megas = (this.io.mons()?.[mon.slot]?.formes ?? []).filter(f => /-Mega/.test(f.name)).sort((x, y) => y.p - x.p);
+    // The stone it was shown with ("…'s Garchompite Z is reacting to …'s Omni Ring!") says which: the line after calls
+    // Garchomp's Z forme plain "Mega Garchomp".
+    const species = b.oppPreview[mon.slot];
+    for (let k = b.events.length - 1; k >= 0; k--) {
+      const e = b.events[k];
+      if (e.kind !== 'reveal' || e.what !== 'item' || e.negate || !sameMon(e.mon, mon)) continue;
+      const forme = stoneForme(this.io.gen, species, e.value);
+      if (forme) return forme;
+    }
+    // What it can be: as believed, or (beliefs not in yet) the formes the format lists for it.
+    const believed = (this.io.mons()?.[mon.slot]?.formes ?? []).filter(f => /-Mega/.test(f.name)).sort((x, y) => y.p - x.p);
+    const listed = (this.io.ctx(b).fmt.preview[species] ?? []).filter(f => /-Mega/.test(f)).map(name => ({name, p: 0}));
+    const megas = believed.length ? believed : listed;
     const said = suffix ? megas.find(f => f.name.endsWith(`-${suffix}`)) : undefined;
     if (said) return said.name;
     // X or Y not said (and not known): just "Mega" ("Raichu-Mega"), which the damage it does will tell apart.
@@ -1267,8 +1627,10 @@ export class Narrator {
       actor: d.actor, move: d.move, helpingHand: helpedThisTurn(b, d.actor), actorTriggers: d.actorTriggers,
       actorStatus: d.actorStatus, ordered: true, narrated: true, quick: d.quick,
       actorBoosts: d.actorBoosts, actorHpAfter: d.actorHp, hitCount: d.hitCount,
+      ...(this.instructed.has(monKey(d.actor)) ? {again: true} : {}),
     };
     if (d.failed) return {...common, hits: [], targets: 1, targetRefs: [], failed: true};
+    if (this.chargeOnly(d)) return {...common, hits: [], targets: 1, targetRefs: [], charged: true};
     if (d.status) {
       const reached = said.filter(r => !r.missed && !r.noEffect).map(r => r.ref);
       const targetRefs = said.length ? reached : d.rows.length === 1 ? [d.rows[0].ref] : [];

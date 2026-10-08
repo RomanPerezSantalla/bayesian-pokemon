@@ -142,8 +142,9 @@ export function helpedThisTurn(b: Battle, ref: MonRef) {
 export type ActionDraft = Omit<ActionEvent, 'kind' | 'id' | 'turn' | 'before'>;
 
 export function logAction(ctx: StateCtx, b: Battle, draft: ActionDraft): Battle {
-  // Someone moving twice, or moving after coming in this turn, means a new turn started: end the old one.
-  let cur = actedThisTurn(b, draft.actor) || cameInThisTurn(b, draft.actor) ? endTurn(ctx, b) : b;
+  // Someone moving twice, or moving after coming in this turn, means a new turn started: end the old one (not a move an
+  // Instruct made, its second this turn).
+  let cur = !draft.again && (actedThisTurn(b, draft.actor) || cameInThisTurn(b, draft.actor)) ? endTurn(ctx, b) : b;
   ctx = {...ctx, battle: cur};
   const ev: ActionEvent = {...draft, kind: 'action', id: uid(), turn: cur.turn, before: structuredClone(cur.live)};
   cur = push(cur, ev, applyAction(ctx, cur.live, ev));

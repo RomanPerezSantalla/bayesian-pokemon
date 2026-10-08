@@ -1,4 +1,5 @@
-import {toID, type Gen} from '../data/dex';
+import {species as dexSpecies, toID, type Gen} from '../data/dex';
+import type {FormatData} from '../data/format';
 
 function speciesOf(gen: Gen, name: string): string {
   const sp = gen.species.get(toID(name));
@@ -16,4 +17,23 @@ export function addTheirs(theirs: readonly string[], name: string, gen: Gen): {t
   if (k >= 0) return {theirs: [...theirs.filter((_, j) => j !== k), name], said: `${theirs[k]} → ${name}`};
   if (theirs.length >= 6) return {theirs: [...theirs], note: `their six are in already, not ${name}`};
   return {theirs: [...theirs, name], said: name};
+}
+
+/**
+ * Map any species name (including Mega formes) to the name shown at team preview. `prefix`: a name that begins one
+ * of the format's (typing "Lycan" for Lycanroc-Dusk) is that one.
+ */
+export function toPreviewName(fmt: FormatData, gen: Gen, raw: string, {prefix = true} = {}): string | null {
+  const name = raw.trim().replace(/,.*$/, '').replace(/\*$/, '').trim();
+  if (!name) return null;
+  const id = toID(name);
+  for (const [preview, formes] of Object.entries(fmt.preview)) {
+    if (toID(preview) === id || formes.some(f => toID(f) === id)) return preview;
+  }
+  const prefixed = !prefix ? [] : Object.keys(fmt.preview).filter(p => toID(p).startsWith(id))
+    .sort((a, b) => (fmt.previewUsage[b] ?? 0) - (fmt.previewUsage[a] ?? 0));
+  if (prefixed.length) return prefixed[0];
+  const sp = dexSpecies(gen, name);
+  if (!sp) return null;
+  return /-Mega/.test(sp.name) && sp.baseSpecies ? sp.baseSpecies : sp.name;
 }

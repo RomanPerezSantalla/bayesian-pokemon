@@ -5,17 +5,19 @@
  * every change (so editing or deleting an old event just works), with the
  * expensive per-event likelihoods cached.
  */
-import {STAT_IDS, getGen, toID, type StatID} from '../data/dex';
+import {STAT_IDS, getGen, move as dexMove, toID, type StatID} from '../data/dex';
 import type {FormatData} from '../data/format';
 import {hashString} from './rng';
 import {
-  actionLikelihoods, defaultCondition, oppOrderKey, orderConsistency, turnOrderLikelihoods, type Ctx, type OppPair,
+  actionLikelihoods, defaultCondition, oppOrderKey, orderConsistency, turnOrderLikelihoods, usesInARow, type Ctx, type OppPair,
   type SlotLikelihood,
 } from './likelihood';
 import {indexOfMove, isChoiceItem, isPseudoMove, itemFactors, movesLogLik, predictMoves} from './moveset';
+import {powerFromHistory} from './power';
 import {NO_ITEM, OTHER_ITEM, buildMonSpace, type MonSpace} from './prior';
+import {TERRAIN_ABILITY, WEATHER_ABILITY} from './state';
 import {
-  DROP_REACT_ITEMS, ENTRY_ANNOUNCE, ENTRY_ITEMS, INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS, announceLikelihood,
+  DROP_REACT_ITEMS, ENTRY_ANNOUNCE, INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS, SEEDS, announceLikelihood, entryItems,
 } from './abilities';
 import type {ActionEvent, Battle, BattleEvent, CheckEvent, MonRef, RevealEvent} from './types';
 
@@ -133,6 +135,16 @@ function normalizeInPlace(p: Float64Array) {
 
 const itemOf = (space: MonSpace, h: number) => space.formes[space.f[h]].items[space.i[h]];
 
+/** The items a hit's messages name. */
+const TRIGGER_ITEMS: Partial<Record<string, string>> = {sitrus: 'Sitrus Berry', sash: 'Focus Sash', wp: 'Weakness Policy'};
+/** The berry that weakens a move of each type. */
+const RESIST_BERRY_OF: Record<string, string> = {
+  Fire: 'Occa Berry', Water: 'Passho Berry', Electric: 'Wacan Berry', Grass: 'Rindo Berry', Ice: 'Yache Berry',
+  Fighting: 'Chople Berry', Poison: 'Kebia Berry', Ground: 'Shuca Berry', Flying: 'Coba Berry', Psychic: 'Payapa Berry',
+  Bug: 'Tanga Berry', Rock: 'Charti Berry', Ghost: 'Kasib Berry', Dragon: 'Haban Berry', Dark: 'Colbur Berry',
+  Steel: 'Babiri Berry', Fairy: 'Roseli Berry', Normal: 'Chilan Berry',
+};
+
 function collectFacts(battle: Battle, slot: number): Facts {
   const facts: Facts = {items: [], notItems: [], abilities: [], notAbilities: [], moves: [], notMoves: [], formes: []};
   const push = (list: string[], v: string) => {
@@ -145,10 +157,13 @@ function collectFacts(battle: Battle, slot: number): Facts {
     for (const m of sheet.moves) push(facts.moves, m);
     if (sheet.teraType) facts.tera = sheet.teraType;
   }
+  const gen = getGen(0);
   for (const ev of battle.events) {
     if (ev.kind === 'action' && ev.actor.side === 'opp' && ev.actor.slot === slot && toID(ev.move) !== 'struggle') {
       push(facts.moves, ev.move);
       if (ev.quick) push(ev.quick === 'Quick Claw' ? facts.items : facts.abilities, ev.quick);
+      // An item the game showed is one it can have, listed for it or not (and the evidence then says how likely).
+      if (ev.actorTriggers.includes('lifeorb')) push(facts.items, 'Life Orb');
     } else if (ev.kind === 'reveal' && ev.mon.side === 'opp' && ev.mon.slot === slot) {
       const target = {
         item: [facts.items, facts.notItems],
@@ -163,8 +178,13 @@ function collectFacts(battle: Battle, slot: number): Facts {
       push(ev.seenKind === 'item' ? facts.items : facts.abilities, ev.seen);
     } else if (ev.kind === 'action' && ev.actor.side === 'me') {
       for (const hit of ev.hits) {
-        if (hit.target.side === 'opp' && hit.target.slot === slot && hit.reaction) {
-          push(DROP_REACT_ITEMS.has(hit.reaction) ? facts.items : facts.abilities, hit.reaction);
+        if (hit.target.side !== 'opp' || hit.target.slot !== slot) continue;
+        if (hit.reaction) push(DROP_REACT_ITEMS.has(hit.reaction) ? facts.items : facts.abilities, hit.reaction);
+        // Items the game showed with the hit (Indeedee-F's Rocky Helmet, unlisted for it, once came out impossible).
+        if (!hit.noEffect && ev.actorTriggers.includes('helmet')) push(facts.items, 'Rocky Helmet');
+        for (const t of hit.triggers) {
+          const item = t === 'berry' ? RESIST_BERRY_OF[dexMove(gen, ev.move)?.type ?? ''] : TRIGGER_ITEMS[t];
+          if (item) push(facts.items, item);
         }
       }
     }
@@ -176,13 +196,18 @@ function collectFacts(battle: Battle, slot: number): Facts {
 function checkLikelihood(space: MonSpace, ev: CheckEvent): Float64Array {
   const raw = new Float64Array(space.n);
   const [abilities, items] = ev.context === 'entry'
-    ? [ENTRY_ANNOUNCE, ENTRY_ITEMS]
-    : [INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS];
+    ? [ENTRY_ANNOUNCE, entryItems(ev.terrain)]
+    : ev.context === 'terrain'
+      ? [new Set<string>(), new Set(ev.terrain ? [SEEDS[ev.terrain]] : [])]
+      : [INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS];
   for (let h = 0; h < space.n; h++) {
     const forme = space.formes[space.f[h]];
     const ability = ev.mega && forme.megaAbility ? forme.megaAbility : forme.abilities[space.a[h]];
     const item = ev.itemGone ? '' : itemOf(space, h);
-    raw[h] = announceLikelihood(ev.seen, ability, item, abilities, items);
+    // Its weather or terrain up already as it came in: it set nothing, and said nothing (Rillaboom back into its own grass).
+    const quiet = !ev.seen && !!ev.already && ((!!WEATHER_ABILITY[ability] && WEATHER_ABILITY[ability] === ev.already.weather)
+      || (!!TERRAIN_ABILITY[ability] && TERRAIN_ABILITY[ability] === ev.already.terrain));
+    raw[h] = announceLikelihood(ev.seen, quiet ? '' : ability, item, abilities, items);
   }
   return raw;
 }
@@ -427,7 +452,7 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
   const facts = previews.map((_, j) => collectFacts(battle, j));
   const spaces = previews.map((name, j) => (name
     ? buildMonSpace(fmt, gen, name, previews.filter((p, k) => k !== j && p), {
-      items: facts[j].items, abilities: facts[j].abilities, moves: facts[j].moves,
+      items: facts[j].items, abilities: facts[j].abilities, moves: facts[j].moves, formes: facts[j].formes,
     })
     : null));
   const ctx: Ctx = {fmt, gen, battle, spaces};
@@ -457,7 +482,9 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
   const turns = new Map<number, ActionEvent[]>();
   for (const ev of battle.events as BattleEvent[]) {
     if (ev.kind === 'action') {
-      const likes = cached(likCache, `${ctxKey}|${JSON.stringify(ev)}`, () => actionLikelihoods(ctx, ev));
+      // With what came before it that changes its damage (a Metronome's run, Rage Fist's hits taken…), which the event doesn't hold.
+      const past = `${usesInARow(battle, ev)}|${ev.hits.map(h => powerFromHistory(gen, battle, ev.actor, ev.move, ev, h.target) ?? '').join(',')}`;
+      const likes = cached(likCache, `${ctxKey}|${past}|${JSON.stringify(ev)}`, () => actionLikelihoods(ctx, ev));
       for (const l of likes) apply(ev.id, l.slot, l.kind, l.note, l.raw);
       const list = turns.get(ev.turn) ?? [];
       list.push(ev);
@@ -470,7 +497,7 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
     } else if (ev.kind === 'check' && ev.mon.side === 'opp' && !ev.skipped) {
       const space = spaces[ev.mon.slot];
       if (!space) continue;
-      const what = ev.context === 'entry' ? 'on entry' : 'when Intimidated';
+      const what = ev.context === 'entry' ? 'on entry' : ev.context === 'terrain' ? `as ${ev.terrain} Terrain started` : 'when Intimidated';
       apply(ev.id, ev.mon.slot, 'reveal', ev.seen ? `${ev.seen} ${what}` : `nothing shown ${what}`, checkLikelihood(space, ev));
     }
   }

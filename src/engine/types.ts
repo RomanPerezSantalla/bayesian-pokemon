@@ -34,6 +34,30 @@ export interface MonCondition {
   hpUnknown?: boolean;
   /** Turns badly poisoned, for Toxic's growing damage. */
   toxic?: number;
+  /** Its types, changed by a move or an ability (Protean, Soak, Burn Up…): until it leaves the field. */
+  types?: string[];
+  /**
+   * The turn it used Glaive Rush, until it tries to move again: it takes double damage meanwhile (and every move hits
+   * it).
+   */
+  exposed?: number;
+  /**
+   * Changed in a way the app doesn't follow (Transform, Power Trick…): until it leaves the field, what it deals and
+   * takes and when it moves say nothing of its set.
+   */
+  odd?: boolean;
+  /** Aegislash in its Blade forme: it attacked since it came in or last used King's Shield (Stance Change). */
+  blade?: boolean;
+  /**
+   * Held by a binding move (Infestation, Fire Spin, Whirlpool, Sand Tomb, Wrap, Bind, Snap Trap): it can't switch out,
+   * and loses 1/8 of its HP at the end of each turn (1/6 with its binder's Binding Band), 4 or 5 times (7 with a Grip
+   * Claw), while its binder stays in. `ticks`: the times so far.
+   */
+  bound?: {move: string; by: MonRef; ticks: number};
+  /** Leech Seed: 1/8 of its HP at the end of each turn, until it leaves the field. */
+  seeded?: boolean;
+  /** Salt Cure: 1/8 of its HP at the end of each turn (1/4 for a Water or Steel type), until it leaves the field. */
+  salted?: boolean;
 }
 
 export type Weather = 'Sun' | 'Rain' | 'Sand' | 'Snow' | 'Harsh Sunshine' | 'Heavy Rain' | 'Strong Winds';
@@ -65,6 +89,12 @@ export interface FieldCondition {
   opp: SideCondition;
   /** Turns left (counting the current one) for timed effects, e.g. "weather", "trickRoom", "opp.tailwind". */
   turns?: Record<string, number>;
+  /**
+   * Timed effects one of theirs set whose item isn't known, which last 8 turns rather than 5 if it holds the item that
+   * stretches them (Light Clay, a weather rock, Terrain Extender), by the key of their timer: who set it and that item.
+   * `past` once its 5th turn is over: up still, as it would be with the item (the game says when it ends).
+   */
+  mayLast?: Record<string, {slot: number; item: string; past?: boolean}>;
 }
 
 /** Everything the likelihood of an observation may depend on. */
@@ -138,6 +168,13 @@ export interface ActionEvent {
   targetRefs?: MonRef[];
   /** The move failed / was blocked (still counts for turn order and move reveal). */
   failed?: boolean;
+  /**
+   * A two-turn move's first turn (Electro Shot outside the rain, Meteor Beam, Fly…): it charged, its stat rise with it,
+   * and hit nothing yet. The attack is its move the next turn.
+   */
+  charged?: boolean;
+  /** A move beyond its one for the turn (an Instruct made it move again): not the start of a new turn. */
+  again?: boolean;
   /** State right before this action. */
   before: Snapshot;
   /** Use this action's position in the turn for speed inference ("order unsure" turns it off). */
@@ -191,14 +228,21 @@ export interface CheckEvent {
   id: string;
   turn: number;
   mon: MonRef;
-  context: 'entry' | 'intimidate';
-  /** The event that prompted it (a switch-in). */
+  /** `terrain`: a terrain started with it out (its seed would have gone off). */
+  context: 'entry' | 'intimidate' | 'terrain';
+  /** The event that prompted it (a switch-in; for a terrain, its switch-in and the terrain). */
   about: string;
+  /** The terrain up then: its seed would have gone off. */
+  terrain?: Terrain;
+  /** The weather and terrain up as it came in: an ability that would set them again (Drought in the sun) says nothing. */
+  already?: {weather?: Weather; terrain?: Terrain};
   /** The ability or item named on screen; null when nothing was shown. */
   seen: string | null;
   seenKind?: 'ability' | 'item';
   /** Not looked at: resolves the prompt without evidence. */
   skipped?: boolean;
+  /** What was seen had its effect on the board already (read off the screen before the prompt was answered). */
+  applied?: boolean;
   /** State of the Pokémon at that moment. */
   mega: boolean;
   itemGone: boolean;
@@ -232,6 +276,11 @@ export interface Battle {
   oppPreview: string[];
   /** Optional open team sheet: known item/ability/moves per opponent slot. */
   oppSheet?: (PokemonSet | null)[];
+  /**
+   * Their six as the screen reader read them at team preview (src/ui/autoBattle.ts): per slot, the other species it
+   * might be, and whether the one taken stood out. The battle's text naming another corrects it.
+   */
+  oppRead?: {alts: string[]; sure: boolean}[];
   /** My team slots brought to this battle (all six if unset). */
   brought?: number[];
   events: BattleEvent[];

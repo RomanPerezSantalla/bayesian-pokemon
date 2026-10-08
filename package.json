@@ -11,6 +11,9 @@
     "test:watch": "vitest",
     "data": "node scripts/build-data.mjs",
     "data:tables": "node scripts/build-data.mjs --tables",
+    "data:icons": "node scripts/build-icons.mjs",
+    "data:moves": "node scripts/build-data.mjs --moves",
+    "data:leads": "node scripts/build-leads.mjs",
     "typecheck": "tsc --noEmit",
     "icons": "node scripts/make-icons.mjs"
   },

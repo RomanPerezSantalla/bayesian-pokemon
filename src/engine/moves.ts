@@ -55,6 +55,23 @@ const table = raw as unknown as Record<string, MoveFx>;
 export const moveFx = (name: string): MoveFx => table[toID(name)] ?? {};
 
 /**
+ * Two-turn moves whose charge raises the user's stat before the hit: Electro Shot (fired at once in rain) and Meteor Beam
+ * (with a Power Herb). A rise said during the move came before its damage, so its damage is taken with it.
+ */
+export const RISES_BEFORE_HIT: Readonly<Record<string, Boosts>> = {electroshot: {spa: 1}, meteorbeam: {spa: 1}};
+
+/** Moves that leave their user open until it moves again, taking double damage: Glaive Rush. */
+export const EXPOSES: ReadonlySet<string> = new Set(['glaiverush']);
+
+/** Binding moves: the one they hit is held, and hurt at the end of each turn, for 4 or 5 turns (MonCondition.bound). */
+export const BINDS: ReadonlySet<string> = new Set([
+  'bind', 'wrap', 'firespin', 'whirlpool', 'sandtomb', 'clamp', 'infestation', 'magmastorm', 'snaptrap', 'thundercage',
+]);
+
+/** Moves that free their user from binding moves and Leech Seed (and clear its side's hazards). */
+export const SPINS: ReadonlySet<string> = new Set(['rapidspin', 'mortalspin']);
+
+/**
  * Attacking moves whose damage doesn't come from the stats the calc sees: retaliation (Counter,
  * Mirror Coat, Metal Burst, Comeuppance: the damage taken), a share of HP (Super Fang, Endeavor),
  * one-hit KOs, Beat Up (the party's Attack) and Spit Up (the Stockpiles). The calc gives them

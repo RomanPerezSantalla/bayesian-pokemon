@@ -2,9 +2,15 @@
 /**
  * The screen reader's eyes, off the main thread: each frame of the game, its regions (vision.ts) looked at, and the
  * text of those that changed and held still read with PP-OCRv5's English recogniser (ONNX Runtime, WebAssembly,
- * one thread). What's read goes back as readings: a message, a pop-up, an HP box, the move-select screen.
+ * one thread). What's read goes back as readings: a message, a pop-up, an HP box, the move-select screen, and before
+ * the battle, team preview (preview.ts).
  */
 import * as ort from 'onnxruntime-web/wasm';
+import ICONS from '../data/icons.gen.json';
+import {
+  gameBox, HEADER, iconTable, IN_OUR_SLOT, lookAt, medianOf, previewScreen, rankIcons, slotBox, type IconEntry,
+  type IconGuess, type PreviewScreen, type StoredIcon,
+} from './preview';
 import {
   alike, boxShown, ctcText, gameArea, hpNumber, MESSAGE_LEFT, place, recInput, REGIONS, samePrint, textAmount, textLines,
   textMask, textPrint, type Mask, type Pixels, type Rect,
@@ -18,7 +24,12 @@ export type Reading =
   /** An HP box, `screen` 0 the left one: the name in it, and the number (theirs %, yours HP). */
   | {kind: 'hp'; side: Side; screen: number; name: string; value: number | null; raw: string}
   /** Moves being chosen for the next turn; the field's timers as shown then. */
-  | {kind: 'command'; field: string};
+  | {kind: 'command'; field: string}
+  /**
+   * Team preview: each of their six's likeliest species, best first; the header ("Ranked Battles Double Battle"); and
+   * on our side, the names (choosing) or each one's number once picked (standing by; null: not brought).
+   */
+  | {kind: 'preview'; screen: PreviewScreen; theirs: IconGuess[][]; header: string; names?: string[]; picks?: (number | null)[]};
 
 export type OcrIn =
   | {type: 'load'; base: string}
@@ -160,8 +171,13 @@ function fresh(key: string, print: Uint16Array | null): boolean {
 
 let canvas: OffscreenCanvas | null = null;
 let ctx: OffscreenCanvasRenderingContext2D | null = null;
+/** Where the game's picture is in the frame, once found the same twice running; and where it was found last. */
 let area: Rect | null = null;
+let found: Rect | null = null;
 let areaAt = 0;
+/** The area just changed (it's sent with the reading, for the log). */
+let areaNew = false;
+const sameArea = (a: Rect, b: Rect) => Math.abs(a.x - b.x) <= 3 && Math.abs(a.y - b.y) <= 3 && Math.abs(a.w - b.w) <= 4 && Math.abs(a.h - b.h) <= 4;
 /** The move-select screen is showing (it was reported when it came up). */
 let choosing = false;
 /** The names in the HP boxes, as read, by where they're shown: read again only when the name strip changes. */
@@ -169,14 +185,13 @@ const names = new Map<string, {print: Uint16Array; text: string}>();
 /** Each HP box up: its number as last seen and as last read, and what it showed while still changing. */
 const hpBoxes = new Map<string, {print: Uint16Array | null; read: Uint16Array | null; pending: {value: Pixels; name: Pixels} | null}>();
 
-/** Where the game's picture is: worked out on a small copy of the frame, at the start and every few seconds. */
-function findArea(frame: ImageBitmap): Rect {
-  const small = new OffscreenCanvas(Math.round(frame.width / 4), Math.round(frame.height / 4));
-  const sc = small.getContext('2d', {willReadFrequently: true})!;
-  sc.drawImage(frame, 0, 0, small.width, small.height);
-  const a = gameArea(sc.getImageData(0, 0, small.width, small.height));
-  return {x: a.x * 4, y: a.y * 4, w: a.w * 4, h: a.h * 4};
-}
+/** Team preview's screen as seen last frame (it's taken as up when seen twice running). */
+let previewLast: PreviewScreen | null = null;
+/** Team preview up: their slots over its last few frames, and what's been read and told. */
+let preview: {screen: PreviewScreen; frames: number; slots: Pixels[][]; told: string; header: string; names?: string[]; picks?: (number | null)[]} | null = null;
+let icons: IconEntry[] | null = null;
+/** Their slots are compared over this many frames (lasers sweep across them), and looked at again as often. */
+const PREVIEW_FRAMES = 8;
 
 async function frame(t: number, bmp: ImageBitmap) {
   const t0 = performance.now();
@@ -184,21 +199,29 @@ async function frame(t: number, bmp: ImageBitmap) {
     canvas = new OffscreenCanvas(bmp.width, bmp.height);
     ctx = canvas.getContext('2d', {willReadFrequently: true});
     area = null;
-  }
-  if (!area || t - areaAt > 10_000) {
-    area = findArea(bmp);
-    areaAt = t;
+    found = null;
   }
   ctx!.drawImage(bmp, 0, 0);
   bmp.close();
-  const a = area;
+  // Where the game's picture is, on the whole frame (to the pixel: team preview's type symbols are small): every frame
+  // until it's found the same twice running, then every few seconds, changing only when the new place is found twice
+  // running too (a dark scene, Draco Meteor's, can look like the emulator's frame round the picture).
+  areaNew = false;
+  if (!area || t - areaAt > 10_000) {
+    const now = gameArea(ctx!.getImageData(0, 0, canvas.width, canvas.height));
+    areaAt = t;
+    if (found && sameArea(now, found) && !(area && sameArea(now, area))) {
+      area = now;
+      areaNew = true;
+    }
+    found = now;
+  }
+  const a = area ?? found!;
   // The game's picture's height over 1080: what's measured at 1080 scales by it.
   const s = a.h / 1080;
   const edge = Math.max(3, Math.round(3 * s));
-  const grab = (r: Rect): Pixels => {
-    const p = place(a, r);
-    return ctx!.getImageData(p.x, p.y, Math.max(1, p.w), Math.max(1, p.h));
-  };
+  const grabBox = (p: Rect): Pixels => ctx!.getImageData(p.x, p.y, Math.max(1, p.w), Math.max(1, p.h));
+  const grab = (r: Rect): Pixels => grabBox(place(a, r));
   /** Lines of text at least 18 px high at 1080. */
   const linesOf = (m: Mask) => textLines(m, Math.round(14 * s)).filter(b => b.h >= 18 * s);
   const items: Reading[] = [];
@@ -207,11 +230,15 @@ async function frame(t: number, bmp: ImageBitmap) {
     const key = `hp-${side}${screen}`;
     const vm = textMask(value, edge);
     const raw = (await readEach(value, linesOf(vm).slice(0, 1))).map(r => r.text).join(' ');
-    const nm = textMask(nameStrip, edge);
+    // The name on its box's colour (theirs pink, lighter at the left; yours violet): not as dark as the outline the mask
+    // looks for over the scene, but a box is known to be there.
+    const nm = textMask(nameStrip, edge, 165);
     const print = textPrint(nm);
     let name = names.get(key);
     if (!name || !samePrint(print, name.print)) names.set(key, (name = {print, text: (await readEach(nameStrip, linesOf(nm).slice(0, 1))).map(r => r.text).join(' ')}));
-    return {kind: 'hp', side, screen, name: name.text, value: hpNumber(raw, side === 'opp' ? 100 : 999), raw};
+    const read = hpNumber(raw, side === 'opp' ? 100 : 999);
+    // A grey box is a fainted one's: 0, or it's the scene behind taken for one.
+    return {kind: 'hp', side, screen, name: name.text, value: boxShown(nameStrip, side) === 'fainted' && read !== 0 ? null : read, raw};
   };
 
   // Pop-ups and HP boxes before the message line: an HP that goes with a move is read before the next move's line.
@@ -260,7 +287,8 @@ async function frame(t: number, bmp: ImageBitmap) {
   // The message line: the line starting at its fixed left margin (light in the scene behind, or a panel's text running
   // in from further left, doesn't), compared on its own, so the scene moving behind it doesn't hide that it's still.
   const msg = grab(REGIONS.message);
-  const mm = textMask(msg, edge);
+  // White, or the yellow of "A critical hit!".
+  const mm = textMask(msg, edge, undefined, true);
   const left = (MESSAGE_LEFT - 6) * s;
   const line = linesOf(mm).find(b => Math.abs(b.x - left) < 25 * s && b.w > 120 * s);
   // Its print on a fixed grid (from the margin on): the same text gives the same print, whatever specks come and go.
@@ -270,6 +298,8 @@ async function frame(t: number, bmp: ImageBitmap) {
       return letters(r.text) >= 6 && /\p{L}{2,}\W+\p{L}/u.test(r.text) ? r : null;
     });
   for (const text of messages) items.push({kind: 'message', text});
+
+  await readPreview(grabBox, a, items);
 
   // The move-select screen coming up: once, until it goes.
   const mt = grab(REGIONS.moveTime);
@@ -285,7 +315,54 @@ async function frame(t: number, bmp: ImageBitmap) {
       items.push({kind: 'command', field: (await readEach(field, linesOf(textMask(field, edge)).slice(0, 1))).map(r => r.text).join(' ')});
     }
   }
-  post({type: 'read', t, items, ms: Math.round(performance.now() - t0), ...(areaAt === t ? {area: a} : {})});
+  post({type: 'read', t, items, ms: Math.round(performance.now() - t0), ...(areaNew ? {area: a} : {})});
+}
+
+/**
+ * Team preview, if it's up: their six (each slot over the last few frames, so lasers sweeping across are gone) matched
+ * against the icon table, our names or picks read once, and told when first read and whenever the guesses change.
+ */
+async function readPreview(grabBox: (r: Rect) => Pixels, a: Rect, items: Reading[]) {
+  const screen = previewScreen(grabBox, a);
+  const seenBefore = previewLast === screen;
+  previewLast = screen;
+  if (!screen || !seenBefore) {
+    if (!screen) preview = null;
+    return;
+  }
+  if (!preview || preview.screen !== screen) preview = {screen, frames: 0, slots: [[], [], [], [], [], []], told: '', header: ''};
+  const pv = preview;
+  pv.frames++;
+  for (let k = 0; k < 6; k++) {
+    pv.slots[k].push(grabBox(slotBox(a, 'theirs', screen, k)));
+    if (pv.slots[k].length > PREVIEW_FRAMES) pv.slots[k].shift();
+  }
+  // Read once three frames are in (under a second), then every few seconds while it's up (the guesses told if changed).
+  if (pv.frames !== 3 && pv.frames % PREVIEW_FRAMES !== 0) return;
+  const whole = (px: Pixels) => ({x: 0, y: 0, w: px.width, h: px.height});
+  const readBox = async (box: Rect) => {
+    const px = grabBox(box);
+    return (await recognize(px, whole(px))).text;
+  };
+  if (pv.frames === 3) {
+    pv.header = await readBox(gameBox(a, HEADER));
+    if (screen === 'select') {
+      pv.names = [];
+      for (let k = 0; k < 6; k++) pv.names.push(await readBox(slotBox(a, 'ours', screen, k, IN_OUR_SLOT.name)));
+    } else {
+      pv.picks = [];
+      for (let k = 0; k < 6; k++) {
+        const digit = /[1-4]/.exec(await readBox(slotBox(a, 'ours', screen, k, IN_OUR_SLOT.pick)));
+        pv.picks.push(digit ? Number(digit[0]) : null);
+      }
+    }
+  }
+  icons ??= iconTable(ICONS.icons as StoredIcon[]);
+  const theirs = pv.slots.map(frames => rankIcons(lookAt(medianOf(frames), a.w / 1920), icons!));
+  const key = JSON.stringify([theirs.map(g => g[0]?.name), pv.names, pv.picks]);
+  if (key === pv.told) return;
+  pv.told = key;
+  items.push({kind: 'preview', screen, theirs, header: pv.header, ...(pv.names ? {names: pv.names} : {}), ...(pv.picks ? {picks: pv.picks} : {})});
 }
 
 let queue: Promise<void> = Promise.resolve();

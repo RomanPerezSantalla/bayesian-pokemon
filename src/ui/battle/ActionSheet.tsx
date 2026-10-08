@@ -447,7 +447,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
                     <span className={`chip${r.crit ? ' on' : ''}`} onClick={() => patch(i, {crit: !r.crit})}>✦ Crit</span>
                     <span className={`chip${r.noEffect ? ' on' : ''}`} onClick={() => patch(i, {noEffect: !r.noEffect, fainted: false, value: ''})}>No effect</span>
                     {statuses.map(st => (
-                      <span key={st} className={`chip warn-on${r.status === st ? ' on' : ''}`} onClick={() => patch(i, {status: r.status === st ? undefined : st})}>{STATUS_LABEL[st]}</span>
+                      <span key={st} className={`chip warn-on st-${st}${r.status === st ? ' on' : ''}`} onClick={() => patch(i, {status: r.status === st ? undefined : st})}>{STATUS_LABEL[st]}</span>
                     ))}
                     {chanceBoosts.map((s, k) => (
                       <span key={k} className={`chip${r.boosts ? ' on' : ''}`} onClick={() => patch(i, {boosts: r.boosts ? undefined : s.b})}>{boostLabel(s.b!)}</span>
@@ -469,7 +469,7 @@ export function ActionSheet({gen, battle, mons, ctx, actor, queue, onPickActor, 
                 {lifeOrbPossible && <span className={`chip warn-on${actorTriggers.includes('lifeorb') ? ' on' : ''}`} onClick={() => setActorTriggers(toggle(actorTriggers, 'lifeorb'))}>Life Orb recoil</span>}
                 {helmetPossible && <span className={`chip warn-on${actorTriggers.includes('helmet') ? ' on' : ''}`} onClick={() => setActorTriggers(toggle(actorTriggers, 'helmet'))}>Hurt by Rocky Helmet</span>}
                 {contactStatuses.map(st => (
-                  <span key={st} className={`chip warn-on${actorStatus === st ? ' on' : ''}`} onClick={() => setActorStatus(actorStatus === st ? undefined : st)}>I got {STATUS_LABEL[st]}</span>
+                  <span key={st} className={`chip warn-on st-${st}${actorStatus === st ? ' on' : ''}`} onClick={() => setActorStatus(actorStatus === st ? undefined : st)}>I got {STATUS_LABEL[st]}</span>
                 ))}
                 {hits.map(n => (
                   <span key={n} className={`chip${hitCount === n ? ' on' : ''}`} onClick={() => setHitCount(hitCount === n ? undefined : n)}>{n} hits</span>
