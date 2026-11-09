@@ -106,6 +106,10 @@ type Edit =
   /** Its types as the game says they've become (none: its own again). */
   | {kind: 'types'; key: string; types?: string[]}
   | {kind: 'odd'; key: string; ability?: boolean}
+  /** Trick, Switcheroo: its own item gone, and this one held in its place (none: nothing). */
+  | {kind: 'holds'; key: string; item?: string}
+  /** Its ability now, named by the game ('' with none). */
+  | {kind: 'ability'; key: string; ability: string}
   /** Ally Switch: the two of a side change places. */
   | {kind: 'places'; side: SideID}
   /**
@@ -193,7 +197,19 @@ function applyEdit(live: Snapshot, e: Edit) {
     c.boosts = boosts;
   }
   if (e.kind === 'status') c.status = e.status;
-  if (e.kind === 'itemGone') c.itemGone = true;
+  if (e.kind === 'itemGone') {
+    c.itemGone = true;
+    delete c.holds;
+  }
+  if (e.kind === 'holds') {
+    c.itemGone = true;
+    if (e.item) c.holds = e.item;
+    else delete c.holds;
+  }
+  if (e.kind === 'ability') {
+    c.abilityNow = e.ability;
+    c.abilityChanged = true;
+  }
   if (e.kind === 'hp') Object.assign(c, {hp: e.hp, hpUnknown: false, hpEstimated: false}, e.hp <= 0 ? {boosts: {}} : {});
   if (e.kind === 'types') {
     if (e.types) c.types = [...e.types];
@@ -254,10 +270,14 @@ export class Narrator {
   /** Theirs whose Trace just showed: the ability pop-up next for it is the one it copied. */
   private traced: string | null = null;
   /**
-   * Trick, Switcheroo: its user, its target once known, whether each held its own item till then, and what each got.
-   * What one got was the other's.
+   * Trick, Switcheroo: its user, its target once known, what each held just before (null: nothing; undefined: not known,
+   * one of theirs), whether that was its own, and what each got ("…obtained Choice Scarf."). Settled once both are said,
+   * or the next move or the turn's end comes.
    */
-  private swap: {user: MonRef; own: boolean; target?: MonRef; targetOwn?: boolean; got: {mon: MonRef; item: string; done?: boolean}[]} | null = null;
+  private swap: {
+    user: MonRef; target?: MonRef; before: Map<string, string | null | undefined>; own: Map<string, boolean>;
+    got: {mon: MonRef; item: string}[];
+  } | null = null;
   /** Made to move again this turn by an Instruct ("…followed …'s instructions!"): its next move isn't a new turn's. */
   private instructed = new Set<string>();
 
@@ -546,6 +566,12 @@ export class Narrator {
   }
 
   private one(ev: NarrationEvent): (string | null)[] {
+    // A Trick's lines are over once a move or the turn's end comes: what each holds now goes on the board first.
+    const settled = ev.kind === 'use' || ev.kind === 'endTurn' ? this.closeSwap() : [];
+    return [...settled, ...this.take(ev)];
+  }
+
+  private take(ev: NarrationEvent): (string | null)[] {
     const b = this.io.battle();
     // The pop-up just before this, if it was an item's (a Sitrus Berry's "…had its HP restored." follows it).
     const popped = this.popped;
@@ -554,7 +580,6 @@ export class Narrator {
     if (ev.kind !== 'ability') this.traced = null;
     // A weather or terrain line goes with the pop-up just before it, not one from before a move or the turn's end.
     if (ev.kind === 'use' || ev.kind === 'endTurn') this.shownAbility = null;
-    if (ev.kind === 'use' || ev.kind === 'endTurn') this.swap = null;
     switch (ev.kind) {
       case 'use': {
         // The move told again: said twice ("Raichu Protect… Raichu Protect?"), or brought up again as a phrase goes on
@@ -813,6 +838,22 @@ export class Narrator {
       }
       case 'swapItems':
         return this.swapItems(ev.mon);
+      case 'abilityNow':
+        // Its ability now isn't its own: the calc and what it shows go by this one until it leaves the field.
+        this.edit({kind: 'ability', key: monKey(ev.mon), ability: ev.ability});
+        return [`${this.label(ev.mon)}: ${ev.ability || 'no ability'} now`];
+      case 'stageSwap': {
+        // Power Swap, Guard Swap: logging the move swaps the stages, where its target is known; else it counts for nothing.
+        const d = this.draft;
+        const t = d && sameMon(d.actor, ev.mon) ? this.soleTarget(d) : undefined;
+        const row = d && t && !sameMon(t, ev.mon) ? this.row(d, t) : null;
+        if (row) {
+          row.said = true;
+          return [`${this.label(ev.mon)} and ${this.label(row.ref)}: stat changes swapped`];
+        }
+        this.edit({kind: 'odd', key: monKey(ev.mon)});
+        return [`${this.label(ev.mon)} changed: what it does now isn't counted`];
+      }
       case 'revived': {
         // Revival Blessing: back from fainting at half its HP.
         const b = this.io.battle();
@@ -891,7 +932,9 @@ export class Narrator {
           const d = this.draft;
           const target = d ? d.lastRow ?? this.soleTarget(d) : turnActions(b).at(-1)?.hits.find(h => !h.noEffect)?.target;
           if (!target) return [];
-          if (target.side === 'opp') this.io.apply(bb => logReveal(bb, target, 'item', ev.item));
+          // One given it (Trick) isn't its own.
+          const given = toID(b.live.mons[monKey(target)]?.holds ?? '') === toID(ev.item);
+          if (target.side === 'opp' && !given) this.io.apply(bb => logReveal(bb, target, 'item', ev.item));
           this.edit({kind: 'itemGone', key: monKey(target)});
           return target.side === 'opp' ? [`${this.label(target)}: ${ev.item}`] : [];
         }
@@ -1180,44 +1223,87 @@ export class Narrator {
    * Trick, Switcheroo: each holds the other's item now, which the app doesn't follow (its own is gone, and what it deals
    * and takes and when it moves say nothing of its set until it leaves the field). Its target, if the move's said.
    */
-  private swapItems(user: MonRef): string[] {
-    const b = this.io.battle();
-    const own = (m: MonRef) => !!b.live.mons[monKey(m)] && !b.live.mons[monKey(m)]!.itemGone && !b.live.mons[monKey(m)]!.odd;
-    const d = this.draft;
-    const t = d && sameMon(d.actor, user) ? this.soleTarget(d) : undefined;
-    const target = t && !sameMon(t, user) ? t : undefined;
-    this.swap = {user, own: own(user), target, targetOwn: target ? own(target) : undefined, got: []};
-    for (const m of target ? [user, target] : [user]) {
-      this.edit({kind: 'itemGone', key: monKey(m)});
-      this.edit({kind: 'odd', key: monKey(m)});
-    }
-    return [`${this.label(user)}${target ? ` and ${this.label(target)}` : ''} swapped items: what they do now isn't counted`];
+  /** What it holds now: an item, nothing (null), or not known (undefined: theirs, unless it's certain). */
+  private holding(b: Battle, m: MonRef): string | null | undefined {
+    const c = b.live.mons[monKey(m)];
+    if (!c) return undefined;
+    if (c.holds) return c.holds;
+    if (c.itemGone) return null;
+    if (m.side === 'me') return b.myTeam[m.slot]?.item || null;
+    return this.io.ctx(b).oppItem(m.slot);
   }
 
-  /** "…obtained Sitrus Berry.": the other one's item, theirs a reveal if it was its own. */
+  /** Trick, Switcheroo: what it held just before, and whether that was its own. */
+  private noteHolding(m: MonRef) {
+    const s = this.swap;
+    if (!s) return;
+    const b = this.io.battle();
+    const c = b.live.mons[monKey(m)];
+    s.before.set(monKey(m), this.holding(b, m));
+    s.own.set(monKey(m), !!c && !c.itemGone && !c.holds);
+  }
+
+  /** Trick, Switcheroo: "…switched items with its target!" (its target, if the move's said). */
+  private swapItems(user: MonRef): string[] {
+    const d = this.draft;
+    const t = d && sameMon(d.actor, user) ? this.soleTarget(d) : undefined;
+    this.swap = {user, target: t && !sameMon(t, user) ? t : undefined, before: new Map(), own: new Map(), got: []};
+    this.noteHolding(user);
+    if (this.swap.target) this.noteHolding(this.swap.target);
+    return [`${this.label(user)} switched items`];
+  }
+
+  /** "…obtained Sitrus Berry.": what one of them holds now (the other one's). */
   private obtained(mon: MonRef, item: string): string[] {
     const s = this.swap;
     if (!s) return [];
     if (!sameMon(mon, s.user) && !s.target) {
-      const b = this.io.battle();
-      const c = b.live.mons[monKey(mon)];
       s.target = mon;
-      s.targetOwn = !!c && !c.itemGone && !c.odd;
-      this.edit({kind: 'itemGone', key: monKey(mon)});
-      this.edit({kind: 'odd', key: monKey(mon)});
+      this.noteHolding(mon);
+    }
+    // Its user's line, its target's not said: the one on the field known to have held what it got.
+    if (sameMon(mon, s.user) && !s.target) {
+      const b = this.io.battle();
+      const held = (['me', 'opp'] as const).flatMap(side => b.live.active[side]
+        .filter((x): x is number => x !== null && !(side === s.user.side && x === s.user.slot))
+        .map(slot => ({side, slot}) as MonRef))
+        .filter(m => toID(this.holding(b, m) ?? '') === toID(item));
+      if (held.length === 1) {
+        s.target = held[0];
+        this.noteHolding(held[0]);
+      }
     }
     s.got.push({mon, item});
-    // Each once whom it came from is known (the user's line can come before its target is named).
+    return s.target && s.got.length > 1 ? this.closeSwap() : [];
+  }
+
+  /**
+   * Trick, Switcheroo settled: each holds what the other held (said by "…obtained X.", or known, as yours is), its own
+   * gone; what yours got from theirs is a reveal of theirs. One whose new item isn't known counts for nothing till it
+   * leaves the field.
+   */
+  private closeSwap(): string[] {
+    const s = this.swap;
+    this.swap = null;
+    if (!s) return [];
+    const parties = s.target ? [s.user, s.target] : [s.user];
     const notes: string[] = [];
-    for (const g of s.got) {
-      if (g.done) continue;
-      const fromUser = !sameMon(g.mon, s.user);
-      const from = fromUser ? s.user : s.target;
-      if (!from) continue;
-      g.done = true;
-      if (from.side !== 'opp' || !(fromUser ? s.own : s.targetOwn)) continue;
-      this.io.apply(bb => logReveal(bb, from, 'item', g.item));
-      notes.push(`${this.label(from)}: ${g.item}`);
+    for (const p of parties) {
+      const q = parties.find(x => !sameMon(x, p));
+      const got = s.got.find(g => sameMon(g.mon, p))?.item;
+      const now = got ?? (q ? s.before.get(monKey(q)) : undefined);
+      if (now === undefined) {
+        this.edit({kind: 'holds', key: monKey(p)});
+        this.edit({kind: 'odd', key: monKey(p)});
+        notes.push(`${this.label(p)}: what it holds now isn't known, so what it does isn't counted`);
+      } else {
+        this.edit({kind: 'holds', key: monKey(p), item: now ?? undefined});
+        notes.push(`${this.label(p)} holds ${now ?? 'nothing'} now`);
+      }
+      if (got && q?.side === 'opp' && p.side === 'me' && s.own.get(monKey(q))) {
+        this.io.apply(bb => logReveal(bb, q, 'item', got));
+        notes.push(`${this.label(q)}: ${got}`);
+      }
     }
     return notes;
   }
@@ -1663,8 +1749,8 @@ export class Narrator {
         return {notes: [], onHit: true};
       }
     }
-    // Anything else of theirs that the game named (Leftovers, Booster Energy…) is a reveal.
-    if (mon?.side === 'opp') {
+    // Anything else of theirs that the game named (Leftovers, Booster Energy…) is a reveal, but not one given it (Trick).
+    if (mon?.side === 'opp' && toID(b.live.mons[monKey(mon)]?.holds ?? '') !== toID(item)) {
       this.io.apply(bb => logReveal(bb, mon, 'item', item));
       return {notes: [`${this.label(mon)}: ${item}`]};
     }

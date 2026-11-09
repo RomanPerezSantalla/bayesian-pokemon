@@ -129,11 +129,16 @@ export function everyoneMoved(b: Battle): boolean {
  * holds the item. `item` is its item when known for certain.
  */
 export function choiceLockedMove(b: Battle, ref: MonRef, item: string | undefined): string | null {
-  if (!item || !/^Choice (Band|Specs|Scarf)$/.test(item) || b.live.mons[monKey(ref)]?.itemGone) return null;
+  const c = b.live.mons[monKey(ref)];
+  // One given it (Trick) counts in place of its own; the moves before it had it don't lock it.
+  const held = c?.holds ?? (c?.itemGone ? undefined : item);
+  if (!held || !/^Choice (Band|Specs|Scarf)$/.test(held)) return null;
   let last: string | null = null;
   for (const e of b.events) {
     if (e.kind === 'switch' && e.side === ref.side && (e.slotIn === ref.slot || e.slotOut === ref.slot)) last = null;
-    if (e.kind === 'action' && sameMon(e.actor, ref) && toID(e.move) !== 'struggle' && !e.called) last = e.move;
+    if (e.kind !== 'action' || !sameMon(e.actor, ref)) continue;
+    if (e.before.mons[monKey(ref)]?.holds !== c?.holds) last = null;
+    else if (toID(e.move) !== 'struggle' && !e.called) last = e.move;
   }
   return last;
 }

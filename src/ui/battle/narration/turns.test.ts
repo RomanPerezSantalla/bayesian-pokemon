@@ -1140,7 +1140,7 @@ describe('lines that change what a Pokémon is (5 Oct)', () => {
     expect(events('The opposing Salamence transformed into Charizard!')).toEqual([{kind: 'odd', mon: opp0, ability: true}]);
     expect(events('Charizard switched its Attack and Defense!')).toEqual([{kind: 'odd', mon: me0}]);
     // Role Play copies an ability: what it says is the other's, and its own is changed.
-    expect(events("Charizard copied the opposing Salamence's Intimidate Ability!")).toEqual([{kind: 'odd', mon: me0, ability: true}, {kind: 'ability', mon: opp0, ability: 'Intimidate'}]);
+    expect(events("Charizard copied the opposing Salamence's Intimidate Ability!")).toEqual([{kind: 'abilityNow', mon: me0, ability: 'Intimidate'}, {kind: 'ability', mon: opp0, ability: 'Intimidate'}]);
   });
 });
 
@@ -1422,9 +1422,10 @@ describe('moves met in no game yet (9 Nov)', () => {
 
   it('the lines: abilities changed or swapped, items swapped, Fickle Beam going all out', () => {
     expect(events('The opposing Salamence is going all out for this attack!')).toEqual([{kind: 'allOut', mon: opp0}]);
-    expect(events('Charizard acquired Intimidate!')).toEqual([{kind: 'odd', mon: me0, ability: true}]);
-    expect(events("The opposing Salamence's Ability became Mummy!")).toEqual([{kind: 'odd', mon: opp0, ability: true}]);
-    expect(events("The opposing Salamence's Ability was suppressed!")).toEqual([{kind: 'odd', mon: opp0, ability: true}]);
+    expect(events('Charizard acquired Intimidate!')).toEqual([{kind: 'abilityNow', mon: me0, ability: 'Intimidate'}]);
+    expect(events("The opposing Salamence's Ability became Mummy!")).toEqual([{kind: 'abilityNow', mon: opp0, ability: 'Mummy'}]);
+    expect(events("The opposing Salamence's Ability was suppressed!")).toEqual([{kind: 'abilityNow', mon: opp0, ability: ''}]);
+    expect(events('Charizard switched all changes to its Attack and Sp. Atk with its target!')).toEqual([{kind: 'stageSwap', mon: me0}]);
     expect(events('The opposing Salamence swapped Abilities with its target!')).toEqual([{kind: 'odd', mon: opp0, target: true, ability: true}]);
     expect(events('Charizard switched Speed with its target!')).toEqual([{kind: 'odd', mon: me0, target: true}]);
     expect(events('Charizard switched items with its target!')).toEqual([{kind: 'swapItems', mon: me0}]);
@@ -1476,7 +1477,7 @@ describe('moves met in no game yet (9 Nov)', () => {
     expect(r.b.live.mons.me2.hp).toBe(Math.floor(max / 2));
   });
 
-  it("Trick: both changed and each one's own item gone; what mine got was theirs", () => {
+  it("Trick: each holds the other's item now, its own gone; what mine got was theirs", () => {
     const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
     r.read(
       'The opposing Clefable used Trick!',
@@ -1487,8 +1488,54 @@ describe('moves met in no game yet (9 Nov)', () => {
     r.n.commit();
     const items = r.b.events.filter(e => e.kind === 'reveal' && e.what === 'item');
     expect(items).toEqual([expect.objectContaining({mon: opp0, value: 'Choice Scarf'})]);
-    for (const k of ['opp0', 'me1']) expect(r.b.live.mons[k]).toMatchObject({odd: true, itemGone: true});
+    expect(r.b.live.mons.opp0).toMatchObject({holds: 'Sitrus Berry', itemGone: true});
+    expect(r.b.live.mons.me1).toMatchObject({holds: 'Choice Scarf', itemGone: true});
+    for (const k of ['opp0', 'me1', 'me0']) expect(r.b.live.mons[k].odd).toBeFalsy();
+    // A Sitrus Berry it eats later is mine, not one of its own.
+    r.read('Charizard used Heat Wave!', 'The opposing Clefable 40', 'The opposing Hydrapple 80', "The opposing Clefable's Sitrus Berry", 'The opposing Clefable 65');
+    r.n.commit();
+    expect(r.b.events.filter(e => e.kind === 'reveal' && e.what === 'item').map(e => e.kind === 'reveal' && e.value)).toEqual(['Choice Scarf']);
+    expect(r.b.live.mons.opp0.holds).toBeUndefined();
+    expect(r.b.live.mons.opp0.itemGone).toBe(true);
+  });
+
+  it("Trick, only its user's line read: its target is the one that held what it got; what that one holds now isn't known", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read(
+      'The opposing Clefable used Trick!',
+      'The opposing Clefable switched items with its target!',
+      'The opposing Clefable obtained Sitrus Berry.',
+      'Charizard used Heat Wave!',
+    );
+    expect(r.b.live.mons.opp0).toMatchObject({holds: 'Sitrus Berry', itemGone: true});
+    expect(r.b.live.mons.me1).toMatchObject({itemGone: true, odd: true});
+    expect(r.b.live.mons.me1.holds).toBeUndefined();
     expect(r.b.live.mons.me0.odd).toBeFalsy();
+  });
+
+  it('Power Swap with its target known (singles): the stages swapped, nothing left out', () => {
+    const r = rig({me: [0], opp: [0]}, {fmt: singlesFmt, preview: PREVIEW});
+    r.b.live.mons.me0 = {...r.b.live.mons.me0, boosts: {spa: 2}};
+    r.read('The opposing Clefable used Power Swap!', 'The opposing Clefable switched all changes to its Attack and Sp. Atk with its target!');
+    r.n.commit();
+    expect([r.boosts('me0'), r.boosts('opp0')]).toEqual([{}, {spa: 2}]);
+    expect([r.b.live.mons.me0.odd, r.b.live.mons.opp0.odd]).toEqual([undefined, undefined]);
+  });
+
+  it("Power Swap with its target not said (doubles): it counts for nothing till it leaves", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read('The opposing Clefable used Power Swap!', 'The opposing Clefable switched all changes to its Attack and Sp. Atk with its target!');
+    r.n.commit();
+    expect(r.b.live.mons.opp0.odd).toBe(true);
+  });
+
+  it('an ability the game names is its ability now, till it leaves the field', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read('The opposing Clefable acquired Simple!');
+    expect(r.b.live.mons.opp0).toMatchObject({abilityNow: 'Simple', abilityChanged: true});
+    expect(r.b.live.mons.opp0.odd).toBeFalsy();
+    r.read("The opposing Hydrapple's Ability was suppressed!");
+    expect(r.b.live.mons.opp1.abilityNow).toBe('');
   });
 
   it("an ability shown once its own has changed isn't its own; after a Trick it still is", () => {

@@ -28,6 +28,11 @@ export interface MonCondition {
   abilityOn: boolean;
   /** Item consumed, knocked off or otherwise gone. */
   itemGone: boolean;
+  /**
+   * An item it holds that isn't the one it came with (Trick, Switcheroo): its own is gone (`itemGone`), and this one
+   * counts in its place. It stays with it when it leaves the field.
+   */
+  holds?: string;
   /** Opponent HP% was computed (recoil, Leftovers…) rather than read off the screen. */
   hpEstimated?: boolean;
   /** A hit on it went unread ("skip HP"): its HP is unknown until the next reading. */
@@ -52,6 +57,11 @@ export interface MonCondition {
   odd?: boolean;
   /** Its ability changed (Skill Swap, Entrainment, Role Play, Transform…): one shown for it now isn't its own. */
   abilityChanged?: boolean;
+  /**
+   * Its ability now, where the game named it (Entrainment, Worry Seed, Simple Beam: "…acquired Simple!"; Role Play;
+   * Mummy), '' with none (Gastro Acid): it counts in place of its own until it leaves the field.
+   */
+  abilityNow?: string;
   /** Aegislash in its Blade forme: it attacked since it came in or last used King's Shield (Stance Change). */
   blade?: boolean;
   /**

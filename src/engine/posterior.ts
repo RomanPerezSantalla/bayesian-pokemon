@@ -19,7 +19,7 @@ import {TERRAIN_ABILITY, WEATHER_ABILITY} from './state';
 import {
   DROP_REACT_ITEMS, ENTRY_ANNOUNCE, INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS, SEEDS, announceLikelihood, entryItems,
 } from './abilities';
-import type {ActionEvent, Battle, BattleEvent, CheckEvent, MonRef, RevealEvent} from './types';
+import type {ActionEvent, Battle, BattleEvent, CheckEvent, MonRef, RevealEvent, Snapshot} from './types';
 
 
 /** Each turn a Mega-capable Pokémon acted without Mega Evolving while it could (a habit, not a rule). */
@@ -162,9 +162,13 @@ function collectFacts(battle: Battle, slot: number): Facts {
     if (ev.kind === 'action' && ev.actor.side === 'opp' && ev.actor.slot === slot && toID(ev.move) !== 'struggle') {
       // Called by another (Copycat): not one of its own, unless Sleep Talk called it.
       if (!ev.called || toID(ev.called) === 'sleeptalk') push(facts.moves, ev.move);
-      if (ev.quick) push(ev.quick === 'Quick Claw' ? facts.items : facts.abilities, ev.quick);
+      // An item or ability given it in place of its own (Trick, Entrainment…) says nothing of its own.
+      const now = ev.before.mons[`opp${slot}`];
+      if (ev.quick && !(ev.quick === 'Quick Claw' ? now?.holds : now?.abilityChanged)) {
+        push(ev.quick === 'Quick Claw' ? facts.items : facts.abilities, ev.quick);
+      }
       // An item the game showed is one it can have, listed for it or not (and the evidence then says how likely).
-      if (ev.actorTriggers.includes('lifeorb')) push(facts.items, 'Life Orb');
+      if (ev.actorTriggers.includes('lifeorb') && !now?.holds) push(facts.items, 'Life Orb');
     } else if (ev.kind === 'reveal' && ev.mon.side === 'opp' && ev.mon.slot === slot) {
       const target = {
         item: [facts.items, facts.notItems],
@@ -176,11 +180,16 @@ function collectFacts(battle: Battle, slot: number): Facts {
       if (ev.what === 'tera' && !ev.negate) facts.tera = ev.value;
       else if (!(ev.what === 'forme' && ev.negate)) push(target, ev.value);
     } else if (ev.kind === 'check' && ev.mon.side === 'opp' && ev.mon.slot === slot && ev.seen) {
-      push(ev.seenKind === 'item' ? facts.items : facts.abilities, ev.seen);
+      const then = ev.undo?.live.mons[`opp${slot}`];
+      if (!(ev.seenKind === 'item' ? then?.holds : then?.abilityChanged)) push(ev.seenKind === 'item' ? facts.items : facts.abilities, ev.seen);
     } else if (ev.kind === 'action' && ev.actor.side === 'me') {
+      const then = ev.before.mons[`opp${slot}`];
       for (const hit of ev.hits) {
         if (hit.target.side !== 'opp' || hit.target.slot !== slot) continue;
-        if (hit.reaction) push(DROP_REACT_ITEMS.has(hit.reaction) ? facts.items : facts.abilities, hit.reaction);
+        const isItem = !!hit.reaction && DROP_REACT_ITEMS.has(hit.reaction);
+        if (hit.reaction && !(isItem ? then?.holds : then?.abilityChanged)) push(isItem ? facts.items : facts.abilities, hit.reaction);
+        // One given it (Trick) says nothing of its own.
+        if (then?.holds) continue;
         // Items the game showed with the hit (Indeedee-F's Rocky Helmet, unlisted for it, once came out impossible).
         if (!hit.noEffect && ev.actorTriggers.includes('helmet')) push(facts.items, 'Rocky Helmet');
         for (const t of hit.triggers) {
@@ -194,7 +203,9 @@ function collectFacts(battle: Battle, slot: number): Facts {
 }
 
 /** What an announcement moment (switch-in, Intimidate) showed, given each hypothesis. */
-function checkLikelihood(space: MonSpace, ev: CheckEvent): Float64Array {
+function checkLikelihood(space: MonSpace, ev: CheckEvent & {undo?: {live: Snapshot}}): Float64Array {
+  // An item or ability given it in place of its own (Trick, Entrainment…) is the one that would show.
+  const then = ev.undo?.live.mons[`${ev.mon.side}${ev.mon.slot}`];
   const raw = new Float64Array(space.n);
   const [abilities, items] = ev.context === 'entry'
     ? [ENTRY_ANNOUNCE, entryItems(ev.terrain)]
@@ -203,8 +214,9 @@ function checkLikelihood(space: MonSpace, ev: CheckEvent): Float64Array {
       : [INTIMIDATE_REACT, INTIMIDATE_REACT_ITEMS];
   for (let h = 0; h < space.n; h++) {
     const forme = space.formes[space.f[h]];
-    const ability = ev.mega && forme.megaAbility ? forme.megaAbility : forme.abilities[space.a[h]];
-    const item = ev.itemGone ? '' : itemOf(space, h);
+    const ability = then?.abilityNow !== undefined ? then.abilityNow
+      : ev.mega && forme.megaAbility ? forme.megaAbility : forme.abilities[space.a[h]];
+    const item = then?.holds ?? (ev.itemGone ? '' : itemOf(space, h));
     // Its weather or terrain up already as it came in: it set nothing, and said nothing (Rillaboom back into its own grass).
     const quiet = !ev.seen && !!ev.already && ((!!WEATHER_ABILITY[ability] && WEATHER_ABILITY[ability] === ev.already.weather)
       || (!!TERRAIN_ABILITY[ability] && TERRAIN_ABILITY[ability] === ev.already.terrain));

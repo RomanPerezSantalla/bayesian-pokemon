@@ -96,6 +96,14 @@ export type NarrationEvent =
    */
   | {kind: 'odd'; mon: MonRef; target?: boolean; ability?: boolean}
   /**
+   * Its ability now, as the game named it: Entrainment, Worry Seed, Simple Beam ("…acquired Simple!"), Mummy ("…'s
+   * Ability became Mummy!"), Role Play ("…copied …'s Intimidate Ability!"); '' with none (Gastro Acid: "…'s Ability was
+   * suppressed!").
+   */
+  | {kind: 'abilityNow'; mon: MonRef; ability: string}
+  /** Power Swap, Guard Swap: "…switched all changes to its Attack and Sp. Atk with its target!" */
+  | {kind: 'stageSwap'; mon: MonRef}
+  /**
    * Trick, Switcheroo: "…switched items with its target!" (`mon`, the user), then where each went: "…obtained Choice
    * Scarf." (`obtained`).
    */
@@ -120,7 +128,7 @@ type Phrase = 'crit' | 'faint' | 'miss' | 'missAfter' | 'shield' | 'immune' | 'i
   | 'substitute' | 'blewAway' | 'quickDraw' | 'maxAttack' | 'unaffected' | 'unaffectedBy' | 'targetsItem' | 'skip' | 'skipMove'
   | 'skipCount' | 'copied' | 'offer' | 'postponed' | 'followed' | 'transformedInto' | 'typeAdded' | 'sameType' | 'burnedOut'
   | 'noElectricity' | 'typeBack' | 'inverted' | 'oddChange' | 'oddBoth' | 'swapItems' | 'allOut' | 'revived' | 'places' | 'trapped'
-  | 'freed';
+  | 'freed' | 'acquired' | 'suppressed' | 'stageSwap';
 
 /**
  * Pokémon Champions' battle lines (its own English text: see messages.ts) after norm(), longest
@@ -210,11 +218,13 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['transformed into', 'transformedInto'], ['type was added to', 'typeAdded'], ['became the same type as', 'sameType'],
   ['burned itself out', 'burnedOut'], ['used up all its electricity', 'noElectricity'], ['returned to its original type', 'typeBack'],
   ['transformed', 'oddChange'], ['switched its attack and defense', 'oddChange'], ['underwent a heroic transformation', 'oddChange'],
-  // Its ability changed: Entrainment, Worry Seed, Simple Beam ("…acquired Simple!"), Mummy ("…'s Ability became Mummy!"),
-  // Gastro Acid ("…'s Ability was suppressed!").
-  ['acquired', 'oddChange', 'ability'], ['ability became', 'oddChange', 'ability'], ['ability was suppressed', 'oddChange', 'ability'],
-  // Swapped or split with the move's target, both changed: Skill Swap, Speed Swap, Power Swap, Guard Swap, Power Split, Guard Split.
-  ['swapped abilities with its target', 'oddBoth', 'ability'], ['switched all changes to its', 'oddBoth'],
+  // Its ability now, named: Entrainment, Worry Seed, Simple Beam ("…acquired Simple!"), Mummy ("…'s Ability became
+  // Mummy!"); none (Gastro Acid: "…'s Ability was suppressed!").
+  ['acquired', 'acquired'], ['ability became', 'acquired'], ['ability was suppressed', 'suppressed'],
+  // Power Swap, Guard Swap: the stages swapped with the move's target.
+  ['switched all changes to its', 'stageSwap'],
+  // Swapped or split with the move's target, both changed, neither named: Skill Swap, Speed Swap, Power Split, Guard Split.
+  ['swapped abilities with its target', 'oddBoth', 'ability'],
   ['switched speed with its target', 'oddBoth'], ['shared its power with the target', 'oddBoth'],
   ['shared its guard with the target', 'oddBoth'],
   // Trick, Switcheroo; Fickle Beam at double power.
@@ -351,6 +361,9 @@ function every(gen: Gen, what: 'moves' | 'items' | 'abilities'): Named<string>[]
   }
   return c[what];
 }
+
+/** Abilities a move gives that no Pokémon in Champions has: Simple Beam's. */
+const GIVEN_ABILITIES: Named<string>[] = [{key: squash('Simple'), value: 'Simple'}];
 
 /** The words the game's lines are made of (the phrases', and common ones). */
 let lineWords: ReadonlySet<string> | undefined;
@@ -799,8 +812,10 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
             out.push({kind: 'copyBoosts', mon: last, from: from.ref});
             i = k + 2;
           } else if (last && from && !same(from.ref, last)) {
-            // Role Play: it has the other's ability now, not its own.
-            out.push({kind: 'odd', mon: last, ability: true});
+            // Role Play: it has the other's ability now ("…copied Incineroar's Intimidate Ability!"), which reads on as that
+            // one's own.
+            const ab = matchAt(words, k, every(env.gen, 'abilities'), 0.8, 0.04);
+            out.push(ab ? {kind: 'abilityNow', mon: last, ability: ab.value} : {kind: 'odd', mon: last, ability: true});
           }
           break;
         }
@@ -878,6 +893,20 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
           break;
         case 'revived':
           if (last) out.push({kind: 'revived', mon: last});
+          break;
+        case 'acquired': {
+          const ab = matchAt(words, i, [...every(env.gen, 'abilities'), ...GIVEN_ABILITIES], 0.8, 0.04);
+          if (last && ab) {
+            out.push({kind: 'abilityNow', mon: last, ability: ab.value});
+            i += ab.len;
+          } else if (last) out.push({kind: 'odd', mon: last, ability: true});
+          break;
+        }
+        case 'suppressed':
+          if (last) out.push({kind: 'abilityNow', mon: last, ability: ''});
+          break;
+        case 'stageSwap':
+          if (last) out.push({kind: 'stageSwap', mon: last});
           break;
         case 'places':
           // Ally Switch: the two of the side just named.

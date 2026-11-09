@@ -23,16 +23,29 @@ const TOGGLED = new Set(['Flash Fire', 'Slow Start', 'Stakeout', 'Electromorphos
 
 const table = (v: ArrayLike<number>) => Object.fromEntries(STAT_IDS.map((s, i) => [s, v[i]]));
 
+/** No ability (Gastro Acid): the calc takes a missing one as the species' first. */
+export const NO_ABILITY = '(No Ability)';
+
+/** Its item now: one given it in place of its own (Trick), none once its own is gone, else its own. */
+export const heldItem = (cond: MonCondition | undefined, own: string | undefined) =>
+  cond?.holds ?? (cond?.itemGone ? undefined : own);
+
+/** Its ability now: one the game named in place of its own (Entrainment, Role Play…), none if suppressed, else its own. */
+export const currentAbility = (cond: MonCondition | undefined, own: string | undefined) =>
+  cond?.abilityNow !== undefined ? cond.abilityNow || NO_ABILITY : own;
+
 export function makePokemon(gen: Gen, spec: MonSpec, cond?: MonCondition, alliesFainted = 0, curHP?: number) {
-  const ability = spec.ability;
+  const ability = currentAbility(cond, spec.ability);
   let item: string | undefined = spec.item;
   if (!item || item === NO_ITEM || item === OTHER_ITEM) item = undefined;
   const qp = !!ability && QP.has(ability);
   // A consumed Booster Energy keeps its boost until the holder leaves the field.
   if (cond?.itemGone && !(qp && item === 'Booster Energy' && cond.abilityOn)) item = undefined;
+  // One given it (Trick, Switcheroo) in place of its own.
+  if (cond?.holds) item = cond.holds;
 
   let abilityOn = false;
-  if (ability === 'Unburden') abilityOn = !!cond?.itemGone;
+  if (ability === 'Unburden') abilityOn = !!cond?.itemGone && !cond.holds;
   else if (ability && TOGGLED.has(ability)) abilityOn = !!cond?.abilityOn;
 
   // Stance Change: Aegislash attacks, and is hit after attacking, as Aegislash-Blade (140 Attack, 50 defences).

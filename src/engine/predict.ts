@@ -1,7 +1,7 @@
 /** Posterior-predictive matchups: "how likely am I to outspeed / KO this thing?" */
 import {isDamagingMove, toID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
-import {finalSpeed, makeField, makeMove, makePokemon, runCalc} from './calc';
+import {finalSpeed, heldItem, makeField, makeMove, makePokemon, runCalc} from './calc';
 import {defaultCondition, hpCandidates, hypView, megaFormeOf, mySpec, oppOrderKey, takenTimes, type Ctx} from './likelihood';
 import {DAMAGE_NOT_FROM_STATS} from './moves';
 import {powerFromHistory} from './power';
@@ -238,7 +238,7 @@ export function myMoveInto(
       const candidates = hpCandidates(oppCond.hp, v.stats[0], battle.settings, oppCond.hpEstimated || oppCond.hpUnknown);
       const d = makePokemon(gen, v.spec, oppCond, 0, candidates[Math.floor(candidates.length / 2)]);
       const res = runCalc(gen, attacker, d, mv, field, takenTimes(oppCond));
-      const sash = v.item === 'Focus Sash' && !oppCond.itemGone;
+      const sash = v.has && v.item === 'Focus Sash';
       let k = 0;
       const rolls: [number, number][] = [];
       for (const [roll, p] of res.dist) {
@@ -273,7 +273,7 @@ export function oppMoveInto(
   const defender = makePokemon(gen, spec, myCond, 0, myCond.hp || undefined);
   const myMax = defender.maxHP();
   const cur = myCond.hp || myMax;
-  const sash = !myCond.itemGone && set.item === 'Focus Sash' && cur === myMax;
+  const sash = heldItem(myCond, set.item) === 'Focus Sash' && cur === myMax;
   let sashSaves = false;
   const field = makeField(fmt.gameType, snap.field, 'opp', {charge: oppCond.charged});
   const bp = power ?? powerFromHistory(gen, battle, {side: 'opp', slot: belief.slot}, move, undefined, {side: 'me', slot: mySlot});

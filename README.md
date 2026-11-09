@@ -312,15 +312,21 @@ HP, theirs in %), in the order the game shows them:
   gives it the other's stages; "All stat changes on … were inverted!" (Topsy-Turvy) turns its own round.
 - **What a Pokémon is**: its types as the game says they changed ("…transformed into the Ice type!" from
   Protean, Libero or Soak; "Ghost type was added to …!"; "…became the same type as …!"; "…burned itself out!",
-  "…used up all its electricity!"), until it leaves the field. A change the app doesn't follow ("…transformed
-  into Incineroar!" from Transform or Imposter, Power Trick, Zero to Hero, a forme change; an ability changed:
-  "…acquired Simple!" from Entrainment, Worry Seed or Simple Beam, "…'s Ability became Mummy!", "…'s Ability was
-  suppressed!", Role Play) makes that Pokémon count for nothing until it leaves the field: what it deals and takes
-  and when it moves aren't evidence, so nothing about it can turn up as impossible, and an ability shown for it
-  after isn't its own. A swap or split with the move's target (Skill Swap, Speed Swap, Power or Guard Swap or
-  Split, "…with its target!") does the same to both, the target where the move named it. Trick and Switcheroo
-  ("…switched items with its target!") do too, and each one's own item is gone; "…obtained Choice Scarf." says
-  what the other held, a reveal when that's one of theirs.
+  "…used up all its electricity!"), until it leaves the field. Its ability as the game names it, in place of its
+  own until it leaves the field: "…acquired Simple!" (Entrainment, Worry Seed, Simple Beam), "…'s Ability became
+  Mummy!", "…copied …'s Intimidate Ability!" (Role Play, which also shows the other's), none with "…'s Ability was
+  suppressed!" (Gastro Acid); the damage, its Speed and what it shows go by that one, and an ability shown for it
+  after isn't its own. Trick and Switcheroo ("…switched items with its target!", then "…obtained Choice Scarf."
+  for each that got one): each holds the other's item now, its own gone, and keeps it when it leaves the field;
+  what yours got from theirs is a reveal of theirs. With only its user's line read, its target is the one known to
+  have held what it got; one whose new item isn't known (yours, given one of theirs the app isn't sure of) counts
+  for nothing until it leaves. Power Swap and Guard Swap ("…switched all changes to its Attack and Sp. Atk with its
+  target!") swap the stat stages where the target is known (in singles, or with one other out). A change the app
+  doesn't follow ("…transformed into Incineroar!" from Transform or Imposter, Power Trick, Zero to Hero, a forme
+  change, Magnet Rise, Smack Down) makes that Pokémon count for nothing until it leaves the field: what it deals
+  and takes and when it moves aren't evidence, so nothing about it can turn up as impossible. A swap or split
+  that doesn't say with whom (Skill Swap, Speed Swap, Power or Guard Split; Power or Guard Swap with its target
+  not known) does the same to both, the target where the move named it.
 - **Out of turn**: "…took the kind offer!" (After You), "…'s move was postponed!" (Quash), "…followed …'s
   instructions!" (Instruct: its move once more, the same turn): that move went where something put it, so
   its place says nothing of Speed. So does a move another called ("…used Sleep Talk!", then "…used Body
@@ -475,11 +481,10 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
 - Damage that isn't down to stats (Counter, Mirror Coat, Metal Burst, Comeuppance, Super Fang, Endeavor,
   one-hit KOs, Beat Up, Spit Up) is logged but learns nothing.
 - Not tracked: accuracy and evasion stages, confusion and other volatile effects (Taunt, Encore,
-  Substitute's doll, Leech Seed), Safeguard, Quick and Wide Guard, Fairy Lock, PP; a stolen item on the thief;
-  Power Trick, stat swaps and splits, Transform, ability changes, Trick and Switcheroo's
-  items, Magnet Rise and Smack Down (Ground immunity gained or lost) aren't modelled: read off the screen, the
-  Pokémon they change counts for nothing until it leaves the field (an item swapped stays gone after, taken as no
-  item). The per-item test lists the items with nothing to model and why.
+  Substitute's doll, Leech Seed), Safeguard, Quick and Wide Guard, Fairy Lock, PP; a stolen item on the thief.
+  Power Trick, Skill Swap, Speed Swap, Power and Guard Split, Transform, Magnet Rise and Smack Down (Ground
+  immunity gained or lost) aren't modelled: read off the screen, the Pokémon they change counts for nothing until
+  it leaves the field. The per-item test lists the items with nothing to model and why.
 - Quick Claw and Quick Draw count only when their chip is ticked (see *Turn order*); one left
   unticked reads as the Pokémon being faster (a Scarf, more Speed) or, where that can't be, as a
   flagged conflict.

@@ -220,7 +220,8 @@ function Tile({gen, battle, result, ctx, ref_, selected, onTap}: {
         {c?.status && <span className={`tag st ${c.status}`}>{STATUS_LABEL[c.status]}</span>}
         {c?.mega && <span className="tag">Mega</span>}
         {boosts.map(b => <span key={b} className="tag boost">{b}</span>)}
-        {c?.itemGone && <span className="tag">no item</span>}
+        {c?.holds ? <span className="tag">{c.holds}</span> : c?.itemGone && <span className="tag">no item</span>}
+        {c?.abilityNow !== undefined && <span className="tag">{c.abilityNow || 'no ability'}</span>}
         {c && <Held battle={battle} result={result} c={c} />}
       </div>
       {m && <div className="info">{headline(m, !!c?.mega)}</div>}

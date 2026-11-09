@@ -9,7 +9,7 @@
 import LEGAL_ABILITIES from '../data/abilities.gen.json';
 import {move as dexMove, toID, type BoostID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
-import {makePokemon, roostTypes, typeEffectiveness} from './calc';
+import {heldItem, makePokemon, roostTypes, typeEffectiveness} from './calc';
 import {megaFormeOf, mySpec} from './likelihood';
 import {reactionEffect, SEEDS} from './abilities';
 import {BINDS, EXPOSES, moveFx, RISES_BEFORE_HIT, SPINS, type MoveFx} from './moves';
@@ -30,10 +30,16 @@ export interface StateCtx {
 
 const clone = (s: Snapshot): Snapshot => structuredClone(s);
 /** A Pokémon's condition without these (what goes when it leaves the field, or wears off). */
-const without = (c: MonCondition, ...keys: ('types' | 'exposed' | 'roosted' | 'charged' | 'odd' | 'abilityChanged' | 'blade' | 'bound' | 'seeded' | 'salted')[]): MonCondition => {
+const without = (c: MonCondition, ...keys: ('types' | 'exposed' | 'roosted' | 'charged' | 'odd' | 'abilityChanged' | 'abilityNow' | 'holds' | 'blade' | 'bound' | 'seeded'
+  | 'salted')[]): MonCondition => {
   const out = {...c};
   for (const k of keys) delete out[k];
   return out;
+};
+/** Its item used up or taken: its own, or one it was given (Trick). */
+const loseItem = (c: MonCondition) => {
+  c.itemGone = true;
+  delete c.holds;
 };
 const clamp6 = (v: number) => Math.max(-6, Math.min(6, v));
 const foe = (side: SideID): SideID => (side === 'me' ? 'opp' : 'me');
@@ -49,6 +55,8 @@ const BLOCKS_DROPS = new Set(['Clear Body', 'White Smoke', 'Full Metal Body']);
 /** Ability we act on automatically: mine always, theirs only once it's certain (never from usage odds alone). */
 function knownAbility(ctx: StateCtx, live: Snapshot, ref: MonRef): string | undefined {
   const c = live.mons[monKey(ref)];
+  // One the game named in place of its own (Entrainment, Role Play…), none if suppressed.
+  if (c?.abilityNow !== undefined) return c.abilityNow || undefined;
   if (ref.side === 'me') {
     const set = ctx.battle.myTeam[ref.slot];
     return set ? mySpec(ctx.gen, ctx.fmt, set, c).ability : undefined;
@@ -59,6 +67,7 @@ function knownAbility(ctx: StateCtx, live: Snapshot, ref: MonRef): string | unde
 
 function knownItem(ctx: StateCtx, live: Snapshot, ref: MonRef): string | undefined {
   const c = live.mons[monKey(ref)];
+  if (c?.holds) return c.holds;
   if (c?.itemGone) return undefined;
   return ref.side === 'me' ? ctx.battle.myTeam[ref.slot]?.item : ctx.oppItem(ref.slot);
 }
@@ -66,7 +75,7 @@ function knownItem(ctx: StateCtx, live: Snapshot, ref: MonRef): string | undefin
 /** Whether it has, or for all that's known may have, this ability (theirs: any it can legally have, until one is sure). */
 function mayHaveAbility(ctx: StateCtx, live: Snapshot, ref: MonRef, name: string): boolean {
   const c = live.mons[monKey(ref)];
-  if (ref.side === 'me') return knownAbility(ctx, live, ref) === name;
+  if (ref.side === 'me' || c?.abilityNow !== undefined) return knownAbility(ctx, live, ref) === name;
   const known = ctx.oppAbility(ref.slot, !!c?.mega);
   if (known && known.p >= 1) return known.name === name;
   const preview = ctx.battle.oppPreview[ref.slot];
@@ -112,7 +121,7 @@ function applyReaction(live: Snapshot, ref: MonRef, name: string, drop: Boosts) 
   const {boosts, itemGone} = reactionEffect(name, drop);
   addStages(live, ref, boosts);
   const c = live.mons[monKey(ref)];
-  if (c && itemGone) live.mons[monKey(ref)] = {...c, itemGone: true};
+  if (c && itemGone) live.mons[monKey(ref)] = {...without(c, 'holds'), itemGone: true};
 }
 
 /** Stages added as they are (the game said so, or a reaction that answers a change already made). */
@@ -280,7 +289,7 @@ function giveStatus(ctx: StateCtx, live: Snapshot, ref: MonRef, status: Status |
   const c = live.mons[monKey(ref)];
   if (!status || !c || c.hp <= 0 || c.status) return;
   const item = knownItem(ctx, live, ref);
-  if (item && CURES[item]?.includes(status)) c.itemGone = true;
+  if (item && CURES[item]?.includes(status)) loseItem(c);
   else c.status = status;
 }
 
@@ -344,17 +353,17 @@ function entryHazards(ctx: StateCtx, live: Snapshot, ref: MonRef) {
 function takeItem(ctx: StateCtx, live: Snapshot, ev: ActionEvent, fx: MoveFx, target: MonRef) {
   if (!fx.it || fx.it === 'fling' || ev.failed) return;
   const c = live.mons[monKey(target)];
-  if (!c || c.itemGone) return;
+  if (!c || (c.itemGone && !c.holds)) return;
   // A Mega Stone can't be taken from the Pokémon it's for.
   const set = target.side === 'me' ? ctx.battle.myTeam[target.slot] : undefined;
   if ((set && megaFormeOf(ctx.gen, set)) || (target.side === 'opp' && c.mega)) return;
-  if (fx.it === 'knock') c.itemGone = true;
+  if (fx.it === 'knock') loseItem(c);
   if (fx.it === 'steal') {
     // Only a thief with nothing in hand takes it (known for mine).
     const thief = ev.actor.side === 'me' ? ctx.battle.myTeam[ev.actor.slot] : undefined;
-    if (thief && (!thief.item || live.mons[monKey(ev.actor)]?.itemGone)) c.itemGone = true;
+    if (thief && !heldItem(live.mons[monKey(ev.actor)], thief.item)) loseItem(c);
   }
-  if (fx.it === 'eat' && /Berry$/.test(knownItem(ctx, live, target) ?? '')) c.itemGone = true;
+  if (fx.it === 'eat' && /Berry$/.test(knownItem(ctx, live, target) ?? '')) loseItem(c);
 }
 
 /** Stat stages set, copied, reset or swapped by the move (Belly Drum, Haze, Psych Up…). */
@@ -442,24 +451,24 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
       t.hpUnknown = false;
     }
     giveStatus(ctx, next, hit.target, hit.status);
-    if (hit.triggers.some(x => x === 'berry' || x === 'sash' || x === 'wp' || x === 'sitrus')) t.itemGone = true;
+    if (hit.triggers.some(x => x === 'berry' || x === 'sash' || x === 'wp' || x === 'sitrus')) loseItem(t);
     if (hit.triggers.includes('sitrus') && !hit.fainted && !hit.healed) t.hp = Math.min(max, t.hp + Math.floor(max / 4));
     // My own Focus Sash saving me from full HP (which also turns on Unburden).
     if (hit.target.side === 'me' && !hit.unread && !hit.fainted && hit.hpAfter === 1 && hit.hpBefore === max
-      && knownItem(ctx, next, hit.target) === 'Focus Sash') t.itemGone = true;
+      && knownItem(ctx, next, hit.target) === 'Focus Sash') loseItem(t);
     // My own Sitrus: I know I hold it, so no message needed.
     if (hit.target.side === 'me' && !hit.unread && !hit.fainted && !hit.triggers.includes('sitrus')) {
       if (knownItem(ctx, next, hit.target) === 'Sitrus Berry' && t.hp <= Math.floor(max / 2)) {
         t.hp = Math.min(max, t.hp + Math.floor(max / 4));
-        t.itemGone = true;
+        loseItem(t);
       }
       if (knownItem(ctx, next, hit.target) === 'Oran Berry' && t.hp <= Math.floor(max / 2)) {
         t.hp = Math.min(max, t.hp + 10);
-        t.itemGone = true;
+        loseItem(t);
       }
     }
     // An Air Balloon pops at the first hit.
-    if (knownItem(ctx, next, hit.target) === 'Air Balloon') t.itemGone = true;
+    if (knownItem(ctx, next, hit.target) === 'Air Balloon') loseItem(t);
     takeItem(ctx, next, ev, fx, hit.target);
     if (hit.fainted) {
       next.mons[key] = {...t, boosts: {}};
@@ -509,7 +518,7 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
     if (fx.hpc) loseHP(ctx, next, ev.actor, fx.hpc, COST_ROUND[toID(ev.move)]);
     const self = next.mons[actorKey];
     if (self) {
-      if (fx.it === 'fling') self.itemGone = true;
+      if (fx.it === 'fling') loseItem(self);
       if (landed && EXPOSES.has(toID(ev.move))) self.exposed = ev.turn;
       // Roost: grounded and no longer Flying-type for the rest of the turn.
       if (landed && toID(ev.move) === 'roost') self.roosted = ev.turn;
@@ -523,7 +532,7 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
         else if (damaging) self.blade = true;
       }
       // A Normal Gem goes with the first Normal move it powers.
-      if (landed && damaging && moveType === 'Normal' && knownItem(ctx, next, ev.actor) === 'Normal Gem') self.itemGone = true;
+      if (landed && damaging && moveType === 'Normal' && knownItem(ctx, next, ev.actor) === 'Normal Gem') loseItem(self);
       // The charge from Electromorphosis goes with the Electric move it powered.
       if (damaging && moveType === 'Electric' && self.abilityOn && mayHaveAbility(ctx, next, ev.actor, 'Electromorphosis')) self.abilityOn = false;
       // Healed or hurt by an amount of the damage it dealt (Drain Punch, Brave Bird): unknown until it's read.
@@ -588,7 +597,7 @@ export function applySwitch(
   if (out !== null && out !== undefined) {
     const c = next.mons[`${side}${out}`];
     if (c && slotIn !== null && batonPassed(ctx.battle, side, out)) passed = {...c.boosts};
-    if (c) next.mons[`${side}${out}`] = {...without(c, 'types', 'exposed', 'roosted', 'charged', 'odd', 'abilityChanged', 'blade', 'bound', 'seeded', 'salted'), boosts: {}, abilityOn: false, toxic: 0};
+    if (c) next.mons[`${side}${out}`] = {...without(c, 'types', 'exposed', 'roosted', 'charged', 'odd', 'abilityChanged', 'abilityNow', 'blade', 'bound', 'seeded', 'salted'), boosts: {}, abilityOn: false, toxic: 0};
     // Its binding moves let go of those they held.
     for (const [key, m] of Object.entries(next.mons)) if (m.bound && m.bound.by.side === side && m.bound.by.slot === out) next.mons[key] = without(m, 'bound');
   }
@@ -618,7 +627,7 @@ export function applyCheck(ctx: StateCtx, live: Snapshot, ev: CheckEvent): Snaps
   if (ev.skipped || !ev.seen) return next;
   // A seed goes as it's used.
   const c = next.mons[monKey(ev.mon)];
-  if (c && ev.seenKind === 'item' && Object.values(SEEDS).includes(ev.seen)) next.mons[monKey(ev.mon)] = {...c, itemGone: true};
+  if (c && ev.seenKind === 'item' && Object.values(SEEDS).includes(ev.seen)) next.mons[monKey(ev.mon)] = {...without(c, 'holds'), itemGone: true};
   if (ev.applied || ev.context === 'terrain') return next;
   if (ev.context === 'entry') {
     if (ev.seenKind !== 'item') switchInAbility(ctx, next, ev.mon, ev.seen);

@@ -10,7 +10,7 @@ import type {FormatInfo} from '../data/format';
 import {fuse, type Structure} from '../data/fuse';
 import {parseTeam} from '../data/paste';
 import {createBattle, emptyField, uid} from './battle';
-import {asLogged, makeField, makeMove, makePokemon, roostTypes, runCalc} from './calc';
+import {NO_ABILITY, asLogged, currentAbility, finalSpeed, heldItem, makeField, makeMove, makePokemon, roostTypes, runCalc} from './calc';
 import {applyAction, applyEndTurn, applySwitch, maxHPOf, typesOf, type StateCtx} from './state';
 import type {ActionEvent, Battle, HitResult, MonRef} from './types';
 
@@ -327,5 +327,43 @@ describe('Charge (9 Nov)', () => {
     expect(used.mons.opp0.charged).toBeUndefined();
     const away = applySwitch(ctx, charged, 'opp', 0, 1);
     expect(away.mons.opp0.charged).toBeUndefined();
+  });
+});
+
+describe('an item or ability given in place of its own (9 Nov)', () => {
+  it("one given it (Trick) counts in place of its own, and stays with it when it leaves; Knock Off takes it", () => {
+    const {b, ctx} = rig();
+    const field = makeField('doubles', b.live.field, 'opp');
+    const speed = (cond: Battle['live']['mons'][string]) => finalSpeed(gen, makePokemon(gen, {species: 'Garchomp', level: 50, evs: [0, 0, 0, 0, 0, 32], item: 'Leftovers'}, cond), field);
+    const plain = b.live.mons.opp0;
+    const scarfed = {...plain, itemGone: true, holds: 'Choice Scarf'};
+    expect(speed(scarfed) / speed(plain)).toBeCloseTo(1.5, 1);
+    expect(heldItem(scarfed, 'Leftovers')).toBe('Choice Scarf');
+    expect(heldItem({...plain, itemGone: true}, 'Leftovers')).toBeUndefined();
+    const live = {...b.live, mons: {...b.live.mons, opp0: scarfed}};
+    const away = applySwitch(ctx, live, 'opp', 0, 1);
+    expect(away.mons.opp0).toMatchObject({holds: 'Choice Scarf', itemGone: true});
+    b.live = live;
+    const knocked = applyAction(ctx, live, act(b, me(1), 'Knock Off', [hit(opp(0), 100, 60)]));
+    expect(knocked.mons.opp0.holds).toBeUndefined();
+    expect(knocked.mons.opp0.itemGone).toBe(true);
+  });
+
+  it('an ability the game named (Simple Beam, Gastro Acid: none) counts in place of its own, till it leaves the field', () => {
+    const {b, ctx} = rig(['Dragonite', 'Clefable', 'Glimmora', 'Kingambit']);
+    const dmg = (cond: Battle['live']['mons'][string]) => {
+      const atk = makePokemon(gen, {species: 'Garchomp', level: 50, evs: [0, 32, 0, 0, 0, 0]});
+      const def = makePokemon(gen, {species: 'Dragonite', level: 50, evs: [0, 0, 0, 0, 0, 0], ability: 'Multiscale'}, cond);
+      return Math.max(...runCalc(gen, atk, def, makeMove(gen, 'Dragon Claw', {targets: 1}), makeField('doubles', b.live.field, 'me')).dist.keys());
+    };
+    const own = b.live.mons.opp0;
+    // Multiscale halves it at full HP; suppressed, it doesn't.
+    expect(dmg({...own, abilityNow: ''}) / dmg(own)).toBeGreaterThan(1.9);
+    expect(currentAbility({...own, abilityNow: ''}, 'Multiscale')).toBe(NO_ABILITY);
+    expect(currentAbility({...own, abilityNow: 'Simple'}, 'Multiscale')).toBe('Simple');
+    const live = {...b.live, mons: {...b.live.mons, opp0: {...own, abilityNow: 'Simple', abilityChanged: true}}};
+    const away = applySwitch(ctx, live, 'opp', 0, 1);
+    expect(away.mons.opp0.abilityNow).toBeUndefined();
+    expect(away.mons.opp0.abilityChanged).toBeUndefined();
   });
 });
