@@ -9,7 +9,7 @@
 import LEGAL_ABILITIES from '../data/abilities.gen.json';
 import {move as dexMove, toID, type BoostID, type Gen} from '../data/dex';
 import type {FormatData} from '../data/format';
-import {makePokemon, typeEffectiveness} from './calc';
+import {makePokemon, roostTypes, typeEffectiveness} from './calc';
 import {megaFormeOf, mySpec} from './likelihood';
 import {reactionEffect, SEEDS} from './abilities';
 import {BINDS, EXPOSES, moveFx, RISES_BEFORE_HIT, SPINS, type MoveFx} from './moves';
@@ -30,7 +30,7 @@ export interface StateCtx {
 
 const clone = (s: Snapshot): Snapshot => structuredClone(s);
 /** A Pokémon's condition without these (what goes when it leaves the field, or wears off). */
-const without = (c: MonCondition, ...keys: ('types' | 'exposed' | 'odd' | 'blade' | 'bound' | 'seeded' | 'salted')[]): MonCondition => {
+const without = (c: MonCondition, ...keys: ('types' | 'exposed' | 'roosted' | 'charged' | 'odd' | 'abilityChanged' | 'blade' | 'bound' | 'seeded' | 'salted')[]): MonCondition => {
   const out = {...c};
   for (const k of keys) delete out[k];
   return out;
@@ -262,11 +262,11 @@ export function targetNow(ctx: StateCtx, live: Snapshot, actor: MonRef, move: st
 /** Its types: as a move or an ability changed them, else its species' (as a Mega once it has evolved, where that's known). */
 export function typesOf(ctx: StateCtx, live: Snapshot, ref: MonRef): string[] {
   const c = live.mons[monKey(ref)];
-  if (c?.types) return [...c.types];
   const species = ref.side === 'me'
     ? mySpec(ctx.gen, ctx.fmt, ctx.battle.myTeam[ref.slot], c).species
     : ctx.battle.oppPreview[ref.slot];
-  return [...(ctx.gen.species.get(toID(species))?.types ?? [])];
+  const types = c?.types ?? ctx.gen.species.get(toID(species))?.types ?? [];
+  return c?.roosted !== undefined ? roostTypes(types) : [...types];
 }
 
 /** Berries that cure a status as soon as it's inflicted. */
@@ -511,6 +511,11 @@ export function applyAction(ctx: StateCtx, live: Snapshot, ev: ActionEvent): Sna
     if (self) {
       if (fx.it === 'fling') self.itemGone = true;
       if (landed && EXPOSES.has(toID(ev.move))) self.exposed = ev.turn;
+      // Roost: grounded and no longer Flying-type for the rest of the turn.
+      if (landed && toID(ev.move) === 'roost') self.roosted = ev.turn;
+      // Charge: its next Electric move at double power, which uses it up.
+      if (damaging && moveType === 'Electric') delete self.charged;
+      if (landed && toID(ev.move) === 'charge') self.charged = true;
       // Stance Change: Aegislash's Blade forme for an attack, its Shield again for King's Shield.
       const species = ev.actor.side === 'me' ? ctx.battle.myTeam[ev.actor.slot]?.species : ctx.battle.oppPreview[ev.actor.slot];
       if (/^aegislash/.test(toID(species ?? ''))) {
@@ -583,7 +588,7 @@ export function applySwitch(
   if (out !== null && out !== undefined) {
     const c = next.mons[`${side}${out}`];
     if (c && slotIn !== null && batonPassed(ctx.battle, side, out)) passed = {...c.boosts};
-    if (c) next.mons[`${side}${out}`] = {...without(c, 'types', 'exposed', 'odd', 'blade', 'bound', 'seeded', 'salted'), boosts: {}, abilityOn: false, toxic: 0};
+    if (c) next.mons[`${side}${out}`] = {...without(c, 'types', 'exposed', 'roosted', 'charged', 'odd', 'abilityChanged', 'blade', 'bound', 'seeded', 'salted'), boosts: {}, abilityOn: false, toxic: 0};
     // Its binding moves let go of those they held.
     for (const [key, m] of Object.entries(next.mons)) if (m.bound && m.bound.by.side === side && m.bound.by.slot === out) next.mons[key] = without(m, 'bound');
   }
@@ -677,6 +682,8 @@ export function applyEndTurn(ctx: StateCtx, live: Snapshot): Snapshot {
   f.turns = turns;
   // Glaive Rush's opening lasts until its user moves again: a turn on, it has had its go.
   for (const [key, c] of Object.entries(next.mons)) if (c.exposed !== undefined && c.exposed < ctx.battle.turn) next.mons[key] = without(c, 'exposed');
+  // Roost's lost Flying type comes back as the turn ends.
+  for (const [key, c] of Object.entries(next.mons)) if (c.roosted !== undefined) next.mons[key] = without(c, 'roosted');
 
   for (const side of ['me', 'opp'] as const) {
     for (const slot of next.active[side]) {

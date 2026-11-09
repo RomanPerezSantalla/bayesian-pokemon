@@ -9,7 +9,7 @@ import {STAT_IDS, getGen, move as dexMove, toID, type StatID} from '../data/dex'
 import type {FormatData} from '../data/format';
 import {hashString} from './rng';
 import {
-  actionLikelihoods, defaultCondition, oppOrderKey, orderConsistency, turnOrderLikelihoods, usesInARow, type Ctx, type OppPair,
+  actionLikelihoods, defaultCondition, enduring, oppOrderKey, orderConsistency, turnOrderLikelihoods, usesInARow, type Ctx, type OppPair,
   type SlotLikelihood,
 } from './likelihood';
 import {indexOfMove, isChoiceItem, isPseudoMove, itemFactors, movesLogLik, predictMoves} from './moveset';
@@ -160,7 +160,8 @@ function collectFacts(battle: Battle, slot: number): Facts {
   const gen = getGen(0);
   for (const ev of battle.events) {
     if (ev.kind === 'action' && ev.actor.side === 'opp' && ev.actor.slot === slot && toID(ev.move) !== 'struggle') {
-      push(facts.moves, ev.move);
+      // Called by another (Copycat): not one of its own, unless Sleep Talk called it.
+      if (!ev.called || toID(ev.called) === 'sleeptalk') push(facts.moves, ev.move);
       if (ev.quick) push(ev.quick === 'Quick Claw' ? facts.items : facts.abilities, ev.quick);
       // An item the game showed is one it can have, listed for it or not (and the evidence then says how likely).
       if (ev.actorTriggers.includes('lifeorb')) push(facts.items, 'Life Orb');
@@ -483,7 +484,7 @@ export function computeBeliefs(fmt: FormatData, battle: Battle): Beliefs {
   for (const ev of battle.events as BattleEvent[]) {
     if (ev.kind === 'action') {
       // With what came before it that changes its damage (a Metronome's run, Rage Fist's hits taken…), which the event doesn't hold.
-      const past = `${usesInARow(battle, ev)}|${ev.hits.map(h => powerFromHistory(gen, battle, ev.actor, ev.move, ev, h.target) ?? '').join(',')}`;
+      const past = `${usesInARow(battle, ev)}|${ev.hits.map(h => `${powerFromHistory(gen, battle, ev.actor, ev.move, ev, h.target) ?? ''}${enduring(battle, ev, h.target) ? 'E' : ''}`).join(',')}`;
       const likes = cached(likCache, `${ctxKey}|${past}|${JSON.stringify(ev)}`, () => actionLikelihoods(ctx, ev));
       for (const l of likes) apply(ev.id, l.slot, l.kind, l.note, l.raw);
       const list = turns.get(ev.turn) ?? [];

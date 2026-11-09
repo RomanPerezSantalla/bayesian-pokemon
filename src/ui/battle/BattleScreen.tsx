@@ -279,7 +279,7 @@ function describe(battle: Battle, result: InferResult | null, ev: BattleEvent): 
   switch (ev.kind) {
     case 'action': {
       const hits = ev.hits.map(h => `${nm(h.target)} ${h.noEffect ? 'unaffected' : h.fainted ? 'KO' : h.unread ? '→ ? (HP skipped)' : `→${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}${h.status ? ` ${h.status}` : ''}${h.triggers.length ? ` [${h.triggers.join(',')}]` : ''}`);
-      return `${nm(ev.actor)}: ${ev.move}${ev.quick ? ` (${ev.quick})` : ''}${ev.failed ? ' (failed)' : ev.charged ? ' (charging)' : ''}${hits.length ? ` · ${hits.join('; ')}` : ''}${ev.actorTriggers.length ? ` [${ev.actorTriggers.join(',')}]` : ''}${ev.ordered ? '' : ' · order unsure'}`;
+      return `${nm(ev.actor)}: ${ev.move}${ev.allOut ? ' (all out)' : ''}${ev.quick ? ` (${ev.quick})` : ''}${ev.failed ? ' (failed)' : ev.charged ? ' (charging)' : ''}${hits.length ? ` · ${hits.join('; ')}` : ''}${ev.actorTriggers.length ? ` [${ev.actorTriggers.join(',')}]` : ''}${ev.ordered ? '' : ' · order unsure'}`;
     }
     case 'reveal':
       return `${nm(ev.mon)} ${ev.negate ? 'not ' : ''}${ev.what === 'forme' ? 'Mega Evolved →' : `${ev.what}:`} ${ev.value}`;

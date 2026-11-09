@@ -18,7 +18,7 @@ import {DROP_REACT, DROP_REACT_ITEMS, announceLikelihood} from './abilities';
 import {
   CONTACT_PUNISH, DAMAGE_NOT_FROM_STATS, RISES_BEFORE_HIT, attackerAbilityStatusChance, moveFx, moveStatusChance,
 } from './moves';
-import {powerFromHistory} from './power';
+import {hitsOn, powerFromHistory} from './power';
 import {NO_ITEM, type FormeSpace, type MonSpace} from './prior';
 import {
   monKey, sameMon, type ActionEvent, type Battle, type BattleSettings, type HitResult, type MonCondition,
@@ -226,6 +226,7 @@ const outcomes = (after: number, band: boolean): [number, number][] => (after <=
  */
 export function oppHitLikelihood(
   dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, settings: BattleSettings, sitrus = false, band = false,
+  endured = false,
 ) {
   if (hit.noEffect) return dist.get(0) ?? 0;
   const before = hpCandidates(hit.hpBefore, max, settings, hit.beforeApprox);
@@ -235,7 +236,7 @@ export function oppHitLikelihood(
     for (const [roll, p] of dist) {
       if (roll === 0) continue;
       let left = hb - roll;
-      if (left <= 0 && survives && hb === max) left = 1;
+      if (left <= 0 && ((survives && hb === max) || endured)) left = 1;
       for (const [ha, w] of outcomes(left, band)) {
         let ok: boolean;
         if (hit.fainted) ok = ha <= 0;
@@ -253,15 +254,18 @@ export function oppHitLikelihood(
   return total / before.length;
 }
 
-/** P(observed exact HP change on my Pokémon | damage distribution). Off-by-one readings allowed, weakly. */
-export function myHitLikelihood(dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, band = false) {
+/**
+ * P(observed exact HP change on my Pokémon | damage distribution). Off-by-one readings allowed, weakly. `survives`: a
+ * Focus Sash or Sturdy, at full HP; `endured`: it used Endure this turn, at any HP.
+ */
+export function myHitLikelihood(dist: Map<number, number>, hit: HitResult, max: number, survives: boolean, band = false, endured = false) {
   if (hit.noEffect) return dist.get(0) ?? 0;
   const b = hit.hpBefore;
   let total = 0;
   for (const [roll, p] of dist) {
     if (roll === 0) continue;
     let left = b - roll;
-    if (left <= 0 && survives && b === max) left = 1;
+    if (left <= 0 && ((survives && b === max) || endured)) left = 1;
     for (const [after, w] of outcomes(left, band)) {
       if (hit.fainted) {
         if (after <= 0) total += p * w;
@@ -329,6 +333,13 @@ export function hitState(ev: ActionEvent): Snapshot {
   return {...ev.before, mons: {...ev.before.mons, [key]: {...c, boosts, ...(blade ? {blade: true} : {})}}};
 }
 
+/** It used Endure earlier this turn, before this move: it holds on at 1 HP ("…endured the hit!"). */
+export function enduring(battle: Battle, ev: ActionEvent, target: MonRef): boolean {
+  const at = battle.events.findIndex(e => e.id === ev.id);
+  const before = at >= 0 ? battle.events.slice(0, at) : battle.events;
+  return before.some(e => e.kind === 'action' && e.turn === ev.turn && sameMon(e.actor, target) && toID(e.move) === 'endure' && !e.failed);
+}
+
 export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
   const {gen, fmt, battle} = ctx;
   const snap = hitState(ev);
@@ -346,7 +357,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     const space = ctx.spaces[slot];
     if (!space) return out;
     const oppCond = condOf(snap, ev.actor, 100);
-    const field = makeField(fmt.gameType, snap.field, 'opp', {helpingHand: ev.helpingHand, ...aura});
+    const field = makeField(fmt.gameType, snap.field, 'opp', {helpingHand: ev.helpingHand, charge: oppCond.charged, ...aura});
 
     // Quick Claw / Quick Draw name themselves when they fire; asked and not shown is evidence too.
     if (ev.quick !== undefined) {
@@ -371,9 +382,10 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
       const myMax = defender.maxHP();
       const survives = (!myCond.itemGone && set.item === 'Focus Sash') || spec.ability === 'Sturdy';
       const band = !myCond.itemGone && set.item === 'Focus Band';
-      const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome, bp: powerFromHistory(gen, battle, ev.actor, ev.move, ev, hit.target)});
-      const multi = (ev.hitCount ?? 1) > 1;
+      const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: hitsOn(ev), targets: ev.targets, metronome, bp: powerFromHistory(gen, battle, ev.actor, ev.move, ev, hit.target)});
+      const multi = (hitsOn(ev) ?? 1) > 1;
       const times = takenTimes(myCond);
+      const endured = enduring(battle, ev, hit.target);
 
       const repr = (fi: number, item: string) => {
         const forme = space.formes[fi];
@@ -399,7 +411,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
           const attacker = makePokemon(gen, cls === 'n' ? {...v.spec, item: NO_ITEM} : v.spec, oppCond,
             faintedCount(snap, 'opp'), curHPFromPct(v.stats[0], oppCond.hp));
           const res = runCalc(gen, asLogged(attacker, mv), defender, mv, field, times);
-          lik = myHitLikelihood(res.dist, hit, myMax, survives && !multi, band);
+          lik = myHitLikelihood(res.dist, hit, myMax, survives && !multi, band, endured);
           memo.set(key, lik);
         }
         raw[h] = lik;
@@ -443,7 +455,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
   if (!set || !damaging) return out;
   const myCond = condOf(snap, ev.actor, 1);
   const attacker = makePokemon(gen, mySpec(gen, fmt, set, myCond), myCond, faintedCount(snap, 'me'), myCond.hp || undefined);
-  const field = makeField(fmt.gameType, snap.field, 'me', {helpingHand: ev.helpingHand, ...aura});
+  const field = makeField(fmt.gameType, snap.field, 'me', {helpingHand: ev.helpingHand, charge: myCond.charged, ...aura});
   const oppHits = ev.hits.filter(x => x.target.side === 'opp');
 
   for (const hit of oppHits) {
@@ -453,9 +465,10 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
     const oppCond = condOf(snap, hit.target, hit.hpBefore);
     // Either changed in a way the app doesn't follow (Transform…): the damage says nothing of its set.
     if (myCond.odd || oppCond.odd) continue;
-    const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: ev.hitCount, targets: ev.targets, metronome, bp: powerFromHistory(gen, battle, ev.actor, ev.move, ev, hit.target)});
-    const multi = (ev.hitCount ?? 1) > 1;
+    const mv = makeMove(gen, ev.move, {crit: hit.crit, hits: hitsOn(ev), targets: ev.targets, metronome, bp: powerFromHistory(gen, battle, ev.actor, ev.move, ev, hit.target)});
+    const multi = (hitsOn(ev) ?? 1) > 1;
     const times = takenTimes(oppCond);
+    const endured = enduring(battle, ev, hit.target);
     const repr = (fi: number, item: string) => {
       const forme = space.formes[fi];
       const pre = !!forme.preMega && !oppCond.mega;
@@ -486,7 +499,7 @@ export function actionLikelihoods(ctx: Ctx, ev: ActionEvent): SlotLikelihood[] {
         const has = !oppCond.itemGone;
         const survives = !multi && ((cls === 'Focus Sash' && has) || v.ability === 'Sturdy');
         m = {
-          lik: oppHitLikelihood(res.dist, hit, res.maxHP, survives, battle.settings, cls === 'Sitrus Berry' && has, cls === 'Focus Band' && has),
+          lik: oppHitLikelihood(res.dist, hit, res.maxHP, survives, battle.settings, cls === 'Sitrus Berry' && has, cls === 'Focus Band' && has, endured),
           type: res.moveType,
           eff: res.effectiveness,
         };
@@ -585,7 +598,10 @@ export function turnOrderLikelihoods(ctx: Ctx, actions: ActionEvent[], megas: Mo
   const {gen, fmt, battle} = ctx;
   const mine: SlotLikelihood[] = [];
   const oppPairs: OppPair[] = [];
-  const ordered = actions.filter(a => a.ordered);
+  // Round after its partner's moves straight after it, whatever its Speed: its place says nothing of it.
+  const roundAfter = (a: ActionEvent) => toID(a.move) === 'round' && actions.some(b => b !== a && b.actor.side === a.actor.side
+    && b.actor.slot !== a.actor.slot && toID(b.move) === 'round' && !b.failed && actions.indexOf(b) < actions.indexOf(a));
+  const ordered = actions.filter(a => a.ordered && !roundAfter(a));
   for (let i = 0; i < ordered.length; i++) {
     for (let j = i + 1; j < ordered.length; j++) {
       const A = ordered[i];

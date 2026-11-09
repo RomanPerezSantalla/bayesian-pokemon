@@ -10,8 +10,8 @@ import type {FormatInfo} from '../data/format';
 import {fuse, type Structure} from '../data/fuse';
 import {parseTeam} from '../data/paste';
 import {createBattle, emptyField, uid} from './battle';
-import {asLogged, makeField, makeMove, makePokemon, runCalc} from './calc';
-import {applyAction, applyEndTurn, applySwitch, maxHPOf, type StateCtx} from './state';
+import {asLogged, makeField, makeMove, makePokemon, roostTypes, runCalc} from './calc';
+import {applyAction, applyEndTurn, applySwitch, maxHPOf, typesOf, type StateCtx} from './state';
 import type {ActionEvent, Battle, HitResult, MonRef} from './types';
 
 const gen = getGen(0);
@@ -281,5 +281,51 @@ describe('what hurts at the end of each turn until it leaves (6 Oct)', () => {
     live = applyAction(ctx, live, act(b, me(1), 'Rapid Spin', [hit(opp(0), 100, 95)]));
     expect(live.mons.me1.bound).toBeUndefined();
     expect(live.mons.me1.seeded).toBeUndefined();
+  });
+});
+
+describe('Roost (9 Nov)', () => {
+  const quake = (live: Battle['live']) => {
+    const atk = makePokemon(gen, {species: 'Garchomp', level: 50, evs: [0, 32, 0, 0, 0, 0]});
+    const def = makePokemon(gen, {species: 'Corviknight', level: 50, evs: [0, 0, 0, 0, 0, 0]}, live.mons.opp0);
+    return Math.max(...runCalc(gen, atk, def, makeMove(gen, 'Earthquake', {targets: 1}), makeField('doubles', live.field, 'me')).dist.keys());
+  };
+
+  it('no longer Flying-type till the turn ends: Ground moves hit it meanwhile', () => {
+    const {b, ctx} = rig(['Corviknight', 'Clefable', 'Glimmora', 'Kingambit']);
+    const roosted = applyAction(ctx, b.live, act(b, opp(0), 'Roost'));
+    expect(typesOf(ctx, roosted, opp(0))).toEqual(['Steel']);
+    expect(quake(b.live)).toBe(0);
+    expect(quake(roosted)).toBeGreaterThan(0);
+    const after = applyEndTurn(ctx, roosted);
+    expect(typesOf(ctx, after, opp(0))).toEqual(['Flying', 'Steel']);
+    expect(quake(after)).toBe(0);
+    // Only Flying-type: Normal meanwhile.
+    expect(roostTypes(['Flying'])).toEqual(['Normal']);
+  });
+
+  it('one that failed (its HP full) leaves it Flying-type', () => {
+    const {b, ctx} = rig(['Corviknight', 'Clefable', 'Glimmora', 'Kingambit']);
+    const failed = applyAction(ctx, b.live, act(b, opp(0), 'Roost', [], {failed: true}));
+    expect(typesOf(ctx, failed, opp(0))).toEqual(['Flying', 'Steel']);
+  });
+});
+
+describe('Charge (9 Nov)', () => {
+  it('its next Electric move at double power, which uses it up; gone when it leaves the field', () => {
+    const {b, ctx} = rig(['Raichu', 'Clefable', 'Glimmora', 'Kingambit']);
+    const charged = applyAction(ctx, b.live, act(b, opp(0), 'Charge'));
+    expect(charged.mons.opp0.charged).toBe(true);
+    const bolt = (charge?: boolean) => {
+      const atk = makePokemon(gen, {species: 'Raichu', level: 50, evs: [0, 0, 0, 32, 0, 0]});
+      const def = makePokemon(gen, {species: 'Kingambit', level: 50, evs: [0, 0, 0, 0, 0, 0]});
+      return Math.max(...runCalc(gen, atk, def, makeMove(gen, 'Thunderbolt', {targets: 1}), makeField('doubles', b.live.field, 'opp', {charge})).dist.keys());
+    };
+    expect(bolt(true) / bolt()).toBeGreaterThan(1.9);
+    b.live = charged;
+    const used = applyAction(ctx, charged, act(b, opp(0), 'Thunderbolt', [hit(me(1), 200, 120)]));
+    expect(used.mons.opp0.charged).toBeUndefined();
+    const away = applySwitch(ctx, charged, 'opp', 0, 1);
+    expect(away.mons.opp0.charged).toBeUndefined();
   });
 });

@@ -71,6 +71,10 @@ const PROTECTS = new Set(['protect', 'detect', 'kingsshield', 'spikyshield', 'ba
 const THROUGH_PROTECT = new Set(['feint', 'shadowforce', 'phantomforce', 'hyperspacehole', 'hyperspacefury', 'hyperdrill', 'mightycleave']);
 /** Moves that switch their user out. */
 const PIVOTS = new Set(['uturn', 'voltswitch', 'flipturn', 'partingshot', 'batonpass', 'teleport', 'shedtail', 'chillyreception']);
+/** Moves that call another, told next as a move of its own ("…used Sleep Talk!", "…used Body Slam!"). */
+const CALLS_ANOTHER = new Set(['sleeptalk', 'copycat', 'metronome', 'mirrormove', 'assist', 'mefirst', 'naturepower']);
+/** Moves it can use asleep, after "…is fast asleep.". */
+const USABLE_ASLEEP = new Set(['sleeptalk', 'snore']);
 /** Berries that restore HP when eaten mid-move ("…had its HP restored." after their pop-up). */
 const HEALING_BERRIES = new Set(['Sitrus Berry', 'Oran Berry', 'Figy Berry', 'Wiki Berry', 'Mago Berry', 'Aguav Berry', 'Iapapa Berry']);
 /** Items used up as their pop-up shows (besides berries, and those a hit or a reaction takes care of). */
@@ -101,7 +105,7 @@ type Edit =
   | {kind: 'field'; news: FieldNews}
   /** Its types as the game says they've become (none: its own again). */
   | {kind: 'types'; key: string; types?: string[]}
-  | {kind: 'odd'; key: string}
+  | {kind: 'odd'; key: string; ability?: boolean}
   /** Ally Switch: the two of a side change places. */
   | {kind: 'places'; side: SideID}
   /**
@@ -129,6 +133,8 @@ interface Draft {
   crit?: boolean;
   failed?: boolean;
   hitCount?: number;
+  /** Fickle Beam went all out. */
+  allOut?: boolean;
   /** A two-turn move's charge was said ("…absorbed electricity!"). */
   charging?: boolean;
   /** Stat changes the game showed while it was open: checked against what logging it does. */
@@ -193,7 +199,10 @@ function applyEdit(live: Snapshot, e: Edit) {
     if (e.types) c.types = [...e.types];
     else delete c.types;
   }
-  if (e.kind === 'odd') c.odd = true;
+  if (e.kind === 'odd') {
+    c.odd = true;
+    if (e.ability) c.abilityChanged = true;
+  }
   if (e.kind === 'unbound') {
     delete c.bound;
     if (e.hp !== undefined) c.hp = e.hp;
@@ -226,6 +235,10 @@ export class Narrator {
   private about?: MonRef;
   /** Those whose turn came but couldn't move, and the turn: moving in that turn means a new one has begun. */
   private couldnt = new Map<string, number>();
+  /** Of those, the ones fast asleep: Sleep Talk and Snore are their move all the same. */
+  private slept = new Set<string>();
+  /** The move that called the one being told (Sleep Talk, Copycat), by its user. */
+  private calledBy = new Map<string, string>();
   /** The last entry in the log when the narrator last looked: gone means entries were taken back (undo). */
   private anchor: string | undefined;
   /** The turn this phrase has told of so far (a move said in it), for a move it brings up again. */
@@ -240,6 +253,11 @@ export class Narrator {
   private encored = new Set<string>();
   /** Theirs whose Trace just showed: the ability pop-up next for it is the one it copied. */
   private traced: string | null = null;
+  /**
+   * Trick, Switcheroo: its user, its target once known, whether each held its own item till then, and what each got.
+   * What one got was the other's.
+   */
+  private swap: {user: MonRef; own: boolean; target?: MonRef; targetOwn?: boolean; got: {mon: MonRef; item: string; done?: boolean}[]} | null = null;
   /** Made to move again this turn by an Instruct ("…followed …'s instructions!"): its next move isn't a new turn's. */
   private instructed = new Set<string>();
 
@@ -249,6 +267,8 @@ export class Narrator {
   private sync() {
     if (this.anchor && !this.io.battle().events.some(e => e.id === this.anchor)) {
       this.couldnt.clear();
+      this.slept.clear();
+      this.calledBy.clear();
       this.encored.clear();
       this.instructed.clear();
       this.pending.clear();
@@ -354,8 +374,8 @@ export class Narrator {
 
   /** What it knows now, to go back to if the phrase about to be fed is taken back ("scratch that"). */
   save(): NarratorState {
-    const {draft, kept, vacated, quick, pending, explained, sealed, ending, about, couldnt, anchor} = this;
-    return structuredClone({draft, kept, vacated, quick, pending, explained, sealed, ending, about, couldnt, anchor}) as unknown as NarratorState;
+    const {draft, kept, vacated, quick, pending, explained, sealed, ending, about, couldnt, slept, anchor} = this;
+    return structuredClone({draft, kept, vacated, quick, pending, explained, sealed, ending, about, couldnt, slept, anchor}) as unknown as NarratorState;
   }
 
   /** Back to what it knew then; whoever takes the phrase back puts the battle back too. */
@@ -416,6 +436,7 @@ export class Narrator {
     const odd = !!this.io.battle().live.mons[monKey(d.actor)]?.odd;
     if (logged?.kind === 'action' && (this.encored.has(monKey(d.actor)) || odd)) this.io.apply(bb => setOrdered(bb, logged.id, false));
     this.instructed.delete(monKey(d.actor));
+    this.calledBy.delete(monKey(d.actor));
     const which = this.whichOne(d);
     const hits = which ? [`${which} (not said): HP skipped`] : action.hits.map(h => `${this.label(h.target)} ${h.fainted ? 'KO' : h.noEffect ? 'immune'
       : h.unread ? 'HP skipped' : `${h.hpAfter}${h.target.side === 'opp' ? '%' : ''}`}${h.crit ? ' crit' : ''}`);
@@ -471,7 +492,7 @@ export class Narrator {
     return {
       actor: ev.actor, move: ev.move, spread, status, rows, actorTriggers: [...ev.actorTriggers], actorStatus: ev.actorStatus,
       actorBoosts: ev.actorBoosts, actorHp: ev.actorHpAfter, quick: ev.quick ?? undefined, failed: ev.failed, hitCount: ev.hitCount,
-      charging: ev.charged, lastRow: rows.length === 1 ? rows[0].ref : undefined, heard: [], later: [],
+      allOut: ev.allOut, charging: ev.charged, lastRow: rows.length === 1 ? rows[0].ref : undefined, heard: [], later: [],
     };
   }
 
@@ -533,6 +554,7 @@ export class Narrator {
     if (ev.kind !== 'ability') this.traced = null;
     // A weather or terrain line goes with the pop-up just before it, not one from before a move or the turn's end.
     if (ev.kind === 'use' || ev.kind === 'endTurn') this.shownAbility = null;
+    if (ev.kind === 'use' || ev.kind === 'endTurn') this.swap = null;
     switch (ev.kind) {
       case 'use': {
         // The move told again: said twice ("Raichu Protect… Raichu Protect?"), or brought up again as a phrase goes on
@@ -549,10 +571,18 @@ export class Narrator {
         this.retelling = false;
         const done = this.commit();
         this.nothingShown();
-        // It couldn't move earlier this turn: the next turn's. (One that moved already this turn starts the next as it's
-        // logged. A move said after ones it must have come before, Fake Out after an ordinary attack, is this turn's,
-        // said out of order: it goes in its place once logged.)
-        const turned = this.couldntNow(ev.actor) ? this.newTurn() : [];
+        // Called by its move just logged (Sleep Talk, Copycat): this turn's still, in that one's place.
+        const caller = this.callerOf(ev.actor, ev.move);
+        if (caller) {
+          this.calledBy.set(monKey(ev.actor), caller);
+          this.instructed.add(monKey(ev.actor));
+          this.encored.add(monKey(ev.actor));
+        }
+        // It couldn't move earlier this turn: the next turn's (but fast asleep, Sleep Talk and Snore are its move). (One
+        // that moved already this turn starts the next as it's logged. A move said after ones it must have come before,
+        // Fake Out after an ordinary attack, is this turn's, said out of order: it goes in its place once logged.)
+        const asleep = this.slept.has(monKey(ev.actor)) && USABLE_ASLEEP.has(toID(ev.move));
+        const turned = this.couldntNow(ev.actor) && !caller && !asleep ? this.newTurn() : [];
         this.explained = [];
         this.sealed = false;
         this.ending = false;
@@ -696,6 +726,11 @@ export class Narrator {
         if (d && !d.status) d.hitCount = ev.n;
         return [];
       }
+      case 'allOut': {
+        const d = this.draft ?? this.reopen(ev.mon);
+        if (d && !d.status) d.allOut = true;
+        return d ? [`${this.label(d.actor)}: all out, double power`] : [];
+      }
       case 'recoil': {
         const d = this.draft ?? this.reopen(ev.mon);
         // The pop-up ("…'s Life Orb") and "…lost some of its HP!" say the same recoil.
@@ -732,6 +767,7 @@ export class Narrator {
         const again = ev.mon && (this.couldntNow(ev.mon) || turnActions(this.io.battle()).some(a => sameMon(a.actor, ev.mon!)));
         const turned = again ? this.newTurn() : [];
         if (ev.mon) this.couldnt.set(monKey(ev.mon), this.io.battle().turn);
+        if (ev.mon && ev.status === 'slp') this.slept.add(monKey(ev.mon));
         this.sealed = true;
         this.about = ev.mon;
         const c = ev.mon ? this.io.battle().live.mons[monKey(ev.mon)] : undefined;
@@ -767,9 +803,25 @@ export class Narrator {
         if (this.io.battle().live.active[ev.side].length !== 2) return [];
         this.edit({kind: 'places', side: ev.side});
         return [`${ev.side === 'me' ? 'yours' : 'theirs'} switched places`];
-      case 'odd':
-        this.edit({kind: 'odd', key: monKey(ev.mon)});
-        return [`${this.label(ev.mon)} changed: what it does now isn't counted`];
+      case 'odd': {
+        this.edit({kind: 'odd', key: monKey(ev.mon), ability: ev.ability});
+        // Swapped or split with its move's target (Skill Swap, Speed Swap…): that one's changed too.
+        const t = ev.target && this.draft && sameMon(this.draft.actor, ev.mon) ? this.soleTarget(this.draft) : undefined;
+        if (t && !sameMon(t, ev.mon)) this.edit({kind: 'odd', key: monKey(t), ability: ev.ability});
+        const who = t && !sameMon(t, ev.mon) ? `${this.label(ev.mon)} and ${this.label(t)}` : this.label(ev.mon);
+        return [`${who} changed: what it does now isn't counted`];
+      }
+      case 'swapItems':
+        return this.swapItems(ev.mon);
+      case 'revived': {
+        // Revival Blessing: back from fainting at half its HP.
+        const b = this.io.battle();
+        const max = ev.mon.side === 'opp' ? 100 : maxHPOf(this.io.ctx(b), b.live, ev.mon);
+        this.edit({kind: 'hp', key: monKey(ev.mon), hp: Math.floor(max / 2)});
+        return [`${this.label(ev.mon)} revived`];
+      }
+      case 'obtained':
+        return this.obtained(ev.mon, ev.item);
       case 'unchanged':
         return this.unchanged(ev.mon, ev.stats);
       case 'field':
@@ -902,13 +954,21 @@ export class Narrator {
         // Dragged out: in for the one the last move hit (Roar, Dragon Tail, Red Card).
         const hit = ev.kind === 'dragged' ? this.lastHit(side) : -1;
         const pos = hit >= 0 ? hit : this.vacated[side] ?? (fainted >= 0 ? fainted : active.length === 1 ? 0 : this.pivoted(side));
+        // In for one that fainted: that's after the turn's end, said or not (no Leftovers, no weather to tell it), so
+        // what it sets coming in (Grassy Surge, Drizzle) counts from the next turn (5 Oct: a Grassy Surge read as the
+        // turn's ended a turn early, and its silence a turn on as a Terrain Extender).
+        const replaces = hit < 0 && this.vacated[side] === undefined && pos === fainted && active[pos] !== null && active[pos] !== undefined
+          && (now.live.mons[`${side}${active[pos]}`]?.hp ?? 1) <= 0
+          // (Not with a U-turn or Parting Shot of that side's waiting for the one it brings in: that comes mid-turn.)
+          && this.pivoted(side) < 0;
         delete this.vacated[side];
         if (pos < 0) {
           this.io.askSwitch(side, slot);
           return [done, `${this.label(ev.mon)} came in: tap which one it replaced`];
         }
+        const ended = replaces && turnActions(now).length ? this.endPhase() : [];
         this.explained.push(...this.log((bb, c) => logSwitch(c, bb, side, pos, slot)));
-        return [done, `${this.label(ev.mon)} came in`];
+        return [done, ...ended, `${this.label(ev.mon)} came in`];
       }
       case 'endTurn': {
         const done = this.commit();
@@ -916,6 +976,8 @@ export class Narrator {
         this.nothingShown();
         this.pending.clear();
         this.couldnt.clear();
+        this.slept.clear();
+        this.calledBy.clear();
         this.encored.clear();
         this.instructed.clear();
         this.sealed = true;
@@ -1004,6 +1066,8 @@ export class Narrator {
     this.sealed = true;
     this.pending.clear();
     this.couldnt.clear();
+    this.slept.clear();
+    this.calledBy.clear();
     this.encored.clear();
     this.instructed.clear();
     const now = this.io.battle();
@@ -1110,6 +1174,59 @@ export class Narrator {
   private hpTarget(d: Draft): MonRef | undefined {
     const ref = this.soleTarget(d);
     return ref && d.rows.length > 1 && this.row(d, ref)?.value !== undefined ? undefined : ref;
+  }
+
+  /**
+   * Trick, Switcheroo: each holds the other's item now, which the app doesn't follow (its own is gone, and what it deals
+   * and takes and when it moves say nothing of its set until it leaves the field). Its target, if the move's said.
+   */
+  private swapItems(user: MonRef): string[] {
+    const b = this.io.battle();
+    const own = (m: MonRef) => !!b.live.mons[monKey(m)] && !b.live.mons[monKey(m)]!.itemGone && !b.live.mons[monKey(m)]!.odd;
+    const d = this.draft;
+    const t = d && sameMon(d.actor, user) ? this.soleTarget(d) : undefined;
+    const target = t && !sameMon(t, user) ? t : undefined;
+    this.swap = {user, own: own(user), target, targetOwn: target ? own(target) : undefined, got: []};
+    for (const m of target ? [user, target] : [user]) {
+      this.edit({kind: 'itemGone', key: monKey(m)});
+      this.edit({kind: 'odd', key: monKey(m)});
+    }
+    return [`${this.label(user)}${target ? ` and ${this.label(target)}` : ''} swapped items: what they do now isn't counted`];
+  }
+
+  /** "…obtained Sitrus Berry.": the other one's item, theirs a reveal if it was its own. */
+  private obtained(mon: MonRef, item: string): string[] {
+    const s = this.swap;
+    if (!s) return [];
+    if (!sameMon(mon, s.user) && !s.target) {
+      const b = this.io.battle();
+      const c = b.live.mons[monKey(mon)];
+      s.target = mon;
+      s.targetOwn = !!c && !c.itemGone && !c.odd;
+      this.edit({kind: 'itemGone', key: monKey(mon)});
+      this.edit({kind: 'odd', key: monKey(mon)});
+    }
+    s.got.push({mon, item});
+    // Each once whom it came from is known (the user's line can come before its target is named).
+    const notes: string[] = [];
+    for (const g of s.got) {
+      if (g.done) continue;
+      const fromUser = !sameMon(g.mon, s.user);
+      const from = fromUser ? s.user : s.target;
+      if (!from) continue;
+      g.done = true;
+      if (from.side !== 'opp' || !(fromUser ? s.own : s.targetOwn)) continue;
+      this.io.apply(bb => logReveal(bb, from, 'item', g.item));
+      notes.push(`${this.label(from)}: ${g.item}`);
+    }
+    return notes;
+  }
+
+  /** The move that called this one: its user's move just logged this turn, one that calls another (Sleep Talk, Copycat). */
+  private callerOf(actor: MonRef, move: string): string | undefined {
+    const last = turnActions(this.io.battle()).at(-1);
+    if (!last || !sameMon(last.actor, actor) || last.called || last.failed || toID(last.move) === toID(move)) return undefined;
+    return CALLS_ANOTHER.has(toID(last.move)) ? last.move : undefined;
   }
 
   private soleTarget(d: Draft): MonRef | undefined {
@@ -1556,6 +1673,8 @@ export class Narrator {
 
   private ability(b: Battle, d: Draft | null, mon: MonRef, ability: string): (string | null)[] {
     if (mon.side === 'me') return [];
+    // Shown once its ability changed (a Skill Swap, an Entrainment, Transform): not its own.
+    if (b.live.mons[monKey(mon)]?.abilityChanged && this.traced !== monKey(mon)) return [`${this.label(mon)}: ${ability} (not its own)`];
     // Trace's pop-up, then the one it copied ("…'s Prankster", from your Grimmsnarl): that one isn't its own.
     if (this.traced === monKey(mon)) {
       this.traced = null;
@@ -1629,6 +1748,8 @@ export class Narrator {
       actor: d.actor, move: d.move, helpingHand: helpedThisTurn(b, d.actor), actorTriggers: d.actorTriggers,
       actorStatus: d.actorStatus, ordered: true, narrated: true, quick: d.quick,
       actorBoosts: d.actorBoosts, actorHpAfter: d.actorHp, hitCount: d.hitCount,
+      ...(d.allOut ? {allOut: true} : {}),
+      ...(this.calledBy.has(monKey(d.actor)) ? {called: this.calledBy.get(monKey(d.actor))} : {}),
       ...(this.instructed.has(monKey(d.actor)) ? {again: true} : {}),
     };
     if (d.failed) return {...common, hits: [], targets: 1, targetRefs: [], failed: true};

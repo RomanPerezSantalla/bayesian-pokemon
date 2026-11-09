@@ -133,7 +133,7 @@ export function choiceLockedMove(b: Battle, ref: MonRef, item: string | undefine
   let last: string | null = null;
   for (const e of b.events) {
     if (e.kind === 'switch' && e.side === ref.side && (e.slotIn === ref.slot || e.slotOut === ref.slot)) last = null;
-    if (e.kind === 'action' && sameMon(e.actor, ref) && toID(e.move) !== 'struggle') last = e.move;
+    if (e.kind === 'action' && sameMon(e.actor, ref) && toID(e.move) !== 'struggle' && !e.called) last = e.move;
   }
   return last;
 }

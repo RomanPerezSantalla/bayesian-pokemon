@@ -41,11 +41,17 @@ export interface MonCondition {
    * it).
    */
   exposed?: number;
+  /** The turn it used Roost: no longer Flying-type until that turn ends (only Flying: Normal-type). */
+  roosted?: number;
+  /** Charge: its next Electric move is at double power (used up by it, gone when it leaves the field). */
+  charged?: boolean;
   /**
    * Changed in a way the app doesn't follow (Transform, Power Trick…): until it leaves the field, what it deals and
    * takes and when it moves say nothing of its set.
    */
   odd?: boolean;
+  /** Its ability changed (Skill Swap, Entrainment, Role Play, Transform…): one shown for it now isn't its own. */
+  abilityChanged?: boolean;
   /** Aegislash in its Blade forme: it attacked since it came in or last used King's Shield (Stance Change). */
   blade?: boolean;
   /**
@@ -156,6 +162,8 @@ export interface ActionEvent {
   targets: number;
   /** Multi-hit moves: how many times it hit. */
   hitCount?: number;
+  /** Fickle Beam: "…is going all out for this attack!", at double power. */
+  allOut?: boolean;
   helpingHand: boolean;
   actorTriggers: Trigger[];
   /** Status the actor picked up (e.g. burned by Flame Body after a contact move). */
@@ -175,6 +183,11 @@ export interface ActionEvent {
   charged?: boolean;
   /** A move beyond its one for the turn (an Instruct made it move again): not the start of a new turn. */
   again?: boolean;
+  /**
+   * The move of its that called this one (Sleep Talk, Copycat): it went in that one's place, and only one Sleep Talk
+   * calls is a move of its own.
+   */
+  called?: string;
   /** State right before this action. */
   before: Snapshot;
   /** Use this action's position in the turn for speed inference ("order unsure" turns it off). */

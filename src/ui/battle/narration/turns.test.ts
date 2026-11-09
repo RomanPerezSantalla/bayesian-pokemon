@@ -17,6 +17,7 @@ import type {ActionEvent, Battle, SideID} from '../../../engine/types';
 import type {MonSummary} from '../../../engine/worker';
 import {hitState} from '../../../engine/likelihood';
 import {maxHPOf} from '../../../engine/state';
+import {powerFromHistory} from '../../../engine/power';
 import {turnActions, undo} from '../actions';
 import {readingEvents} from '../ScreenFeed';
 import {Narrator, type NarratorIO} from './narrator';
@@ -490,10 +491,11 @@ describe('written loosely', () => {
     expect(kinds('all pokemon that heard the song will faint in three turns')).toEqual([]);
     expect(kinds('no one will be able to leave the battlefield during the next turn')).toEqual([]);
     expect(kinds('heat wave was revealed to be one of the moves that the opposing salamence knows')).toEqual([]);
-    // It didn't take; Magnet Rise isn't Levitate; Quick Claw going off isn't the turn order.
+    // It didn't take; Magnet Rise isn't Levitate (it counts for nothing till it leaves: the calc can't be told it's
+    // immune to Ground); Quick Claw going off isn't the turn order.
     expect(kinds('the opposing salamence cannot be poisoned')).toEqual(['miss']);
     expect(kinds('the opposing salamence is already asleep')).toEqual(['miss']);
-    expect(kinds('the opposing salamence levitated with electromagnetism')).toEqual([]);
+    expect(kinds('the opposing salamence levitated with electromagnetism')).toEqual(['odd']);
     expect(events('the opposing salamence can act faster than normal thanks to its quick claw')).toEqual([
       {kind: 'item', mon: {side: 'opp', slot: 0}, item: 'Quick Claw', gone: false},
     ]);
@@ -1135,10 +1137,10 @@ describe('lines that change what a Pokémon is (5 Oct)', () => {
     expect(events("The opposing Salamence copied Charizard's stat changes!")).toEqual([{kind: 'copyBoosts', mon: opp0, from: me0}]);
     expect(events('All stat changes on the opposing Salamence were inverted!')).toEqual([{kind: 'copyBoosts', mon: opp0, from: opp0, invert: true}]);
     expect(events("The opposing Kingambit's move was postponed!")).toEqual([{kind: 'outOfTurn', mon: opp1}]);
-    expect(events('The opposing Salamence transformed into Charizard!')).toEqual([{kind: 'odd', mon: opp0}]);
+    expect(events('The opposing Salamence transformed into Charizard!')).toEqual([{kind: 'odd', mon: opp0, ability: true}]);
     expect(events('Charizard switched its Attack and Defense!')).toEqual([{kind: 'odd', mon: me0}]);
-    // Role Play copies an ability: what it says is the other's.
-    expect(events("Charizard copied the opposing Salamence's Intimidate Ability!")).toEqual([{kind: 'ability', mon: opp0, ability: 'Intimidate'}]);
+    // Role Play copies an ability: what it says is the other's, and its own is changed.
+    expect(events("Charizard copied the opposing Salamence's Intimidate Ability!")).toEqual([{kind: 'odd', mon: me0, ability: true}, {kind: 'ability', mon: opp0, ability: 'Intimidate'}]);
   });
 });
 
@@ -1410,5 +1412,127 @@ Slowbro-Mega @ Slowbronite
     const r = rig({me: [0, 1], opp: [0, 1]}, {team, preview: ['Sinistcha', 'Indeedee-F', 'Blastoise', 'Kingambit']});
     const evs = parseNarration("The opposing Sinistcha's Matcha Gotcha melted the ice!", {battle: r.b, gen, mons: undefined});
     expect(evs).toEqual([{kind: 'cure', mon: {side: 'opp', slot: 0}}]);
+  });
+});
+
+describe('moves met in no game yet (9 Nov)', () => {
+  const me0 = {side: 'me', slot: 0};
+  const opp0 = {side: 'opp', slot: 0};
+  const PREVIEW = ['Clefable', 'Hydrapple', 'Rillaboom', 'Kingambit'];
+
+  it('the lines: abilities changed or swapped, items swapped, Fickle Beam going all out', () => {
+    expect(events('The opposing Salamence is going all out for this attack!')).toEqual([{kind: 'allOut', mon: opp0}]);
+    expect(events('Charizard acquired Intimidate!')).toEqual([{kind: 'odd', mon: me0, ability: true}]);
+    expect(events("The opposing Salamence's Ability became Mummy!")).toEqual([{kind: 'odd', mon: opp0, ability: true}]);
+    expect(events("The opposing Salamence's Ability was suppressed!")).toEqual([{kind: 'odd', mon: opp0, ability: true}]);
+    expect(events('The opposing Salamence swapped Abilities with its target!')).toEqual([{kind: 'odd', mon: opp0, target: true, ability: true}]);
+    expect(events('Charizard switched Speed with its target!')).toEqual([{kind: 'odd', mon: me0, target: true}]);
+    expect(events('Charizard switched items with its target!')).toEqual([{kind: 'swapItems', mon: me0}]);
+    expect(events('The opposing Salamence obtained Sitrus Berry.')).toEqual([{kind: 'obtained', mon: opp0, item: 'Sitrus Berry'}]);
+    // Ground immunity gained or lost (Magnet Rise, Smack Down): the calc can't be told, so it counts for nothing.
+    expect(events('The opposing Salamence levitated with electromagnetism!')).toEqual([{kind: 'odd', mon: opp0}]);
+    expect(events('The opposing Salamence fell straight down!')).toEqual([{kind: 'odd', mon: opp0}]);
+  });
+
+  it("one sent out for a fainted one comes in after the turn's end, nothing said at it: what it sets counts from the next turn", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read(
+      'Charizard used Heat Wave!',
+      'The opposing Clefable 0',
+      'The opposing Hydrapple 80',
+      'The opposing Clefable fainted!',
+      'Kim sent out Rillaboom!',
+      "Rillaboom's Grassy Surge",
+      'Grass grew to cover the battlefield!',
+    );
+    const kinds = r.b.events.map(e => `${e.kind}${e.turn}`);
+    expect(kinds.indexOf('endTurn1')).toBeGreaterThan(kinds.indexOf('action1'));
+    expect(kinds.indexOf('endTurn1')).toBeLessThan(kinds.indexOf('switch2'));
+    expect(r.b.live.field.terrain).toBe('Grassy');
+    expect(r.b.live.field.turns?.terrain).toBe(5);
+  });
+
+  it('…but one a Parting Shot brings in comes mid-turn, its partner fainted or not', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read(
+      'The opposing Hydrapple used Draco Meteor!',
+      'Charizard 0',
+      'Charizard fainted!',
+      'Incineroar used Parting Shot!',
+      "The opposing Clefable's Attack fell!",
+      "The opposing Clefable's Sp. Atk fell!",
+      'Go! Garchomp!',
+    );
+    expect(r.b.events.some(e => e.kind === 'endTurn')).toBe(false);
+  });
+
+  it('Revival Blessing: a fainted one back at half its HP', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.b.live.mons.opp2 = {...r.b.live.mons.opp2, hp: 0};
+    r.b.live.mons.me2 = {...r.b.live.mons.me2, hp: 0};
+    const max = maxHPOf({fmt: doublesFmt, gen, battle: r.b, oppAbility: () => undefined, oppItem: () => undefined}, r.b.live, {side: 'me', slot: 2});
+    r.read('The opposing Rillaboom was revived and is ready to fight again!', 'Garchomp was revived and is ready to fight again!');
+    expect(r.b.live.mons.opp2.hp).toBe(50);
+    expect(r.b.live.mons.me2.hp).toBe(Math.floor(max / 2));
+  });
+
+  it("Trick: both changed and each one's own item gone; what mine got was theirs", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read(
+      'The opposing Clefable used Trick!',
+      'The opposing Clefable switched items with its target!',
+      'The opposing Clefable obtained Sitrus Berry.',
+      'Incineroar obtained Choice Scarf.',
+    );
+    r.n.commit();
+    const items = r.b.events.filter(e => e.kind === 'reveal' && e.what === 'item');
+    expect(items).toEqual([expect.objectContaining({mon: opp0, value: 'Choice Scarf'})]);
+    for (const k of ['opp0', 'me1']) expect(r.b.live.mons[k]).toMatchObject({odd: true, itemGone: true});
+    expect(r.b.live.mons.me0.odd).toBeFalsy();
+  });
+
+  it("an ability shown once its own has changed isn't its own; after a Trick it still is", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    r.read('The opposing Clefable acquired Unaware!', "Clefable's Unaware");
+    expect(r.b.events.some(e => e.kind === 'reveal' && e.what === 'ability')).toBe(false);
+    const t = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    t.read('The opposing Clefable used Trick!', 'The opposing Clefable switched items with its target!', "Clefable's Unaware");
+    expect(t.b.events.some(e => e.kind === 'reveal' && e.what === 'ability' && e.value === 'Unaware')).toBe(true);
+  });
+
+  it('Fickle Beam going all out is logged at double power', () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: PREVIEW});
+    const hp = r.max('me0');
+    r.read('The opposing Hydrapple used Fickle Beam!', 'The opposing Hydrapple is going all out for this attack!', `Charizard ${hp - 60}`);
+    r.n.commit();
+    const [beam] = turnActions(r.b, 1);
+    expect(beam).toMatchObject({move: 'Fickle Beam', allOut: true});
+    expect(powerFromHistory(gen, r.b, beam.actor, beam.move, beam)).toBe(160);
+  });
+
+  it("a move another called (Sleep Talk, even fast asleep; Copycat) is this turn's, in that one's place; only Sleep Talk's is its own", () => {
+    const r = rig({me: [0, 1], opp: [0, 1]}, {preview: ['Snorlax', 'Kingambit', 'Rillaboom', 'Clefable']});
+    const hp = r.max('me0');
+    r.read(
+      'Charizard used Heat Wave!',
+      'The opposing Snorlax 80',
+      'The opposing Kingambit 70',
+      'The opposing Snorlax is fast asleep.',
+      'The opposing Snorlax used Sleep Talk!',
+      'The opposing Snorlax used Body Slam!',
+      `Charizard ${hp - 50}`,
+      'The opposing Kingambit used Copycat!',
+      'The opposing Kingambit used Body Slam!',
+      `Charizard ${hp - 90}`,
+    );
+    r.n.commit();
+    expect(r.b.turn).toBe(1);
+    expect(turnActions(r.b, 1).map(a => [a.move, a.ordered, a.called])).toEqual([
+      ['Heat Wave', true, undefined], ['Sleep Talk', true, undefined], ['Body Slam', false, 'Sleep Talk'],
+      ['Copycat', true, undefined], ['Body Slam', false, 'Copycat'],
+    ]);
+    const [snorlax, kingambit] = computeBeliefs(doublesFmt, r.b).mons;
+    expect(snorlax!.moves.find(m => m.name === 'Body Slam')?.p).toBeCloseTo(1);
+    expect(kingambit!.moves.find(m => m.name === 'Body Slam')?.p ?? 0).toBeLessThan(0.5);
   });
 });

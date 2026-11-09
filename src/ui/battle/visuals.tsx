@@ -33,8 +33,8 @@ function DamageRow({r, cur, p}: {r: DamageMatchup; cur: number; p?: number}) {
   return (
     <div className={`dmg-row${verdict.weak ? ' weak' : ''}`}>
       <TypeTab type={r.type} eff={r.eff} />
-      <div className="dmg-label">
-        <span className="nm">{r.move}</span>
+      <div className="dmg-label" title={r.note}>
+        <span className="nm">{r.label ?? r.move}</span>
         {p !== undefined && <small className="muted">{p < 1 ? pct(p) : '✓'}</small>}
       </div>
       <DamageBar hp={cur / 100} lo={r.lo / 100} hi={r.hi / 100} />
@@ -99,9 +99,9 @@ export function MatchupCards({gen, cards, oppName, oppHp, moveP, speed, trickRoo
               {sv && <span className={`verdict ${sv.cls}`}>{sv.text}</span>}
             </div>
             {c.takes.length > 0 && <div className="mcard-label">takes from {oppName}</div>}
-            {takes.map(r => <DamageRow key={`t${r.move}`} r={r} cur={c.hp} p={moveP(r.move)} />)}
+            {takes.map(r => <DamageRow key={`t${r.label ?? r.move}`} r={r} cur={c.hp} p={moveP(r.move)} />)}
             {c.deals.length > 0 && <div className="mcard-label">deals to {oppName}</div>}
-            {deals.map(r => <DamageRow key={`d${r.move}`} r={r} cur={oppHp} />)}
+            {deals.map(r => <DamageRow key={`d${r.label ?? r.move}`} r={r} cur={oppHp} />)}
           </div>
         );
       })}

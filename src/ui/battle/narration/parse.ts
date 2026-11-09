@@ -31,6 +31,8 @@ export type NarrationEvent =
   | {kind: 'fail'}
   /** "The Pokémon was hit 3 times!" */
   | {kind: 'hits'; n: number}
+  /** Fickle Beam: "…is going all out for this attack!", at double power. */
+  | {kind: 'allOut'; mon?: MonRef}
   | {kind: 'status'; mon?: MonRef; status: Status}
   /** Its turn came and it couldn't move: flinched, fully paralyzed, fast asleep, frozen, recharging… */
   | {kind: 'cant'; mon?: MonRef; status?: Status; flinch?: boolean}
@@ -88,10 +90,19 @@ export type NarrationEvent =
    */
   | {kind: 'types'; mon: MonRef; to?: string; like?: MonRef; add?: string; lose?: string; back?: boolean}
   /**
-   * Changed in a way the app doesn't follow (Transform, Imposter, Power Trick, a swap or split of stats with a target it
-   * can't tell…): what it deals and takes, and when it moves, say nothing of its set until it leaves the field.
+   * Changed in a way the app doesn't follow (Transform, Imposter, Power Trick, a swap or split of stats…): what it deals
+   * and takes, and when it moves, say nothing of its set until it leaves the field. `target`: its move's target too
+   * ("…with its target!"); `ability`: its ability changed, so one shown for it now isn't its own.
    */
-  | {kind: 'odd'; mon: MonRef}
+  | {kind: 'odd'; mon: MonRef; target?: boolean; ability?: boolean}
+  /**
+   * Trick, Switcheroo: "…switched items with its target!" (`mon`, the user), then where each went: "…obtained Choice
+   * Scarf." (`obtained`).
+   */
+  | {kind: 'swapItems'; mon: MonRef}
+  | {kind: 'obtained'; mon: MonRef; item: string}
+  /** Revival Blessing: "…was revived and is ready to fight again!", back at half its HP. */
+  | {kind: 'revived'; mon: MonRef}
   /** Ally Switch: "Charizard and Incineroar switched places!" */
   | {kind: 'places'; side: SideID}
   /** Its HP box is up in that place (read off the screen, not the text): it's out there. */
@@ -108,7 +119,8 @@ type Phrase = 'crit' | 'faint' | 'miss' | 'missAfter' | 'shield' | 'immune' | 'i
   | 'cure' | 'encored' | 'charge' | 'battleEnd' | 'residual' | 'knockOff' | 'steal' | 'itemGone' | 'seen' | 'whiteHerb' | 'popped' | 'obtained' | 'dragged' | 'reacting'
   | 'substitute' | 'blewAway' | 'quickDraw' | 'maxAttack' | 'unaffected' | 'unaffectedBy' | 'targetsItem' | 'skip' | 'skipMove'
   | 'skipCount' | 'copied' | 'offer' | 'postponed' | 'followed' | 'transformedInto' | 'typeAdded' | 'sameType' | 'burnedOut'
-  | 'noElectricity' | 'typeBack' | 'inverted' | 'oddChange' | 'places' | 'trapped' | 'freed';
+  | 'noElectricity' | 'typeBack' | 'inverted' | 'oddChange' | 'oddBoth' | 'swapItems' | 'allOut' | 'revived' | 'places' | 'trapped'
+  | 'freed';
 
 /**
  * Pokémon Champions' battle lines (its own English text: see messages.ts) after norm(), longest
@@ -138,7 +150,7 @@ const PHRASES: [string[], Phrase, string?][] = ([
   ['is already paralyzed', 'unaffected'], ['is already asleep', 'unaffected'], ['stays awake', 'unaffected'],
   ['stays wide awake', 'unaffected'], ['stayed awake', 'unaffected'], ['is not affected by', 'unaffectedBy'],
   // Lines that only look like something: Magnet Rise, Electrify, Safeguard ending, Perish Song, Fairy Lock, Forewarn.
-  ['levitated with electromagnetism', 'skip'], ['electromagnetism wore off', 'skip'],
+  ['electromagnetism wore off', 'skip'],
   ['moves have been electrified', 'skip'], ['no longer protected', 'skip'], ['will faint in three turns', 'skip'],
   ['during the next turn', 'skip'], ['one of the moves', 'skip'], ['already has a substitute', 'skip'], ['stockpiled', 'skipCount'],
   // Encore taking hold (its move is logged from "…used Encore!"), and the battle over.
@@ -197,9 +209,19 @@ const PHRASES: [string[], Phrase, string?][] = ([
   // Double Shock. Transform and Imposter ("…transformed into Incineroar!") and the rest the app doesn't follow: odd.
   ['transformed into', 'transformedInto'], ['type was added to', 'typeAdded'], ['became the same type as', 'sameType'],
   ['burned itself out', 'burnedOut'], ['used up all its electricity', 'noElectricity'], ['returned to its original type', 'typeBack'],
-  ['transformed', 'oddChange'], ['switched its attack and defense', 'oddChange'], ['switched all changes to its', 'oddChange'],
-  ['switched speed with its target', 'oddChange'], ['shared its power with the target', 'oddChange'],
-  ['shared its guard with the target', 'oddChange'], ['underwent a heroic transformation', 'oddChange'],
+  ['transformed', 'oddChange'], ['switched its attack and defense', 'oddChange'], ['underwent a heroic transformation', 'oddChange'],
+  // Its ability changed: Entrainment, Worry Seed, Simple Beam ("…acquired Simple!"), Mummy ("…'s Ability became Mummy!"),
+  // Gastro Acid ("…'s Ability was suppressed!").
+  ['acquired', 'oddChange', 'ability'], ['ability became', 'oddChange', 'ability'], ['ability was suppressed', 'oddChange', 'ability'],
+  // Swapped or split with the move's target, both changed: Skill Swap, Speed Swap, Power Swap, Guard Swap, Power Split, Guard Split.
+  ['swapped abilities with its target', 'oddBoth', 'ability'], ['switched all changes to its', 'oddBoth'],
+  ['switched speed with its target', 'oddBoth'], ['shared its power with the target', 'oddBoth'],
+  ['shared its guard with the target', 'oddBoth'],
+  // Trick, Switcheroo; Fickle Beam at double power.
+  ['switched items with its target', 'swapItems'], ['going all out for this attack', 'allOut'],
+  ['was revived and is ready to fight again', 'revived'],
+  // Ground immunity gained (Magnet Rise) or lost (Smack Down), which the calc can't be told of: odd till it leaves.
+  ['levitated with electromagnetism', 'oddChange'], ['fell straight down', 'oddChange'],
   // Switching. "…, come back!" and "… withdrew …!" are the switches chosen for a turn, made before its moves.
   ['sent out', 'sendOut'], ['send out', 'sendOut'], ['sends out', 'sendOut'], ['brought out', 'sendOut'], ['brings out', 'sendOut'],
   // Said rather than read: "opponent sent Rillaboom and Corviknight", "I lead with Dragapult".
@@ -748,10 +770,13 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
           if (last) out.push({kind: 'item', mon: last, item: 'Air Balloon', gone: true});
           break;
         case 'obtained': {
-          // Trick's "…obtained a Choice Scarf." says where an item went, not what it had.
+          // Trick's "…obtained a Choice Scarf.": where an item went (what the other one had).
           const j = words[i] === 'a' || words[i] === 'an' ? i + 1 : i;
           const it = matchAt(words, j, every(env.gen, 'items'), 0.8, 0.04);
-          if (it) i = j + it.len;
+          if (it) {
+            if (last) out.push({kind: 'obtained', mon: last, item: it.value});
+            i = j + it.len;
+          }
           break;
         }
         case 'reacting': {
@@ -773,6 +798,9 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
           if (last && from && !same(from.ref, last) && words[k] === 'stat' && words[k + 1] === 'changes') {
             out.push({kind: 'copyBoosts', mon: last, from: from.ref});
             i = k + 2;
+          } else if (last && from && !same(from.ref, last)) {
+            // Role Play: it has the other's ability now, not its own.
+            out.push({kind: 'odd', mon: last, ability: true});
           }
           break;
         }
@@ -803,7 +831,7 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
             out.push({kind: 'types', mon: last, to: type});
             i = j + 2;
           } else if (last && into) {
-            out.push({kind: 'odd', mon: last});
+            out.push({kind: 'odd', mon: last, ability: true});
             i = into.at + into.len;
           }
           break;
@@ -837,7 +865,19 @@ export function parseNarration(text: string, env: ParseEnv): NarrationEvent[] {
           if (last) out.push({kind: 'types', mon: last, back: true});
           break;
         case 'oddChange':
-          if (last) out.push({kind: 'odd', mon: last});
+          if (last) out.push({kind: 'odd', mon: last, ...(ph.extra === 'ability' ? {ability: true} : {})});
+          break;
+        case 'oddBoth':
+          if (last) out.push({kind: 'odd', mon: last, target: true, ...(ph.extra === 'ability' ? {ability: true} : {})});
+          break;
+        case 'swapItems':
+          if (last) out.push({kind: 'swapItems', mon: last});
+          break;
+        case 'allOut':
+          out.push({kind: 'allOut', mon: last});
+          break;
+        case 'revived':
+          if (last) out.push({kind: 'revived', mon: last});
           break;
         case 'places':
           // Ally Switch: the two of the side just named.

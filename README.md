@@ -149,8 +149,10 @@ multiplier beside it as the hit lands (Aerilate's Hyper Voice shows as Flying; M
 Close Combat on a Ghost as ×2, not the chart's ×0; Ring Target, Gravity, Freeze-Dry likewise). The badge
 gives the KO chance from its HP now, or else how many hits it takes (2HKO, 2–3HKO…); rows needing four
 hits or more fade, and a card's edge turns orange/red when a likely move could KO it. Every attack it
-plausibly has is listed (3%+), since on turn one nothing is known. The card header names who moves
-first. A Pokémon that can still Mega Evolve is counted as its Mega for damage and Speed (it evolves
+plausibly has is listed (3%+), since on turn one nothing is known. Round has a second row, *Round ×2*, where
+its partner on the field has Round too: used straight after its partner's, it moves then at double power (its
+note says so). Dragon Darts at a side with two out is one dart at each; its *Dragon Darts ×2* row is both darts
+at one, when the other is protected, immune or gone. The card header names who moves first. A Pokémon that can still Mega Evolve is counted as its Mega for damage and Speed (it evolves
 before anyone moves), weather included for Drought and co., until it moves without doing so: then it's
 counted as it is (the stone may be kept for another, or for later), and the note says so. Only one of
 yours on the field is counted, the first that hasn't let a turn go by, since a side has one Mega. The
@@ -275,7 +277,10 @@ HP, theirs in %), in the order the game shows them:
   HP to wait for; the same move read twice is one move; one an Encore made it use ("…must do an encore!")
   went at the priority of the move chosen before, so its place says nothing of Speed. A Pokémon sent in after
   its side's Baton Pass, U-turn or Parting Shot takes that one's place (yours are picked on the party screen,
-  with no "…, come back!"). A two-turn move's charge ("…absorbed electricity!", "…flew up high!") is its turn,
+  with no "…, come back!"). One sent in for one that fainted comes after the turn's end, so the turn ends there
+  if nothing at its end was read (no Leftovers, no weather): what it sets coming in (Grassy Surge, Drizzle) counts
+  from the next turn (on 5 Oct a Grassy Surge ended a turn early by the count, and its game's silence a turn on had
+  been taken as a Terrain Extender). A two-turn move's charge ("…absorbed electricity!", "…flew up high!") is its turn,
   nothing hit yet, the attack its next; in the rain (Electro Shot) or the sun (Solar Beam) the hit comes in the
   same turn. Electro Shot's and Meteor Beam's Sp. Atk rise comes with the charge, before the hit: its damage is
   taken with it, and a Protect that stops the hit doesn't stop the rise; the charge line ("…absorbed electricity!") brings
@@ -308,14 +313,23 @@ HP, theirs in %), in the order the game shows them:
 - **What a Pokémon is**: its types as the game says they changed ("…transformed into the Ice type!" from
   Protean, Libero or Soak; "Ghost type was added to …!"; "…became the same type as …!"; "…burned itself out!",
   "…used up all its electricity!"), until it leaves the field. A change the app doesn't follow ("…transformed
-  into Incineroar!" from Transform or Imposter, Power Trick, Power or Guard Split, a swap of stats with a target
-  it doesn't name, Zero to Hero, a forme change) makes that Pokémon count for nothing until it leaves the field:
-  what it deals and takes and when it moves aren't evidence, so nothing about it can turn up as impossible.
+  into Incineroar!" from Transform or Imposter, Power Trick, Zero to Hero, a forme change; an ability changed:
+  "…acquired Simple!" from Entrainment, Worry Seed or Simple Beam, "…'s Ability became Mummy!", "…'s Ability was
+  suppressed!", Role Play) makes that Pokémon count for nothing until it leaves the field: what it deals and takes
+  and when it moves aren't evidence, so nothing about it can turn up as impossible, and an ability shown for it
+  after isn't its own. A swap or split with the move's target (Skill Swap, Speed Swap, Power or Guard Swap or
+  Split, "…with its target!") does the same to both, the target where the move named it. Trick and Switcheroo
+  ("…switched items with its target!") do too, and each one's own item is gone; "…obtained Choice Scarf." says
+  what the other held, a reveal when that's one of theirs.
 - **Out of turn**: "…took the kind offer!" (After You), "…'s move was postponed!" (Quash), "…followed …'s
   instructions!" (Instruct: its move once more, the same turn): that move went where something put it, so
-  its place says nothing of Speed. "… and … switched places!" (Ally Switch) swaps the two of that side.
+  its place says nothing of Speed. So does a move another called ("…used Sleep Talk!", then "…used Body
+  Slam!"; Copycat), the same turn as the one that called it, which is the one that moved in its own place; only
+  Sleep Talk's call is a move of its own. A Round used straight after its partner's this turn is the same.
+  "… and … switched places!" (Ally Switch) swaps the two of that side.
 - **Couldn't move**: "…flinched and couldn't move!", "…couldn't move because it's paralyzed!", "…is fast
-  asleep." log no move (and no status on the move before); "…woke up!", "…'s Lum Berry cured its
+  asleep." log no move (and no status on the move before; Sleep Talk and Snore after "…is fast asleep." are its
+  move all the same); "…woke up!", "…'s Lum Berry cured its
   paralysis!" end it; "…cannot be poisoned!", "…is already asleep!" mean the move didn't take. "…'s Matcha Gotcha
   melted the ice!" thaws it. "You battled to a draw against…!" and "Time has run out!" end the battle.
 - **Held**: "…has been afflicted with an infestation by…!", "…became trapped in the fiery vortex!", "…was
@@ -433,7 +447,15 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
   order came out impossible), Rage Fist 50 more for each hit taken (to 350), Stomping Tantrum and Temper Flare
   doubled after a move of its that failed or affected none the turn before (not one a Protect stopped: a
   Stomping Tantrum after Baneful Bunker did 75 power's damage), Avalanche and Revenge once the target has hurt it
-  this turn, Round after its partner's.
+  this turn, Round after its partner's, Assurance once its target was hurt this turn, Lash Out once a stat of its
+  fell this turn (the calc means to double it then, but its count of stat changes only adds up rises, so it never
+  does), Fickle Beam when "…is going all out for this attack!", and Payback once its target has moved this turn
+  (the calc goes by Speed, which Trick Room and priority turn round). Dragon Darts that hit both foes is one dart at
+  each, not two. Roost leaves its user without its Flying type (only Flying: Normal) until the turn ends, so Ground
+  moves hit it then. A hit on one that used Endure that turn leaves it at 1 HP whatever its HP ("…endured the
+  hit!"), taken so and not as that damage; Revival Blessing ("…was revived and is ready to fight again!") brings one
+  back at half its HP; Charge doubles its user's next Electric move. These came out of going through every move a Pokémon in Champions can learn (9 Nov), by
+  ladder use: what Showdown's data says is unusual about it, and whether the calc or the app has it.
 - `public/data/leads-doubles.json`: from `npm run data:leads` (scripts/build-leads.mjs), the newest 3,000 public
   replays of Showdown's Champions VGC ladders (Reg M-C, best of one and best of three), fetched once into
   `.cache/replays` (about 25 MB, one request at a time). Each player's team counts once, however many games it
@@ -453,10 +475,11 @@ mechanic we don't model) it is **set aside and flagged in red** rather than wipi
 - Damage that isn't down to stats (Counter, Mirror Coat, Metal Burst, Comeuppance, Super Fang, Endeavor,
   one-hit KOs, Beat Up, Spit Up) is logged but learns nothing.
 - Not tracked: accuracy and evasion stages, confusion and other volatile effects (Taunt, Encore,
-  Substitute's doll, Leech Seed), Safeguard, Quick and Wide Guard, Fairy Lock, PP; Trick and Switcheroo's
-  swap, a stolen item on the thief; moves that change abilities (Simple Beam, Skill Swap…). Power Trick, Power
-  and Guard Split, Speed Swap and Transform aren't modelled: read off the screen, the Pokémon they change
-  counts for nothing until it leaves the field. The per-item test lists the items with nothing to model and why.
+  Substitute's doll, Leech Seed), Safeguard, Quick and Wide Guard, Fairy Lock, PP; a stolen item on the thief;
+  Power Trick, stat swaps and splits, Transform, ability changes, Trick and Switcheroo's
+  items, Magnet Rise and Smack Down (Ground immunity gained or lost) aren't modelled: read off the screen, the
+  Pokémon they change counts for nothing until it leaves the field (an item swapped stays gone after, taken as no
+  item). The per-item test lists the items with nothing to model and why.
 - Quick Claw and Quick Draw count only when their chip is ticked (see *Turn order*); one left
   unticked reads as the Pokémon being faster (a Scarf, more Speed) or, where that can't be, as a
   flagged conflict.

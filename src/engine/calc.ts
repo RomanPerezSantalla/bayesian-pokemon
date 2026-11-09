@@ -52,7 +52,14 @@ export function makePokemon(gen: Gen, spec: MonSpec, cond?: MonCondition, allies
     alliesFainted,
     curHP,
   } as ConstructorParameters<typeof Pokemon>[2]);
-  return cond?.types ? retyped(p, cond.types) : p;
+  const types = cond?.roosted !== undefined ? roostTypes(cond.types ?? p.types) : cond?.types;
+  return types ? retyped(p, types) : p;
+}
+
+/** Its types the turn it used Roost: Flying gone, and a Pokémon only Flying-type is Normal-type meanwhile. */
+export function roostTypes(types: readonly string[]): string[] {
+  const left = types.filter(t => t !== 'Flying');
+  return left.length ? left : ['Normal'];
 }
 
 /** Moves the calc gives their charge's Sp. Atk rise in the hit itself. */
@@ -87,7 +94,7 @@ export function makeField(
   gameType: 'singles' | 'doubles',
   field: FieldCondition,
   attackerSide: SideID,
-  opts: {helpingHand?: boolean; fairyAura?: boolean; darkAura?: boolean} = {},
+  opts: {helpingHand?: boolean; fairyAura?: boolean; darkAura?: boolean; charge?: boolean} = {},
 ) {
   const side = (s: SideID, attacker: boolean) => ({
     isTailwind: field[s].tailwind,
@@ -96,6 +103,8 @@ export function makeField(
     isAuroraVeil: field[s].auroraVeil,
     isFriendGuard: field[s].friendGuard,
     isHelpingHand: attacker && !!opts.helpingHand,
+    // Charge's double power for its next Electric move.
+    isCharge: attacker && !!opts.charge,
   });
   const defenderSide: SideID = attackerSide === 'me' ? 'opp' : 'me';
   return new Field({
@@ -117,6 +126,12 @@ export function makeMove(gen: Gen, name: string, opts: {crit?: boolean; hits?: n
   const overrides = {
     ...(isSpreadMove(gen, name) && (opts.targets ?? 2) < 2 ? {target: 'normal'} : {}),
     ...(opts.bp ? {basePower: opts.bp} : {}),
+    // A number of hits the calc keeps fixed whatever it's told: Dragon Darts at two targets (one each), Surging Strikes cut
+    // short.
+    ...(opts.hits && typeof gen.moves.get(toID(name))?.multihit === 'number' && gen.moves.get(toID(name))?.multihit !== opts.hits
+      ? {multihit: opts.hits} : {}),
+    // Payback with its power told (power.ts): renamed, or the calc doubles it again whenever its user is the slower.
+    ...(opts.bp && toID(name) === 'payback' ? {name: 'Payback (as logged)'} : {}),
   };
   return new Move(gen, name, {
     isCrit: opts.crit,

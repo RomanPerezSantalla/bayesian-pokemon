@@ -180,6 +180,9 @@ export interface DamageMatchup {
   ko: number;
   /** A would-be KO that Focus Sash stops. */
   sash?: boolean;
+  /** Shown for the move's name, where it's the move in some case (Round ×2), and why. */
+  label?: string;
+  note?: string;
 }
 
 /** The likeliest (type, multiplier) of a move over the hypotheses, weighted by posterior. */
@@ -205,8 +208,10 @@ function summarize(move: string, points: [pct: number, w: number][], ko: number,
 }
 
 /** My move into this opponent, integrating over what it might be. */
+/** `power`, `hits`: as in a case the battle so far doesn't show (Round after its partner's, Dragon Darts split: worker.ts). */
 export function myMoveInto(
-  fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, mySlot: number, move: string, snap: Snapshot,
+  fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, mySlot: number, move: string, snap: Snapshot, power?: number,
+  hits?: number,
 ): DamageMatchup | null {
   if (!isDamagingMove(gen, move) || DAMAGE_NOT_FROM_STATS.has(toID(move))) return null;
   const set = battle.myTeam[mySlot];
@@ -214,9 +219,9 @@ export function myMoveInto(
   const oppCond = snap.mons[`opp${belief.slot}`] ?? defaultCondition(100);
   // Attacking, an Aegislash is in its Blade forme (Stance Change).
   const attacker = makePokemon(gen, mySpec(gen, fmt, set, myCond), {...myCond, blade: true});
-  const field = makeField(fmt.gameType, snap.field, 'me');
-  const bp = powerFromHistory(gen, battle, {side: 'me', slot: mySlot}, move, undefined, {side: 'opp', slot: belief.slot});
-  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1, bp});
+  const field = makeField(fmt.gameType, snap.field, 'me', {charge: myCond.charged});
+  const bp = power ?? powerFromHistory(gen, battle, {side: 'me', slot: mySlot}, move, undefined, {side: 'opp', slot: belief.slot});
+  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1, bp, hits});
   const {space, post} = belief;
   const memo = new Map<string, {rolls: [number, number][]; ko: number; kind: string}>();
   const kinds = new Map<string, number>();
@@ -255,8 +260,10 @@ export function myMoveInto(
 }
 
 /** An opponent's (possible) move into my Pokémon. */
+/** `power`, `hits`: as in a case the battle so far doesn't show (Round after its partner's, Dragon Darts split: worker.ts). */
 export function oppMoveInto(
-  fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, mySlot: number, move: string, snap: Snapshot,
+  fmt: FormatData, gen: Gen, battle: Battle, belief: MonBelief, mySlot: number, move: string, snap: Snapshot, power?: number,
+  hits?: number,
 ): DamageMatchup | null {
   if (!isDamagingMove(gen, move) || DAMAGE_NOT_FROM_STATS.has(toID(move))) return null;
   const set = battle.myTeam[mySlot];
@@ -268,9 +275,9 @@ export function oppMoveInto(
   const cur = myCond.hp || myMax;
   const sash = !myCond.itemGone && set.item === 'Focus Sash' && cur === myMax;
   let sashSaves = false;
-  const field = makeField(fmt.gameType, snap.field, 'opp');
-  const bp = powerFromHistory(gen, battle, {side: 'opp', slot: belief.slot}, move, undefined, {side: 'me', slot: mySlot});
-  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1, bp});
+  const field = makeField(fmt.gameType, snap.field, 'opp', {charge: oppCond.charged});
+  const bp = power ?? powerFromHistory(gen, battle, {side: 'opp', slot: belief.slot}, move, undefined, {side: 'me', slot: mySlot});
+  const mv = makeMove(gen, move, {targets: fmt.gameType === 'doubles' ? 2 : 1, bp, hits});
   const {space, post} = belief;
   const memo = new Map<string, {rolls: [number, number][]; ko: number; kind: string}>();
   const kinds = new Map<string, number>();
